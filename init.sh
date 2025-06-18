@@ -82,6 +82,38 @@ install_pipx_packages() {
     done
 }
 
+install_tmux_plugins() {
+    if [ ! -d "$HOME/.tmux/plugins/tpm" ]; then
+        echo "Installing Tmux Plugin Manager..."
+        git clone https://github.com/tmux-plugins/tpm ~/.tmux/plugins/tpm
+        echo """# List of plugins
+set -g @plugin 'tmux-plugins/tpm'
+set -g @plugin 'tmux-plugins/tmux-sensible'
+
+# Other examples:
+# set -g @plugin 'github_username/plugin_name'
+# set -g @plugin 'github_username/plugin_name#branch'
+# set -g @plugin 'git@github.com:user/plugin'
+# set -g @plugin 'git@bitbucket.com:user/plugin'
+
+# available plugins: battery, cpu-usage, git, gpu-usage, ram-usage, tmux-ram-usage, network, network-bandwidth, network-ping, ssh-session, attached-clients, network-vpn, weather, time, mpc, spotify-tui, playerctl, kubernetes-context, synchronize-panes
+set -g @dracula-plugins "git cpu-usage ram-usage network-bandwidth battery time"
+set -g @dracula-border-contrast true
+set -g @dracula-show-timezone false
+set -g @dracula-military-time true
+set -g @plugin 'dracula/tmux'
+
+setw -g mouse on
+# Initialize TMUX plugin manager (keep this line at the very bottom of tmux.conf)
+run '~/.tmux/plugins/tpm/tpm'
+""" >>~/.tmux.conf
+        tmux source ~/.tmux.conf
+        echo "Tmux Plugin Manager installed. Press 'prefix + I' to install plugins."
+    else
+        echo "Tmux Plugin Manager is already installed."
+    fi
+}
+
 install() {
     install_nesseraries
     install_tailscale
@@ -89,6 +121,7 @@ install() {
     update_bashrc
     install_pipx
     install_pipx_packages
+    install_tmux_plugins
 
     echo "Installation complete. Please restart your terminal or run 'source ~/.bashrc' to apply changes."
 }
