@@ -4,8 +4,6 @@ check_blobfuse2() {
     if ! command -v blobfuse2 &>/dev/null; then
         echo "blobfuse2 could not be found, installing..."
         install_blobfuse2
-    else
-        echo "blobfuse2 is already installed."
     fi
 }
 
@@ -64,5 +62,5 @@ azstorage:
     blobfuse2 mount "$mount_dir" --config-file "$config_file" --allow-other
 }
 
-install_blobfuse2
+check_blobfuse2
 mount "$@"
