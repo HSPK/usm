@@ -17,6 +17,10 @@ install_blobfuse2() {
 
 # mount.sh file content
 mount() {
+    if [ "$#" -ne 3 ]; then
+        echo "Usage: $0 <mount_dir> <account> <container>"
+        exit 1
+    fi
     local mount_dir="$1"
     local account="$2"
     local container="$3"
