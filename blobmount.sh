@@ -33,8 +33,9 @@ mount() {
   mkdir -p "$(dirname "$config_file")"
   mkdir -p $HOME/blob_tmp/$account-$container
 
+  cache_dir="$HOME/.cache/blobfuse2/$account-$container"
   echo """file_cache:
-    path: $HOME/blob_tmp/$account-$container
+    path: ${cache_dir}
 logging:
   type: syslog
   level: log_debug
@@ -67,7 +68,20 @@ azstorage:
   mkdir -p $mount_dir
   if ! mountpoint -q "$mount_dir"; then
     echo "Mounting $container from $account to $mount_dir"
-    blobfuse2 mount "$mount_dir" --config-file "$config_file" --allow-other
+    # delete cache directory if it exists, prompt user for confirmation
+    if [ -d "$cache_dir" ]; then
+      echo "Cache directory $cache_dir already exists. Deleting it."
+      read -p "Are you sure you want to delete it? (y/n): " confirm
+      if [[ "$confirm" == "y" ]]; then
+        rm -rf "$cache_dir"
+      else
+        exit 1
+      fi
+    else
+      echo "Cache directory $cache_dir does not exist, creating it."
+      mkdir -p "$cache_dir"
+    fi
+    AZCOPY_AUTO_LOGIN_TYPE=AZCLI blobfuse2 mount "$mount_dir" --config-file "$config_file" --allow-other
   else
     echo "$mount_dir is already mounted, only updating the SAS token"
   fi
