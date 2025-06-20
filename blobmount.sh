@@ -61,8 +61,8 @@ azstorage:
     sas: $sas_token""" >"$config_file"
 
   # check the premissions of the mount directory
-  if [ ! -w "$mount_dir" ]; then
-    echo "Mount directory $mount_dir is not writable. Please check permissions."
+  if [ ! -w "$(dirname $mount_dir)" ]; then
+    echo "$(dirname $mount_dir) is not writable. Please check permissions."
     exit 1
   fi
   mkdir -p $mount_dir
