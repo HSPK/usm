@@ -82,6 +82,13 @@ azstorage:
       mkdir -p "$cache_dir"
     fi
     AZCOPY_AUTO_LOGIN_TYPE=AZCLI blobfuse2 mount "$mount_dir" --config-file "$config_file" --allow-other
+    # check if successful
+    if [ $? -ne 0 ]; then
+      echo "Mounting failed. Please check the configuration and try again."
+      exit 1
+    else
+      echo "Mounted $container from $account to $mount_dir successfully."
+    fi
   else
     echo "$mount_dir is already mounted, only updating the SAS token"
   fi
