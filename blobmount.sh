@@ -71,7 +71,7 @@ azstorage:
     # delete cache directory if it exists, prompt user for confirmation
     if [ -d "$cache_dir" ]; then
       echo "Cache directory $cache_dir already exists. Deleting it."
-      read -p "Are you sure you want to delete it? (y/n): " confirm
+      read -p "Are you sure you want to delete it? (y/n): " confirm </dev/tty
       if [[ "$confirm" == "y" ]]; then
         rm -rf "$cache_dir"
       else
