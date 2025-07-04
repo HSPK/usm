@@ -1,13 +1,13 @@
 [project]
 name = "usmo"
-version = "0.1.0"
+version = "0.1.1"
 description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = ["click>=8.2.1", "requests>=2.32.4", "rich>=14.0.0"]
 
 [project.scripts]
-usm = "usm.cli:cli"
+usm = "usmo.cli:cli"
 
 [tool.uv]
 package = true
