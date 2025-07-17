@@ -73,13 +73,14 @@ install_pipx_packages() {
     local packages=(
         "uv"
         "azure-cli"
-        "amlt --pip-args='--index-url https://msrpypi.azurewebsites.net/stable/leloojoo'"
     )
 
     for package in "${packages[@]}"; do
         echo "Installing $package using pipx..."
         pipx install $package
     done
+
+    pipx install amlt --pip-args='--index-url https://msrpypi.azurewebsites.net/stable/leloojoo'
 }
 
 install_tmux_plugins() {
