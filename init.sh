@@ -1,8 +1,9 @@
 install_nesseraries() {
     echo "Installing necessary packages..."
     sudo apt-get update
-    sudo apt-get install build-essential zlib1g-dev libffi-dev libssl-dev libbz2-dev libreadline-dev libsqlite3-dev liblzma-dev libncurses-dev tk-dev python3-dev pipx -y
+    sudo apt-get install build-essential zlib1g-dev libffi-dev libssl-dev libbz2-dev libreadline-dev libsqlite3-dev liblzma-dev libncurses-dev tk-dev python3-dev pipx ffmpeg cmake -y
     sudo apt install autossh neovim zsh tmux -y
+    sudo snap install btop gh -y
 }
 
 install_tailscale() {
@@ -50,10 +51,10 @@ alias gu='nvidia-smi'
 alias v='nvim'
 gmp () {
 	git add .
-	git commit -m $1
+	git commit -m "\$1"
 	git push
 }
-export PATH=/home/$(whoami)/.local/bin:$PATH
+export PATH=/home/\$(whoami)/.local/bin:$PATH
 export AZCOPY_AUTO_LOGIN_TYPE=AZCLI
 """ >>~/.bashrc
 }
@@ -73,6 +74,7 @@ install_pipx_packages() {
     local packages=(
         "uv"
         "azure-cli"
+        "nvitop"
     )
 
     for package in "${packages[@]}"; do
