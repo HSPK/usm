@@ -4,6 +4,7 @@ install_nesseraries() {
     sudo apt-get install build-essential zlib1g-dev libffi-dev libssl-dev libbz2-dev libreadline-dev libsqlite3-dev liblzma-dev libncurses-dev tk-dev python3-dev pipx ffmpeg cmake -y
     sudo apt install autossh neovim zsh tmux -y
     sudo snap install btop gh -y
+    sudo apt install cmake -y
 }
 
 install_tailscale() {
@@ -117,8 +118,30 @@ run '~/.tmux/plugins/tpm/tpm'
     fi
 }
 
+config_nvim() {
+    mkdir -p ~/.config/nvim
+    echo """syntax on
+set tabstop=4
+set expandtab
+set shiftwidth=4
+set backspace=indent,eol,start
+set autoindent
+set showmatch
+set cul
+set number
+set noswapfile
+set hlsearch
+set ignorecase
+set incsearch
+inoremap jk <ESC>
+let mapleader=\"\'\"
+set clipboard+=unnamedplus
+""" >~/config/nvim/init.nvim
+}
+
 install() {
     install_nesseraries
+    config_nvim
     install_tailscale
     install_pyenv
     update_bashrc
