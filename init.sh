@@ -101,7 +101,7 @@ set -g @plugin 'tmux-plugins/tmux-sensible'
 # set -g @plugin 'git@bitbucket.com:user/plugin'
 
 # available plugins: battery, cpu-usage, git, gpu-usage, ram-usage, tmux-ram-usage, network, network-bandwidth, network-ping, ssh-session, attached-clients, network-vpn, weather, time, mpc, spotify-tui, playerctl, kubernetes-context, synchronize-panes
-set -g @dracula-plugins "git cpu-usage ram-usage network-bandwidth battery time"
+set -g @dracula-plugins \"git cpu-usage ram-usage network-bandwidth battery time\"
 set -g @dracula-border-contrast true
 set -g @dracula-show-timezone false
 set -g @dracula-military-time true
@@ -136,7 +136,7 @@ set incsearch
 inoremap jk <ESC>
 let mapleader=\"\'\"
 set clipboard+=unnamedplus
-""" >~/config/nvim/init.nvim
+""" >~/.config/nvim/init.nvim
 }
 
 install() {
