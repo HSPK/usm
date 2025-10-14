@@ -142,7 +142,6 @@ set clipboard+=unnamedplus
 install() {
     install_nesseraries
     config_nvim
-    install_tailscale
     install_pyenv
     update_bashrc
     install_pipx
