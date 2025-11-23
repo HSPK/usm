@@ -1,6 +1,9 @@
+import datetime
 import click
 import yaml
 from pathlib import Path
+import subprocess
+import os
 
 
 def check_blobfuse2_mountpoints():
@@ -17,12 +20,45 @@ def check_blobfuse2_mountpoints():
                 account_name = config["azstorage"]["account-name"]
                 container_name = config["azstorage"]["container"]
 
-                mountpoints[cmdline[2]] = (
-                    f"https://{account_name}.blob.core.windows.net/{container_name}/"
-                )
+                mountpoints[cmdline[2]] = {
+                    "url": f"https://{account_name}.blob.core.windows.net/{container_name}/",
+                    "account_name": account_name,
+                    "container_name": container_name,
+                }
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             continue
     return mountpoints
+
+
+def generate_sas_token(account_name, container_name, expiry_days: int = 7):
+    expiry_date = (
+        datetime.datetime.now(datetime.timezone.utc)
+        + datetime.timedelta(days=expiry_days)
+    ).strftime("%Y-%m-%dT%H:%MZ")
+    command = [
+        "az",
+        "storage",
+        "container",
+        "generate-sas",
+        "--account-name",
+        account_name,
+        "--name",
+        container_name,
+        "--permissions",
+        "rwdlac",
+        "--expiry",
+        expiry_date,
+        "--auth-mode",
+        "login",
+        "--as-user",
+    ]
+
+    result = subprocess.run(command, capture_output=True, text=True, check=True)
+    if result.returncode == 0:
+        sas_token = result.stdout.strip().strip('"')
+        return sas_token
+    else:
+        raise Exception(f"Failed to generate SAS token: {result.stderr}")
 
 
 @click.command(
@@ -32,7 +68,14 @@ def check_blobfuse2_mountpoints():
     )
 )
 @click.argument("args", nargs=-1, type=str)
-def copy(args):
+@click.option(
+    "--use-sas-token",
+    "-s",
+    is_flag=True,
+    default=False,
+    help="Use SAS token for authentication when copying from blobfuse2 mountpoints.",
+)
+def copy(args, use_sas_token: bool = False):
     if len(args) < 2:
         click.echo("Usage: usmo cp [SOURCE] [DESTINATION]")
         return
@@ -44,26 +87,31 @@ def copy(args):
         return any(str(p).startswith(mp) for mp in mountpoints.keys())
 
     def maybe_path(p):
-        for mp, url in mountpoints.items():
+        for mp, mp_info in mountpoints.items():
             if str(p).startswith(mp):
+                url = mp_info["url"]
                 relative_path = str(p)[len(mp) :].lstrip("/")
-                return url + relative_path
+                p = url + relative_path
+                if use_sas_token:
+                    sas_token = generate_sas_token(
+                        mp_info["account_name"], mp_info["container_name"]
+                    )
+                    p += "?" + sas_token
         return p
 
     if not any(is_blobfuse_path(p) for p in paths):
         click.echo(
             "No blobfuse2 mountpoints detected in the provided paths. Handing over to native cp."
         )
-        import subprocess
 
         subprocess.run(["cp", "-r"] + list(args))
         return
 
+    os.environ["AZCOPY_AUTO_LOGIN_TYPE"] = "AZCLI"
     sources = paths[:-1]
     destination = paths[-1]
     if is_blobfuse_path(destination):
         click.echo("Copying files using azcopy...")
-        import subprocess
 
         for src in sources:
             subprocess.run(
@@ -81,7 +129,6 @@ def copy(args):
                 click.echo(
                     f"Copying from blobfuse2 mountpoint {src} to local path {destination} using azcopy..."
                 )
-                import subprocess
 
                 subprocess.run(
                     [
@@ -93,8 +140,6 @@ def copy(args):
                     ]
                 )
             else:
-                import subprocess
-
                 subprocess.run(["cp", "-r", str(src), str(destination)])
 
 
