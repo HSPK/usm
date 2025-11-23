@@ -8,6 +8,30 @@ CACHE_SCRIPT_DIR = CACHE_DIR / "scripts"
 RESOURCE_BASE_URL = "https://raw.githubusercontent.com/hspk/usm/main/"
 
 
+SCRIPTS = [
+    {
+        "name": "init",
+        "description": "Initialize a new machine setup.",
+        "path": "init.sh",
+    },
+    {
+        "name": "blobmount",
+        "description": "Mount a blob storage as a filesystem.",
+        "path": "blobmount.sh",
+    },
+    {
+        "name": "cu122",
+        "description": "Setup CUDA 12.2 environment.",
+        "path": "cu122.sh",
+    },
+    {
+        "name": "cp",
+        "description": "Copy files with blob storage support.",
+        "path": "cp.py",
+    },
+]
+
+
 def download_script(script_name: str) -> Path:
     import requests
 
