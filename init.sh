@@ -1,10 +1,15 @@
 install_nesseraries() {
     echo "Installing necessary packages..."
     sudo apt-get update
+<<<<<<< HEAD
     sudo apt-get install build-essential zlib1g-dev libffi-dev libssl-dev libbz2-dev libreadline-dev libsqlite3-dev liblzma-dev libncurses-dev tk-dev python3-dev pipx ffmpeg cmake -y
     sudo apt install autossh neovim zsh tmux -y
     sudo snap install btop gh -y
     sudo apt install cmake -y
+=======
+    sudo apt-get install build-essential zlib1g-dev libffi-dev libssl-dev libbz2-dev libreadline-dev libsqlite3-dev liblzma-dev libncurses-dev tk-dev python3-dev pipx -y
+    sudo apt install autossh neovim zsh tmux -y
+>>>>>>> 5ffd371 (add init.sh)
 }
 
 install_tailscale() {
@@ -52,10 +57,17 @@ alias gu='nvidia-smi'
 alias v='nvim'
 gmp () {
 	git add .
+<<<<<<< HEAD
 	git commit -m "\$1"
 	git push
 }
 export PATH=/home/\$(whoami)/.local/bin:$PATH
+=======
+	git commit -m $1
+	git push
+}
+export PATH=/home/$(whoami)/.local/bin:$PATH
+>>>>>>> 5ffd371 (add init.sh)
 export AZCOPY_AUTO_LOGIN_TYPE=AZCLI
 """ >>~/.bashrc
 }
@@ -75,15 +87,22 @@ install_pipx_packages() {
     local packages=(
         "uv"
         "azure-cli"
+<<<<<<< HEAD
         "nvitop"
+=======
+        "amlt --pip-args='--index-url https://msrpypi.azurewebsites.net/stable/leloojoo'"
+>>>>>>> 5ffd371 (add init.sh)
     )
 
     for package in "${packages[@]}"; do
         echo "Installing $package using pipx..."
         pipx install $package
     done
+<<<<<<< HEAD
 
     pipx install amlt --pip-args='--index-url https://msrpypi.azurewebsites.net/stable/leloojoo'
+=======
+>>>>>>> 5ffd371 (add init.sh)
 }
 
 install_tmux_plugins() {
@@ -101,7 +120,11 @@ set -g @plugin 'tmux-plugins/tmux-sensible'
 # set -g @plugin 'git@bitbucket.com:user/plugin'
 
 # available plugins: battery, cpu-usage, git, gpu-usage, ram-usage, tmux-ram-usage, network, network-bandwidth, network-ping, ssh-session, attached-clients, network-vpn, weather, time, mpc, spotify-tui, playerctl, kubernetes-context, synchronize-panes
+<<<<<<< HEAD
 set -g @dracula-plugins \"git cpu-usage ram-usage network-bandwidth battery time\"
+=======
+set -g @dracula-plugins "git cpu-usage ram-usage network-bandwidth battery time"
+>>>>>>> 5ffd371 (add init.sh)
 set -g @dracula-border-contrast true
 set -g @dracula-show-timezone false
 set -g @dracula-military-time true
@@ -118,6 +141,7 @@ run '~/.tmux/plugins/tpm/tpm'
     fi
 }
 
+<<<<<<< HEAD
 config_nvim() {
     mkdir -p ~/.config/nvim
     echo """syntax on
@@ -142,6 +166,11 @@ set clipboard+=unnamedplus
 install() {
     install_nesseraries
     config_nvim
+=======
+install() {
+    install_nesseraries
+    install_tailscale
+>>>>>>> 5ffd371 (add init.sh)
     install_pyenv
     update_bashrc
     install_pipx
