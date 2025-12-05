@@ -33,7 +33,9 @@ install_pyenv() {
     fi
 }
 update_bashrc() {
-    echo """alias ll='ls -lh'
+    echo """
+## __USM_INIT_ALIAS_BEGIN__
+alias ll='ls -lh'
 alias gs='git status'
 alias ga='git add'
 alias gm='git commit -m'
@@ -47,7 +49,7 @@ alias tm='tmux -u'
 alias ..='cd ..'
 alias ...='cd ../../'
 alias ca='conda activate'
-alias azl='az login --use-device-code'
+alias azl='az login'
 alias gu='nvidia-smi'
 alias v='nvim'
 gmp () {
@@ -57,6 +59,7 @@ gmp () {
 }
 export PATH=/home/\$(whoami)/.local/bin:$PATH
 export AZCOPY_AUTO_LOGIN_TYPE=AZCLI
+## __USM_INIT_ALIAS_END__
 """ >>~/.bashrc
 }
 
