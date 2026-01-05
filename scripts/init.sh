@@ -1,10 +1,8 @@
 install_nesseraries() {
     echo "Installing necessary packages..."
     sudo apt-get update
-    sudo apt-get install build-essential zlib1g-dev libffi-dev libssl-dev libbz2-dev libreadline-dev libsqlite3-dev liblzma-dev libncurses-dev tk-dev python3-dev pipx ffmpeg cmake -y
-    sudo apt install autossh neovim zsh tmux -y
+    sudo apt-get install build-essential zlib1g-dev libffi-dev libssl-dev libbz2-dev libreadline-dev libsqlite3-dev liblzma-dev libncurses-dev tk-dev python3-dev pipx ffmpeg cmake autossh neovim zsh tmux -y
     sudo snap install btop gh -y
-    sudo apt install cmake -y
 }
 
 install_tailscale() {
@@ -32,35 +30,72 @@ install_pyenv() {
         echo "pyenv is already installed."
     fi
 }
-update_bashrc() {
-    echo """
-## __USM_INIT_ALIAS_BEGIN__
-alias ll='ls -lh'
-alias gs='git status'
-alias ga='git add'
-alias gm='git commit -m'
-alias gb='git branch'
-alias gp='git push && git push --tags'
-alias gc='git checkout'
-alias tn='tmux new -s'
-alias p4='proxychains4'
-alias ta='tmux attach -t'
-alias tm='tmux -u'
-alias ..='cd ..'
-alias ...='cd ../../'
-alias ca='conda activate'
-alias azl='az login'
-alias gu='nvidia-smi'
-alias v='nvim'
+
+update_profile() {
+    # Detect current shell and set profile file
+    local profile_file
+    if [ -n "$ZSH_VERSION" ]; then
+        profile_file="$HOME/.zshrc"
+    elif [ -n "$BASH_VERSION" ]; then
+        profile_file="$HOME/.bashrc"
+    else
+        # Default to bashrc if shell cannot be detected
+        profile_file="$HOME/.bashrc"
+    fi
+
+    echo "Updating profile file: $profile_file"
+
+    # The new aliases content
+    local new_content='## __USM_INIT_ALIAS_BEGIN__
+alias ll="ls -lh"
+alias gs="git status"
+alias ga="git add"
+alias gm="git commit -m"
+alias gb="git branch"
+alias gp="git push && git push --tags"
+alias gc="git checkout"
+alias tn="tmux new -s"
+alias p4="proxychains4"
+alias ta="tmux attach -t"
+alias tm="tmux -u"
+alias ..="cd .."
+alias ...="cd ../../"
+alias ca="conda activate"
+alias azl="az login"
+alias gu="nvidia-smi"
+alias v="nvim"
 gmp () {
 	git add .
-	git commit -m "\$1"
+	git commit -m "$1"
 	git push
 }
-export PATH=/home/\$(whoami)/.local/bin:$PATH
+export PATH=/home/$(whoami)/.local/bin:$PATH
 export AZCOPY_AUTO_LOGIN_TYPE=AZCLI
-## __USM_INIT_ALIAS_END__
-""" >>~/.bashrc
+## __USM_INIT_ALIAS_END__'
+
+    # Check if the markers exist in the profile file
+    if [ -f "$profile_file" ] && grep -q "__USM_INIT_ALIAS_BEGIN__" "$profile_file" && grep -q "__USM_INIT_ALIAS_END__" "$profile_file"; then
+        echo "Found existing USM aliases, replacing..."
+        # Create a temporary file
+        local temp_file=$(mktemp)
+        
+        # Use sed to replace content between markers
+        sed '/## __USM_INIT_ALIAS_BEGIN__/,/## __USM_INIT_ALIAS_END__/d' "$profile_file" > "$temp_file"
+        
+        # Append new content
+        echo "" >> "$temp_file"
+        echo "$new_content" >> "$temp_file"
+        
+        # Replace the original file
+        mv "$temp_file" "$profile_file"
+        echo "USM aliases updated in $profile_file"
+    else
+        echo "No existing USM aliases found, appending..."
+        # Append to the end of the file
+        echo "" >> "$profile_file"
+        echo "$new_content" >> "$profile_file"
+        echo "USM aliases added to $profile_file"
+    fi
 }
 
 install_pipx() {
@@ -143,10 +178,16 @@ set clipboard+=unnamedplus
 }
 
 install() {
+    if [ "$1" == "-p" ]; then
+        update_profile
+        echo "Profile updated. Please restart your terminal or source your profile file to apply changes."
+        return
+    fi
+
     install_nesseraries
     config_nvim
     install_pyenv
-    update_bashrc
+    update_profile
     install_pipx
     install_pipx_packages
     install_tmux_plugins
