@@ -70,6 +70,7 @@ gmp () {
 	git push
 }
 export PATH=/home/$(whoami)/.local/bin:$PATH
+export PATH=/home/$(whoami)/.cargo/bin:$PATH
 export AZCOPY_AUTO_LOGIN_TYPE=AZCLI
 ## __USM_INIT_ALIAS_END__'
 
