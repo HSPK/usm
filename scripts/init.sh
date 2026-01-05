@@ -3,6 +3,8 @@ install_nesseraries() {
     sudo apt-get update
     sudo apt-get install build-essential zlib1g-dev libffi-dev libssl-dev libbz2-dev libreadline-dev libsqlite3-dev liblzma-dev libncurses-dev tk-dev python3-dev pipx ffmpeg cmake autossh neovim zsh tmux -y
     sudo snap install btop gh -y
+    curl -LSfs https://raw.githubusercontent.com/Byron/dua-cli/master/ci/install.sh | \
+        sh -s -- --git Byron/dua-cli --target x86_64-unknown-linux-musl --crate dua --tag v2.29.0
 }
 
 install_tailscale() {
