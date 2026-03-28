@@ -31,6 +31,10 @@ SCRIPTS = {
         "description": "Check Python3 installation and version.",
         "path": "check_py.sh",
     },
+    "inject-alias": {
+        "description": "Insert or update the managed usm alias block in your shell rc file.",
+        "path": "inject_alias.py",
+    },
 }
 
 
@@ -91,7 +95,7 @@ def cli(script, args, help, upgrade, debug):
         if script in SCRIPTS:
             rich.print(f"[bold]{script}[/bold]: {SCRIPTS[script]['description']}")
             rich.print("Usage:")
-            rich.print(f"  usmo {script} [ARGS...]")
+            rich.print(f"  usm {script} [ARGS...]")
         else:
             rich.print("Available scripts:")
             for name, info in SCRIPTS.items():

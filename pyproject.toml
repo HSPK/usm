@@ -1,7 +1,7 @@
 [project]
 name = "usmo"
-version = "0.1.3"
-description = "Add your description here"
+version = "0.1.4"
+description = "Bootstrap machines and run cached utility scripts from one CLI."
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
@@ -14,6 +14,11 @@ dependencies = [
 
 [project.scripts]
 usm = "usmo.cli:cli"
+
+[project.urls]
+Homepage = "https://github.com/HSPK/usm"
+Repository = "https://github.com/HSPK/usm"
+Issues = "https://github.com/HSPK/usm/issues"
 
 [tool.uv]
 package = true

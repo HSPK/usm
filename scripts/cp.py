@@ -77,7 +77,7 @@ def generate_sas_token(account_name, container_name, expiry_days: int = 7):
 )
 def copy(args, use_sas_token: bool = False):
     if len(args) < 2:
-        click.echo("Usage: usmo cp [SOURCE] [DESTINATION]")
+        click.echo("Usage: usm cp [SOURCE] [DESTINATION]")
         return
 
     paths = [Path(p).resolve() for p in args]
