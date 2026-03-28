@@ -54,6 +54,7 @@ jobs:
         with:
           files: dist/*
           generate_release_notes: true
+          prerelease: ${{ contains(github.ref_name, '-') }}
 
   publish-pypi:
     name: Publish to PyPI
@@ -69,12 +70,12 @@ jobs:
           name: dist
           path: dist
 
-      - name: Skip PyPI publish when token is missing
-        if: ${{ env.PYPI_API_TOKEN == '' }}
-        run: echo "PYPI_API_TOKEN is not configured; skipping PyPI publish."
+      - name: Skip PyPI publish when token is missing or tag is a prerelease
+        if: ${{ env.PYPI_API_TOKEN == '' || contains(github.ref_name, '-') }}
+        run: echo "Skipping PyPI publish because the token is missing or the tag is a prerelease."
 
       - name: Publish distributions to PyPI
-        if: ${{ env.PYPI_API_TOKEN != '' }}
+        if: ${{ env.PYPI_API_TOKEN != '' && !contains(github.ref_name, '-') }}
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: dist/
