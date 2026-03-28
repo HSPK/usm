@@ -1,4 +1,5 @@
 import subprocess
+import sys
 from pathlib import Path
 
 import click
@@ -110,12 +111,12 @@ def cli(script, args, help, upgrade, debug):
         script_path = may_download(script, force_download=upgrade)
 
     if script_path.suffix == ".py":
-        command = ["python3", str(script_path)] + list(args)
+        command = [sys.executable, str(script_path)] + list(args)
     else:
         command = ["bash", str(script_path)] + list(args)
     try:
         subprocess.run(command, check=True, text=True)
-    except Exception as e:
+    except (subprocess.CalledProcessError, OSError) as e:
         rich.print(f"[bold red]An error occurred:[/bold red] {str(e)}")
         raise click.ClickException(str(e))
 
