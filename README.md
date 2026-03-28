@@ -1,6 +1,7 @@
 # usm
 
 [![Release](https://img.shields.io/github/v/release/HSPK/usm)](https://github.com/HSPK/usm/releases)
+[![PyPI](https://img.shields.io/pypi/v/usmo)](https://pypi.org/project/usmo/)
 [![Release workflow](https://github.com/HSPK/usm/actions/workflows/release.yml/badge.svg)](https://github.com/HSPK/usm/actions/workflows/release.yml)
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/)
 
@@ -27,6 +28,8 @@ Install from PyPI with `pipx`:
 ```bash
 pipx install usmo
 ```
+
+PyPI package page: <https://pypi.org/project/usmo/>
 
 Or install from a local checkout while developing:
 
