@@ -65,6 +65,7 @@ usm <command> [args...]
 | `usm cu122` | Install NVIDIA driver 535, CUDA 12.2, and Vulkan-related packages on Ubuntu. |
 | `usm cp [--use-sas-token] <source>... <destination>` | Copy between local paths and blobfuse2 mountpoints, delegating to `azcopy` when Azure storage is involved. |
 | `usm check_py` | Print the active Python and pip locations and versions. |
+| `usm sysinfo` | Print system, GPU, CUDA, MPI, and distributed-ML environment summary. |
 | `usm inject-alias [--shell bash|zsh|powershell] [--file PATH]` | Insert or update the managed `usm` alias block in your shell rc file. Defaults to `~/.bashrc` on Unix-like systems and the PowerShell profile on Windows, with interactive shell selection when run in a TTY. You can combine `--shell` with `--file` to control the syntax written to a custom path. |
 
 ## Examples

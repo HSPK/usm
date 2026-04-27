@@ -31,6 +31,10 @@ SCRIPTS = {
         "description": "Check Python3 installation and version.",
         "path": "check_py.sh",
     },
+    "sysinfo": {
+        "description": "Print system, GPU, CUDA, MPI, and distributed-ML environment summary.",
+        "path": "sysinfo.sh",
+    },
     "inject-alias": {
         "description": "Insert or update the managed usm alias block in your shell rc file.",
         "path": "inject_alias.py",
