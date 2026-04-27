@@ -72,10 +72,23 @@ def generate_sas_token(account_name, container_name, expiry_days: int = 7):
     "--use-sas-token",
     "-s",
     is_flag=True,
-    default=False,
+    default=True,
     help="Use SAS token for authentication when copying from blobfuse2 mountpoints.",
 )
-def copy(args, use_sas_token: bool = False):
+@click.option(
+    "--dry-run",
+    "-n",
+    is_flag=True,
+    default=False,
+    help="Only print the commands that would be executed, without actually running them.",
+)
+def copy(args, use_sas_token: bool = True, dry_run: bool = False):
+    def run_cmd(cmd):
+        if dry_run:
+            click.echo(" ".join(str(c) for c in cmd))
+        else:
+            subprocess.run(cmd)
+
     if len(args) < 2:
         click.echo("Usage: usm cp [SOURCE] [DESTINATION]")
         return
@@ -104,7 +117,7 @@ def copy(args, use_sas_token: bool = False):
             "No blobfuse2 mountpoints detected in the provided paths. Handing over to native cp."
         )
 
-        subprocess.run(["cp", "-r"] + list(args))
+        run_cmd(["cp", "-r"] + list(args))
         return
 
     os.environ["AZCOPY_AUTO_LOGIN_TYPE"] = "AZCLI"
@@ -114,7 +127,7 @@ def copy(args, use_sas_token: bool = False):
         click.echo("Copying files using azcopy...")
 
         for src in sources:
-            subprocess.run(
+            run_cmd(
                 [
                     "azcopy",
                     "copy",
@@ -130,7 +143,7 @@ def copy(args, use_sas_token: bool = False):
                     f"Copying from blobfuse2 mountpoint {src} to local path {destination} using azcopy..."
                 )
 
-                subprocess.run(
+                run_cmd(
                     [
                         "azcopy",
                         "copy",
@@ -140,7 +153,7 @@ def copy(args, use_sas_token: bool = False):
                     ]
                 )
             else:
-                subprocess.run(["cp", "-r", str(src), str(destination)])
+                run_cmd(["cp", "-r", str(src), str(destination)])
 
 
 if __name__ == "__main__":
