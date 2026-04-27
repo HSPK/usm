@@ -1,4 +1,5 @@
 import datetime
+import shlex
 import click
 import yaml
 from pathlib import Path
@@ -85,7 +86,7 @@ def generate_sas_token(account_name, container_name, expiry_days: int = 7):
 def copy(args, use_sas_token: bool = True, dry_run: bool = False):
     def run_cmd(cmd):
         if dry_run:
-            click.echo(" ".join(str(c) for c in cmd))
+            click.echo(shlex.join(str(c) for c in cmd))
         else:
             subprocess.run(cmd)
 
