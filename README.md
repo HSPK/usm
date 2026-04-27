@@ -58,6 +58,12 @@ usm <command> [args...]
 
 ## Commands
 
+### Scripts
+
+Scripts are defined in [`scripts/_config.json`](scripts/_config.json) and
+downloaded on first use. Add new commands by editing that file — no Python
+changes required.
+
 | Command | Description |
 | --- | --- |
 | `usm init` | Bootstrap a fresh Ubuntu machine with common packages, shell aliases, `pipx` tools, tmux plugins, and Neovim config. |
@@ -66,7 +72,16 @@ usm <command> [args...]
 | `usm cp [--use-sas-token] <source>... <destination>` | Copy between local paths and blobfuse2 mountpoints, delegating to `azcopy` when Azure storage is involved. |
 | `usm check_py` | Print the active Python and pip locations and versions. |
 | `usm sysinfo` | Print system, GPU, CUDA, MPI, and distributed-ML environment summary. |
-| `usm inject-alias [--shell bash|zsh|powershell] [--file PATH]` | Insert or update the managed `usm` alias block in your shell rc file. Defaults to `~/.bashrc` on Unix-like systems and the PowerShell profile on Windows, with interactive shell selection when run in a TTY. You can combine `--shell` with `--file` to control the syntax written to a custom path. |
+| `usm inject-alias [--shell bash\|zsh\|powershell] [--file PATH]` | Insert or update the managed `usm` alias block in your shell rc file. Defaults to `~/.bashrc` on Unix-like systems and the PowerShell profile on Windows, with interactive shell selection when run in a TTY. You can combine `--shell` with `--file` to control the syntax written to a custom path. |
+
+### Built-in helpers
+
+| Command | Description |
+| --- | --- |
+| `usm list` | List all available commands and their cache status. |
+| `usm update` | Re-download the config and all cached scripts. |
+| `usm clean` | Remove the script cache directory (`~/.cache/usm/scripts`). |
+| `usm version` | Show the installed `usm` version. |
 
 ## Examples
 

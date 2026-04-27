@@ -1,0 +1,32 @@
+{
+  "scripts": {
+    "init": {
+      "description": "Initialize a new machine setup.",
+      "path": "init.sh"
+    },
+    "blobmount": {
+      "description": "Mount a blob storage as a filesystem.",
+      "path": "blobmount.sh"
+    },
+    "cu122": {
+      "description": "Setup CUDA 12.2 environment.",
+      "path": "cu122.sh"
+    },
+    "cp": {
+      "description": "Copy files with blob storage support.",
+      "path": "cp.py"
+    },
+    "check_py": {
+      "description": "Check Python3 installation and version.",
+      "path": "check_py.sh"
+    },
+    "sysinfo": {
+      "description": "Print system, GPU, CUDA, MPI, and distributed-ML environment summary.",
+      "path": "sysinfo.sh"
+    },
+    "inject-alias": {
+      "description": "Insert or update the managed usm alias block in your shell rc file.",
+      "path": "inject_alias.py"
+    }
+  }
+}
