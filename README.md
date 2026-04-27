@@ -178,18 +178,19 @@ uv run usm check_py
 This repository includes a GitHub Actions workflow at
 `.github/workflows/release.yml`.
 
-When you push a tag like `v0.1.4`, GitHub Actions will:
+When you push a tag like `v0.1.8`, GitHub Actions will:
 
-1. Build the source distribution and wheel with `uv build`.
-2. Create or update a GitHub Release for that tag.
-3. Upload the built artifacts to the release page.
-4. Publish to PyPI if the repository secret `PYPI_API_TOKEN` is configured.
+1. Verify the tag matches the version in `pyproject.toml`.
+2. Build the source distribution and wheel with `uv build`.
+3. Create or update a GitHub Release for that tag.
+4. Upload the built artifacts to the release page.
+5. Publish to PyPI via Trusted Publishing (no secrets needed).
 
 Create a new release with:
 
 ```bash
-git tag -a v0.1.4 -m "v0.1.4"
-git push origin v0.1.4
+git tag -a v0.1.8 -m "v0.1.8"
+git push origin v0.1.8
 ```
 
 ## Notes

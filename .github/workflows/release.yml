@@ -25,6 +25,15 @@ jobs:
       - name: Set up uv
         uses: astral-sh/setup-uv@v4
 
+      - name: Verify version matches tag
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          PKG="$(python3 -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")"
+          if [ "$TAG" != "$PKG" ]; then
+            echo "::error::Tag ($TAG) does not match pyproject.toml version ($PKG)"
+            exit 1
+          fi
+
       - name: Build package
         run: uv build
 
@@ -58,11 +67,12 @@ jobs:
 
   publish-pypi:
     name: Publish to PyPI
+    if: ${{ !contains(github.ref_name, '-') }}
     needs: build
     runs-on: ubuntu-latest
-    env:
-      PYPI_API_TOKEN: ${{ secrets.PYPI_API_TOKEN }}
-
+    environment: release
+    permissions:
+      id-token: write
     steps:
       - name: Download build artifacts
         uses: actions/download-artifact@v4
@@ -70,13 +80,7 @@ jobs:
           name: dist
           path: dist
 
-      - name: Skip PyPI publish when token is missing or tag is a prerelease
-        if: ${{ env.PYPI_API_TOKEN == '' || contains(github.ref_name, '-') }}
-        run: echo "Skipping PyPI publish because the token is missing or the tag is a prerelease."
-
       - name: Publish distributions to PyPI
-        if: ${{ env.PYPI_API_TOKEN != '' && !contains(github.ref_name, '-') }}
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: dist/
-          password: ${{ env.PYPI_API_TOKEN }}
