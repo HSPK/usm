@@ -23,6 +23,18 @@ The package installs as `usmo`, but the executable command is `usm`.
 
 ## Installation
 
+### Quick Install (recommended)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/HSPK/usm/main/scripts/install.sh | bash
+```
+
+The script will automatically install `pipx` if needed, then install `usmo` via
+`pipx`. You may need to run `source ~/.bashrc` (or restart your shell) afterwards
+for the `usm` command to become available.
+
+### Manual Install
+
 Install from PyPI with `pipx`:
 
 ```bash
