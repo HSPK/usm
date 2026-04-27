@@ -2,6 +2,9 @@
 test.ipynb
 .DS_Store
 
+# Generated version file (hatch-vcs)
+src/usmo/_version.py
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]

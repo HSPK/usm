@@ -116,9 +116,12 @@ def _cmd_clean() -> None:
 
 def _cmd_version() -> None:
     try:
-        ver = pkg_version("usmo")
-    except Exception:
-        ver = "unknown"
+        from usmo._version import __version__ as ver
+    except ImportError:
+        try:
+            ver = pkg_version("usmo")
+        except Exception:
+            ver = "unknown (editable install without build)"
     rich.print(f"[bold]usm[/bold] version {ver}")
 
 

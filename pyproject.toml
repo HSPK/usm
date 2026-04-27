@@ -1,6 +1,6 @@
 [project]
 name = "usmo"
-version = "0.1.8"
+dynamic = ["version"]
 description = "Bootstrap machines and run cached utility scripts from one CLI."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -24,5 +24,11 @@ Issues = "https://github.com/HSPK/usm/issues"
 package = true
 
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling", "hatch-vcs"]
 build-backend = "hatchling.build"
+
+[tool.hatch.version]
+source = "vcs"
+
+[tool.hatch.build.hooks.vcs]
+version-file = "src/usmo/_version.py"
