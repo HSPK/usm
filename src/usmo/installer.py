@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import shutil
+import subprocess
 import sys
 import tarfile
+import venv
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -106,8 +109,84 @@ def _verify(path: Path, expected: str | None, *, ctx: str) -> None:
 # ---------------------------------------------------------------------------
 
 
+VENVS_DIR_NAME = "venvs"
+
+
 def _package_dir(name: str, version: str) -> Path:
     return registry_mod.PACKAGES_DIR / name / version
+
+
+def _venv_dir(name: str, version: str) -> Path:
+    return registry_mod.CACHE_DIR / VENVS_DIR_NAME / name / version
+
+
+def venv_python(venv_root: Path) -> Path:
+    """Return the path to the Python interpreter inside ``venv_root``."""
+    if os.name == "nt":  # pragma: no cover - Windows
+        return venv_root / "Scripts" / "python.exe"
+    return venv_root / "bin" / "python"
+
+
+def _create_venv(venv_root: Path) -> None:
+    """Create (or recreate) a virtualenv with pip available."""
+    if venv_root.exists():
+        shutil.rmtree(venv_root)
+    venv_root.parent.mkdir(parents=True, exist_ok=True)
+    builder = venv.EnvBuilder(
+        with_pip=True,
+        clear=True,
+        symlinks=(os.name != "nt"),
+    )
+    builder.create(str(venv_root))
+
+
+def _pip_install(venv_root: Path, requirements: list[str]) -> None:
+    """Install ``requirements`` into the venv at ``venv_root``."""
+    if not requirements:
+        return
+    py = venv_python(venv_root)
+    if not py.exists():
+        raise InstallError(
+            f"venv interpreter is missing at {py}; venv creation likely failed"
+        )
+    cmd = [
+        str(py), "-m", "pip", "install",
+        "--disable-pip-version-check", "--no-input", "--quiet",
+        *requirements,
+    ]
+    rich.print(
+        f"[bold green]Installing[/bold green] dependencies into venv: "
+        f"{', '.join(requirements)}"
+    )
+    try:
+        subprocess.run(cmd, check=True)
+    except subprocess.CalledProcessError as exc:
+        raise InstallError(
+            f"pip install failed (exit {exc.returncode}) for: {requirements}"
+        ) from exc
+    except OSError as exc:
+        raise InstallError(f"failed to invoke pip: {exc}") from exc
+
+
+def provision_venv(name: str, version: str, requirements: list[str]) -> Path:
+    """Create a fresh venv for ``name==version`` and install ``requirements``.
+
+    Returns the path to the venv root directory. Exposed as a module-level
+    function so tests can monkey-patch it without touching ``install``.
+    """
+    root = _venv_dir(name, version)
+    _create_venv(root)
+    _pip_install(root, requirements)
+    return root
+
+
+def _gc_old_venvs(name: str, keep_version: str) -> None:
+    parent = _venv_dir(name, keep_version).parent
+    if not parent.exists():
+        return
+    for sibling in parent.iterdir():
+        if sibling.name != keep_version and sibling.is_dir():
+            shutil.rmtree(sibling, ignore_errors=True)
 
 
 def _read_archive_manifest(archive_root: Path) -> dict:
@@ -199,6 +278,7 @@ def install(
         if not entry_path.suffix == ".json":
             entry_path.chmod(entry_path.stat().st_mode | 0o111)
         entry_name = entry_path.name
+        archive_pip_requires: tuple[str, ...] = ()
     elif pv.type == "archive":
         with tarfile.open(downloaded, "r:*") as tar:
             _safe_extract(tar, install_dir)
@@ -228,8 +308,26 @@ def install(
         entry_path.chmod(entry_path.stat().st_mode | 0o111)
         # Store entry relative to install_dir so state.json stays portable-ish.
         entry_name = str(entry_path.relative_to(install_dir))
+        archive_pip_requires = tuple(am.get("pip_requires", ()) or ())
     else:  # pragma: no cover - guarded by manifest validation
         raise InstallError(f"Unknown package type: {pv.type}")
+
+    # Merge pip requirements declared in the index with those declared in the
+    # archive's usm.toml. Index entries win (more authoritative), archive ones
+    # are appended for any extra deps the archive needs.
+    requirements: list[str] = list(pv.pip_requires)
+    for req in archive_pip_requires:
+        if req not in requirements:
+            requirements.append(req)
+
+    venv_root: Path | None = None
+    if requirements:
+        if entry_path.suffix != ".py":
+            raise InstallError(
+                f"{name}=={pv.version} declares pip_requires but entry "
+                f"'{entry_name}' is not a Python script (.py)"
+            )
+        venv_root = provision_venv(name, pv.version, requirements)
 
     upgraded_from = existing.version if existing else None
     state_mod.record(
@@ -240,6 +338,7 @@ def install(
         install_dir=install_dir,
         entry=entry_name,
         sha256=pv.sha256,
+        venv_dir=venv_root,
     )
 
     # Best-effort GC of older versions of the same package.
@@ -247,6 +346,7 @@ def install(
     for sibling in parent.iterdir():
         if sibling != install_dir and sibling.is_dir():
             shutil.rmtree(sibling, ignore_errors=True)
+    _gc_old_venvs(name, pv.version)
 
     return InstallResult(
         name=name,
@@ -270,6 +370,13 @@ def uninstall(name: str) -> bool:
     parent = install_dir.parent
     if parent.exists() and not any(parent.iterdir()):
         parent.rmdir()
+    if pkg.venv_dir:
+        venv_path = Path(pkg.venv_dir)
+        if venv_path.exists():
+            shutil.rmtree(venv_path, ignore_errors=True)
+        venv_parent = venv_path.parent
+        if venv_parent.exists() and not any(venv_parent.iterdir()):
+            venv_parent.rmdir()
     state_mod.remove(name)
     return True
 

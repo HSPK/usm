@@ -64,6 +64,10 @@ class PackageVersion:
     requires_python: str | None = None
     depends: tuple[str, ...] = ()
     entry: str | None = None  # for type=="archive": entry script inside the archive
+    # PEP 508 requirement strings to install in a per-package virtualenv. When
+    # non-empty, ``usm`` provisions a venv at ``~/.cache/usm/venvs/<name>/<ver>``
+    # (much like pipx) and runs the entry script with that venv's interpreter.
+    pip_requires: tuple[str, ...] = ()
 
     def parsed_version(self) -> Version:
         try:
@@ -124,6 +128,7 @@ def _coerce_version_entry(name: str, version: str, raw: Any) -> PackageVersion:
     if not path:
         raise ValueError(f"Missing 'path' for {name}@{version}")
     depends = tuple(raw.get("depends", ()) or ())
+    pip_requires = tuple(raw.get("pip_requires", ()) or ())
     return PackageVersion(
         version=version,
         type=vtype,
@@ -133,6 +138,7 @@ def _coerce_version_entry(name: str, version: str, raw: Any) -> PackageVersion:
         requires_python=raw.get("requires_python"),
         depends=depends,
         entry=raw.get("entry"),
+        pip_requires=pip_requires,
     )
 
 

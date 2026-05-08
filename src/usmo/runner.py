@@ -11,10 +11,21 @@ import click
 import rich
 
 from . import state as state_mod
+from .installer import venv_python
 
 
-def _build_command(entry: Path, args: Sequence[str]) -> list[str]:
+def _build_command(
+    entry: Path, args: Sequence[str], *, venv_dir: Path | None
+) -> list[str]:
     if entry.suffix == ".py":
+        if venv_dir is not None:
+            interpreter = venv_python(venv_dir)
+            if not interpreter.exists():
+                raise click.ClickException(
+                    f"venv interpreter is missing at {interpreter}; "
+                    f"try: usm install --force {entry.name}"
+                )
+            return [str(interpreter), str(entry), *args]
         return [sys.executable, str(entry), *args]
     return ["bash", str(entry), *args]
 
@@ -31,7 +42,8 @@ def run_installed(name: str, args: Sequence[str]) -> int:
         raise click.ClickException(
             f"Entry script for '{name}' is missing at {entry}; try: usm install --force {name}"
         )
-    cmd = _build_command(entry, list(args))
+    venv_dir = Path(pkg.venv_dir) if pkg.venv_dir else None
+    cmd = _build_command(entry, list(args), venv_dir=venv_dir)
     try:
         completed = subprocess.run(cmd, check=False, text=True)
     except OSError as exc:

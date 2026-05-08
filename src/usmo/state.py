@@ -41,6 +41,10 @@ class InstalledPackage:
     entry: str
     sha256: str | None = None
     installed_at: str = ""
+    # Absolute path to the virtualenv directory created for this package
+    # (set when the package declares ``pip_requires``). ``None`` means the
+    # entry runs against the system interpreter / shell.
+    venv_dir: str | None = None
 
 
 def _now() -> str:
@@ -57,8 +61,11 @@ def load(path: Path | None = None) -> dict[str, InstalledPackage]:
             f"Unsupported state schema_version: {data.get('schema_version')}"
         )
     out: dict[str, InstalledPackage] = {}
+    known = {f.name for f in InstalledPackage.__dataclass_fields__.values()}
     for name, info in (data.get("installed") or {}).items():
-        out[name] = InstalledPackage(name=name, **info)
+        # Be tolerant of unknown fields written by newer versions.
+        clean = {k: v for k, v in info.items() if k in known and k != "name"}
+        out[name] = InstalledPackage(name=name, **clean)
     return out
 
 
@@ -85,6 +92,7 @@ def record(
     install_dir: Path,
     entry: str,
     sha256: str | None,
+    venv_dir: Path | None = None,
     path: Path | None = None,
 ) -> InstalledPackage:
     """Add or replace an entry in the state file and return it."""
@@ -98,6 +106,7 @@ def record(
         entry=entry,
         sha256=sha256,
         installed_at=_now(),
+        venv_dir=str(venv_dir) if venv_dir is not None else None,
     )
     state[name] = pkg
     save(state, path)

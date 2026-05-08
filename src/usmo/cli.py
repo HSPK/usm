@@ -307,8 +307,12 @@ def info_cmd(ctx: click.Context, name: str) -> None:
             rich.print(f"  sha256      : {latest.sha256}")
         if latest.depends:
             rich.print(f"  depends     : {', '.join(latest.depends)}")
+        if latest.pip_requires:
+            rich.print(f"  pip_requires: {', '.join(latest.pip_requires)}")
         if inst is not None:
             rich.print(f"  installed   : {inst.version} (in {inst.install_dir})")
+            if inst.venv_dir:
+                rich.print(f"  venv        : {inst.venv_dir}")
         else:
             rich.print("  installed   : [dim]no[/dim]")
         return
@@ -525,30 +529,41 @@ def registry_default_cmd(identifier: str) -> None:
     default="script",
     show_default=True,
 )
+@click.option(
+    "--pip-require",
+    "pip_requires",
+    multiple=True,
+    help=(
+        "PEP 508 requirement (repeat for multiple) to install in a "
+        "per-package virtualenv. Implies the entry must be a .py script."
+    ),
+)
 def publish_cmd(
     file_path: Path,
     name: str,
     version: str,
     description: str,
     pkg_type: str,
+    pip_requires: tuple[str, ...],
 ) -> None:
     """Print a v2 index snippet for FILE_PATH suitable for committing to a registry repo."""
     sha = installer_mod.sha256_of(file_path)
     size = file_path.stat().st_size
+    version_entry: dict = {
+        "type": pkg_type,
+        "path": file_path.name,
+        "sha256": sha,
+        "size": size,
+    }
+    if pip_requires:
+        version_entry["pip_requires"] = list(pip_requires)
     snippet = {
         "schema_version": 2,
         "packages": {
             name: {
                 "description": description,
                 "latest": version,
-                "versions": {
-                    version: {
-                        "type": pkg_type,
-                        "path": file_path.name,
-                        "sha256": sha,
-                        "size": size,
-                    }
-                },
+                "versions": {version: version_entry},
             }
         },
     }

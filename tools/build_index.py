@@ -115,17 +115,19 @@ def build(
         )
         sha = sha256_of(entry)
         size = entry.stat().st_size
+        version_entry: dict = {
+            "type": "script",
+            "path": entry.name,
+            "sha256": sha,
+            "size": size,
+        }
+        pip_requires = per_file_meta.get("pip_requires") or []
+        if pip_requires:
+            version_entry["pip_requires"] = list(pip_requires)
         packages[name] = {
             "description": description,
             "latest": version,
-            "versions": {
-                version: {
-                    "type": "script",
-                    "path": entry.name,
-                    "sha256": sha,
-                    "size": size,
-                }
-            },
+            "versions": {version: version_entry},
         }
 
     payload = {
