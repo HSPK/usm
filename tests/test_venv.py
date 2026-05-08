@@ -6,6 +6,7 @@ monkey-patch ``provision_venv`` to avoid hitting the network. We still
 build a fake venv directory with a working interpreter so the runner
 path is exercised.
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -50,7 +51,7 @@ def _make_fake_venv(root: Path) -> None:
     bin_dir.mkdir(parents=True, exist_ok=True)
     py = bin_dir / ("python.exe" if os.name == "nt" else "python")
     py.write_text(
-        f"#!/usr/bin/env bash\nexec {sys.executable} \"$@\"\n", encoding="utf-8"
+        f'#!/usr/bin/env bash\nexec {sys.executable} "$@"\n', encoding="utf-8"
     )
     py.chmod(py.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
 
@@ -343,9 +344,7 @@ def test_index_pip_requires_takes_precedence_then_archive_extends(
 
     monkeypatch.setattr(installer, "provision_venv", fake_provision)
 
-    installer.install(
-        registry.load_config(), "pkg", debug_local=scripts_dir
-    )
+    installer.install(registry.load_config(), "pkg", debug_local=scripts_dir)
     # 'click' (index) listed first, 'extra-dep' (archive) appended without duping click.
     assert seen["requirements"] == ["click", "extra-dep"]
 

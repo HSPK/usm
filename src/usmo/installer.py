@@ -150,8 +150,13 @@ def _pip_install(venv_root: Path, requirements: list[str]) -> None:
             f"venv interpreter is missing at {py}; venv creation likely failed"
         )
     cmd = [
-        str(py), "-m", "pip", "install",
-        "--disable-pip-version-check", "--no-input", "--quiet",
+        str(py),
+        "-m",
+        "pip",
+        "install",
+        "--disable-pip-version-check",
+        "--no-input",
+        "--quiet",
         *requirements,
     ]
     rich.print(
@@ -178,6 +183,58 @@ def provision_venv(name: str, version: str, requirements: list[str]) -> Path:
     _create_venv(root)
     _pip_install(root, requirements)
     return root
+
+
+def provision_pyproject_venv(
+    name: str, version: str, project_root: Path, *, extras: list[str] | None = None
+) -> Path:
+    """Create a venv and ``pip install`` the project at ``project_root``.
+
+    This is the pipx-style flow: the project's own ``pyproject.toml``
+    (PEP 621) declares ``[project].dependencies`` which pip resolves
+    automatically. Console-scripts declared under ``[project.scripts]``
+    become available in the venv's ``bin/`` directory.
+    """
+    if not (project_root / "pyproject.toml").exists():
+        raise InstallError(
+            f"{project_root} has no pyproject.toml; cannot install as a Python project"
+        )
+    root = _venv_dir(name, version)
+    _create_venv(root)
+    py = venv_python(root)
+    spec = str(project_root)
+    if extras:
+        spec = f"{spec}[{','.join(extras)}]"
+    cmd = [
+        str(py),
+        "-m",
+        "pip",
+        "install",
+        "--disable-pip-version-check",
+        "--no-input",
+        "--quiet",
+        spec,
+    ]
+    rich.print(
+        f"[bold green]Installing[/bold green] {name}=={version} "
+        f"into venv from pyproject.toml"
+    )
+    try:
+        subprocess.run(cmd, check=True)
+    except subprocess.CalledProcessError as exc:
+        raise InstallError(
+            f"pip install of {project_root} failed (exit {exc.returncode})"
+        ) from exc
+    except OSError as exc:
+        raise InstallError(f"failed to invoke pip: {exc}") from exc
+    return root
+
+
+def venv_console_script(venv_root: Path, script: str) -> Path:
+    """Return the path to a console-script ``script`` inside ``venv_root``."""
+    if os.name == "nt":  # pragma: no cover - Windows
+        return venv_root / "Scripts" / f"{script}.exe"
+    return venv_root / "bin" / script
 
 
 def _gc_old_venvs(name: str, keep_version: str) -> None:
@@ -279,13 +336,16 @@ def install(
             entry_path.chmod(entry_path.stat().st_mode | 0o111)
         entry_name = entry_path.name
         archive_pip_requires: tuple[str, ...] = ()
+        archive_root = None
+        archive_console_script: str | None = None
+        archive_has_pyproject = False
     elif pv.type == "archive":
         with tarfile.open(downloaded, "r:*") as tar:
             _safe_extract(tar, install_dir)
         downloaded.unlink()
         # Try to read usm.toml, either at root or in the single top-level dir.
         candidates = [install_dir, *(p for p in install_dir.iterdir() if p.is_dir())]
-        archive_root: Path | None = None
+        archive_root = None
         for cand in candidates:
             if (cand / "usm.toml").exists():
                 archive_root = cand
@@ -295,20 +355,37 @@ def install(
                 f"Could not locate usm.toml in extracted archive for {name}=={pv.version}"
             )
         am = _read_archive_manifest(archive_root)
-        entry_rel = pv.entry or am.get("entry")
-        if not entry_rel:
-            raise InstallError(
-                f"Archive manifest for {name}=={pv.version} is missing 'entry'"
-            )
-        entry_path = archive_root / entry_rel
-        if not entry_path.exists():
-            raise InstallError(
-                f"Declared entry '{entry_rel}' not found inside archive for {name}"
-            )
-        entry_path.chmod(entry_path.stat().st_mode | 0o111)
-        # Store entry relative to install_dir so state.json stays portable-ish.
-        entry_name = str(entry_path.relative_to(install_dir))
+        archive_has_pyproject = (archive_root / "pyproject.toml").exists()
+        archive_console_script = am.get("console_script")
         archive_pip_requires = tuple(am.get("pip_requires", ()) or ())
+
+        # Resolve the entry. ``console_script`` only makes sense when the
+        # archive ships a pyproject.toml (its entry-points come from there).
+        if archive_console_script and not archive_has_pyproject:
+            raise InstallError(
+                f"{name}=={pv.version}: usm.toml declares "
+                f"console_script='{archive_console_script}' but the archive "
+                f"has no pyproject.toml"
+            )
+
+        if archive_console_script:
+            entry_name = ""  # stored separately via console_script
+            entry_path = archive_root  # placeholder; not used directly
+        else:
+            entry_rel = pv.entry or am.get("entry")
+            if not entry_rel:
+                raise InstallError(
+                    f"Archive manifest for {name}=={pv.version} is missing "
+                    f"'entry' (or 'console_script' for pyproject archives)"
+                )
+            entry_path = archive_root / entry_rel
+            if not entry_path.exists():
+                raise InstallError(
+                    f"Declared entry '{entry_rel}' not found inside archive for {name}"
+                )
+            entry_path.chmod(entry_path.stat().st_mode | 0o111)
+            # Store entry relative to install_dir so state.json stays portable-ish.
+            entry_name = str(entry_path.relative_to(install_dir))
     else:  # pragma: no cover - guarded by manifest validation
         raise InstallError(f"Unknown package type: {pv.type}")
 
@@ -321,7 +398,24 @@ def install(
             requirements.append(req)
 
     venv_root: Path | None = None
-    if requirements:
+    if archive_has_pyproject:
+        # pipx-style: install the project itself into the venv. PEP 621
+        # ``[project].dependencies`` are picked up automatically by pip.
+        # ``pip_requires`` from the index/usm.toml are added on top, useful
+        # for optional / out-of-band requirements not declared in pyproject.
+        assert archive_root is not None
+        venv_root = provision_pyproject_venv(name, pv.version, archive_root)
+        if requirements:
+            _pip_install(venv_root, requirements)
+        if archive_console_script:
+            cs_path = venv_console_script(venv_root, archive_console_script)
+            if not cs_path.exists():
+                raise InstallError(
+                    f"{name}=={pv.version}: console_script "
+                    f"'{archive_console_script}' was not installed by pip "
+                    f"(check [project.scripts] in pyproject.toml)"
+                )
+    elif requirements:
         if entry_path.suffix != ".py":
             raise InstallError(
                 f"{name}=={pv.version} declares pip_requires but entry "
@@ -339,6 +433,7 @@ def install(
         entry=entry_name,
         sha256=pv.sha256,
         venv_dir=venv_root,
+        console_script=archive_console_script,
     )
 
     # Best-effort GC of older versions of the same package.
@@ -348,12 +443,17 @@ def install(
             shutil.rmtree(sibling, ignore_errors=True)
     _gc_old_venvs(name, pv.version)
 
+    if archive_console_script and venv_root is not None:
+        result_entry = venv_console_script(venv_root, archive_console_script)
+    else:
+        result_entry = install_dir / entry_name
+
     return InstallResult(
         name=name,
         version=pv.version,
         registry=reg.id,
         install_dir=install_dir,
-        entry=install_dir / entry_name,
+        entry=result_entry,
         upgraded_from=upgraded_from,
     )
 

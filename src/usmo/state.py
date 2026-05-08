@@ -45,6 +45,11 @@ class InstalledPackage:
     # (set when the package declares ``pip_requires``). ``None`` means the
     # entry runs against the system interpreter / shell.
     venv_dir: str | None = None
+    # Name of a console-script (entry point) installed by ``pip install`` of
+    # a ``pyproject.toml``-based archive package. When set, the runner
+    # invokes ``<venv>/bin/<console_script>`` instead of executing
+    # ``entry`` as a file.
+    console_script: str | None = None
 
 
 def _now() -> str:
@@ -93,6 +98,7 @@ def record(
     entry: str,
     sha256: str | None,
     venv_dir: Path | None = None,
+    console_script: str | None = None,
     path: Path | None = None,
 ) -> InstalledPackage:
     """Add or replace an entry in the state file and return it."""
@@ -107,6 +113,7 @@ def record(
         sha256=sha256,
         installed_at=_now(),
         venv_dir=str(venv_dir) if venv_dir is not None else None,
+        console_script=console_script,
     )
     state[name] = pkg
     save(state, path)

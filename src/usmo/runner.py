@@ -11,7 +11,7 @@ import click
 import rich
 
 from . import state as state_mod
-from .installer import venv_python
+from .installer import venv_console_script, venv_python
 
 
 def _build_command(
@@ -37,13 +37,30 @@ def run_installed(name: str, args: Sequence[str]) -> int:
         raise click.ClickException(
             f"'{name}' is not installed. Run: usm install {name}"
         )
-    entry = Path(pkg.install_dir) / pkg.entry
-    if not entry.exists():
-        raise click.ClickException(
-            f"Entry script for '{name}' is missing at {entry}; try: usm install --force {name}"
-        )
     venv_dir = Path(pkg.venv_dir) if pkg.venv_dir else None
-    cmd = _build_command(entry, list(args), venv_dir=venv_dir)
+
+    if pkg.console_script:
+        if venv_dir is None:
+            raise click.ClickException(
+                f"'{name}' is registered with a console_script but no venv; "
+                f"try: usm install --force {name}"
+            )
+        cs = venv_console_script(venv_dir, pkg.console_script)
+        if not cs.exists():
+            raise click.ClickException(
+                f"console_script '{pkg.console_script}' is missing at {cs}; "
+                f"try: usm install --force {name}"
+            )
+        cmd = [str(cs), *list(args)]
+    else:
+        entry = Path(pkg.install_dir) / pkg.entry
+        if not entry.exists():
+            raise click.ClickException(
+                f"Entry script for '{name}' is missing at {entry}; "
+                f"try: usm install --force {name}"
+            )
+        cmd = _build_command(entry, list(args), venv_dir=venv_dir)
+
     try:
         completed = subprocess.run(cmd, check=False, text=True)
     except OSError as exc:

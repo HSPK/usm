@@ -150,11 +150,12 @@ without sha256 verification.
 
 ### Archive packages
 
-For multi-file packages, ship a tarball whose root contains:
+For multi-file packages, ship a tarball whose root contains an
+`usm.toml`:
 
 ```
 <name>-<version>/
-  usm.toml      # entry = "main.sh"
+  usm.toml      # entry = "main.sh"  (or console_script = "myapp")
   main.sh
   ... any other files ...
 ```
@@ -162,6 +163,64 @@ For multi-file packages, ship a tarball whose root contains:
 `usm install` extracts safely (rejecting path-traversal entries) into
 `~/.cache/usm/packages/<name>/<version>/`, marks the entry script
 executable, and records the install in `~/.cache/usm/state.json`.
+
+### Python packages with dependencies (pipx-style)
+
+`usm` runs Python packages that need third-party libraries inside a
+private virtualenv, just like `pipx` — but driven by the package's
+own `pyproject.toml`.
+
+There are two flavours, depending on the shape of the package:
+
+**1. Plain Python script + a few requirements.** Use a `script`-type
+package, list requirements in the index entry's `pip_requires`:
+
+```jsonc
+{
+  "type": "script",
+  "path": "tool.py",
+  "sha256": "...",
+  "pip_requires": ["click>=8", "rich"]
+}
+```
+
+On install, `usm` creates `~/.cache/usm/venvs/<name>/<version>/`, runs
+`pip install` for the listed requirements, and the runner invokes the
+entry with that venv's interpreter.
+
+**2. Real Python project with `pyproject.toml`.** Ship the project as
+an `archive` package. The archive root must contain both an `usm.toml`
+*and* a `pyproject.toml`. Dependencies come from PEP 621 — there is
+no need to repeat them anywhere else:
+
+```toml
+# pyproject.toml inside the archive
+[project]
+name = "ngreet"
+version = "1.0.0"
+dependencies = ["click>=8", "rich"]
+
+[project.scripts]
+ngreet = "ngreet.cli:main"
+```
+
+```toml
+# usm.toml inside the archive
+console_script = "ngreet"
+```
+
+On install, `usm` runs `pip install <archive_root>` inside the venv —
+which installs the project itself plus everything in
+`[project].dependencies` — and the runner invokes
+`<venv>/bin/<console_script>` directly. This is exactly the pipx
+model: every Python package is isolated in its own environment, and
+its declared entry-points become the `usm`-callable commands.
+
+If you prefer not to use a console-script you can still set
+`entry = "main.py"` in `usm.toml` for a `pyproject.toml` archive;
+`pip install` is still run so `[project].dependencies` are available
+to that entry script. `pip_requires` in `usm.toml` and in the index
+entry are still honoured and stack on top of `pyproject` deps.
 
 ### Multiple registries
 
