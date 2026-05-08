@@ -31,7 +31,6 @@ mount() {
   sas_token=$(az storage container generate-sas --account-name "$account" --name "$container" --permissions acdlrw --expiry $expiry_date --auth-mode login --as-user)
 
   mkdir -p "$(dirname "$config_file")"
-  mkdir -p $HOME/blob_tmp/$account-$container
 
   cache_dir="$HOME/.cache/blobfuse2/$account-$container"
   echo """file_cache:
