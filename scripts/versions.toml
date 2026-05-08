@@ -1,0 +1,34 @@
+# Per-script metadata used by tools/build_index.py.
+#
+# Keys are matched first against the file stem (e.g. ``inject_alias``)
+# and then against the published package name. ``name`` overrides the
+# default (which is the file stem).
+
+[init]
+description = "Initialize a new machine setup."
+version = "0.1.0"
+
+[blobmount]
+description = "Mount a blob storage as a filesystem."
+version = "0.1.0"
+
+[cu122]
+description = "Setup CUDA 12.2 environment."
+version = "0.1.0"
+
+[cp]
+description = "Copy files with blob storage support."
+version = "0.1.0"
+
+[check_py]
+description = "Check Python3 installation and version."
+version = "0.1.0"
+
+[sysinfo]
+description = "Print system, GPU, CUDA, MPI, and distributed-ML environment summary."
+version = "0.1.0"
+
+[inject_alias]
+name = "inject-alias"
+description = "Insert or update the managed usm alias block in your shell rc file."
+version = "0.1.0"

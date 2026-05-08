@@ -13,13 +13,27 @@ The package installs as `usmo`, but the executable command is `usm`.
 
 ## Highlights
 
-- One entrypoint for machine setup, storage helpers, and quick admin tasks.
-- On-demand script download and caching under `~/.cache/usm/scripts`.
-- Python subcommands run with the package interpreter, which keeps `pipx` installs
-  isolated and reliable.
-- Local `--debug` mode for iterating on scripts in this repository without
-  downloading from GitHub.
-- Simple release flow driven by Git tags.
+- **Versioned packages**: every command in the registry has a SemVer
+  version, sha256 integrity hash, and is installed into a per-version
+  directory under `~/.cache/usm/packages/<name>/<version>/`.
+- **Multiple registries**: configure additional GitHub-hosted (or any
+  HTTP) registries via `usm registry add`; usm searches them in order.
+- **Two package formats**: a single executable script, or a tar.gz
+  archive containing an `usm.toml` manifest with an `entry =` field
+  plus any number of supporting files.
+- **Persistent install state**: `usm installed`, `usm upgrade`, and
+  `usm uninstall` track exactly which version of each package is
+  present, with the source registry recorded.
+- **Backward-compatible dispatch**: `usm <name> [args...]` still
+  works — if the package is not yet installed it is auto-installed at
+  the latest version before being executed.
+- **Local debug mode**: `usm --debug ...` reads the index and files
+  from `./scripts/` instead of the network, for iterating on a registry
+  repo.
+- **Reproducible publishing**: `tools/build_index.py` regenerates
+  `_config.json` (sha256 + size) from a `scripts/` directory plus a
+  small `versions.toml`. `usm publish FILE --name --version` prints a
+  ready-to-commit JSON snippet for any registry repo.
 
 ## Installation
 
@@ -78,10 +92,99 @@ changes required.
 
 | Command | Description |
 | --- | --- |
-| `usm list` | List all available commands and their cache status. |
-| `usm update` | Re-download the config and all cached scripts. |
-| `usm clean` | Remove the script cache directory (`~/.cache/usm/scripts`). |
+| `usm list` | List packages from every configured registry, with install status. |
+| `usm available <name>` | Show all available versions of a package. |
+| `usm info <name>` | Show package metadata (description, registry, sha256, install dir). |
+| `usm search <query>` | Search package names and descriptions across registries. |
+| `usm installed` | Show locally installed packages and their versions. |
+| `usm install <name>[==<version>]` | Install (or pin) a package; verifies sha256. |
+| `usm uninstall <name>` | Remove a previously installed package. |
+| `usm upgrade [<name>]` | Upgrade one package, or all installed packages, to latest. |
+| `usm run <name> [args...]` | Explicitly run an installed package's entry script. |
+| `usm registry list/add/remove/default` | Manage the registry list in `~/.config/usm/config.toml`. |
+| `usm publish FILE --name --version` | Print a JSON snippet to add to a registry index. |
+| `usm update` | Refresh every registry index and re-install installed packages. |
+| `usm clean` | Remove `~/.cache/usm/` (indices and installed packages). |
 | `usm version` | Show the installed `usm` version. |
+
+For backward compatibility, `usm <package> [args...]` still dispatches
+straight to the package — the package is installed on first use.
+
+## The Package Registry
+
+A registry is a directory (typically a folder in a GitHub repo, served
+via `raw.githubusercontent.com`) containing:
+
+- `_config.json` — the registry index, schema v2.
+- One file per package version: a single shell/Python script, or a
+  tar.gz archive containing an `usm.toml` manifest.
+
+### Index schema (v2)
+
+```jsonc
+{
+  "schema_version": 2,
+  "registry": {"name": "default"},
+  "packages": {
+    "init": {
+      "description": "Initialize a new machine setup.",
+      "latest": "0.1.0",
+      "versions": {
+        "0.1.0": {
+          "type": "script",          // or "archive"
+          "path": "init.sh",         // file inside the registry directory
+          "sha256": "<hex>",
+          "size": 6240,
+          "requires_python": null,
+          "depends": []
+        }
+      }
+    }
+  }
+}
+```
+
+For backward compatibility the CLI still understands the old v1 format
+(`{"scripts": {"name": {"description": "...", "path": "..."}}}`) but
+without sha256 verification.
+
+### Archive packages
+
+For multi-file packages, ship a tarball whose root contains:
+
+```
+<name>-<version>/
+  usm.toml      # entry = "main.sh"
+  main.sh
+  ... any other files ...
+```
+
+`usm install` extracts safely (rejecting path-traversal entries) into
+`~/.cache/usm/packages/<name>/<version>/`, marks the entry script
+executable, and records the install in `~/.cache/usm/state.json`.
+
+### Multiple registries
+
+```
+usm registry add company https://raw.githubusercontent.com/acme/usm-registry/main/
+usm registry default company
+usm registry list
+```
+
+`usm install foo` searches registries in declared order (with the
+preferred registry first), and the first one containing `foo` wins.
+
+### Publishing
+
+1. Add or update your script under `scripts/` (or your registry repo).
+2. Edit `scripts/versions.toml` to bump the version / description.
+3. Run `python tools/build_index.py` — this regenerates
+   `scripts/_config.json` with fresh sha256/size for every script.
+4. Commit and push. Consumers will pick the new version up via
+   `usm update` or on next install.
+
+For one-off or external packages, `usm publish <file> --name N --version V`
+prints a JSON snippet you can paste into the index of any registry.
 
 ## Examples
 
@@ -141,17 +244,25 @@ usm inject-alias --shell powershell --file ~/Documents/PowerShell/Microsoft.Powe
 
 ## How it Works
 
-The CLI keeps a small manifest of commands in `src/usmo/cli.py`.
+The CLI is a `click` group; built-in subcommands take precedence and
+any other token is treated as a package name.
 
-- Shell scripts are executed with `bash`.
-- Python scripts are executed with the current interpreter via `sys.executable`.
-- Remote scripts are downloaded from this repository and cached locally.
-- `--upgrade` forces a fresh download of the selected script.
-- `--debug` bypasses the cache and runs the local file under `scripts/`.
-- Managed alias insertion uses start/end markers so rerunning the command updates the
-  block instead of duplicating it.
-- `inject-alias` is implemented with `click` and supports bash, zsh, and PowerShell
-  profile targets.
+- The configured registries (default: this repo's `scripts/` folder
+  on `main`) are queried for `_config.json` (schema v2). Indices are
+  cached at `~/.cache/usm/index/<registry-id>/`.
+- `usm install` downloads the file referenced by the requested version,
+  verifies its sha256, and (for archives) extracts it under
+  `~/.cache/usm/packages/<name>/<version>/`. The install is recorded in
+  `~/.cache/usm/state.json`.
+- `usm <name> [args...]` looks up the installed entry script and runs
+  it with `bash` (`*.sh`) or `sys.executable` (`*.py`). If the package
+  is not yet installed, latest is auto-installed first.
+- `--upgrade` forces a refetch of the index and a reinstall.
+- `--debug` reads the index and files from `./scripts/` instead of
+  the network — useful when iterating on a registry repo.
+- Tar archives are extracted with `filter='data'` and a manual path
+  traversal check, rejecting members that try to escape the
+  destination directory.
 
 ## Development
 
@@ -171,6 +282,19 @@ Smoke-test the installed command:
 
 ```bash
 uv run usm check_py
+```
+
+Run the unit tests:
+
+```bash
+uv run pytest
+```
+
+Regenerate `scripts/_config.json` after editing any script or
+`scripts/versions.toml`:
+
+```bash
+python tools/build_index.py
 ```
 
 ## Release Flow

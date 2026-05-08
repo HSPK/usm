@@ -1,32 +1,92 @@
 {
-  "scripts": {
-    "init": {
-      "description": "Initialize a new machine setup.",
-      "path": "init.sh"
-    },
+  "packages": {
     "blobmount": {
       "description": "Mount a blob storage as a filesystem.",
-      "path": "blobmount.sh"
-    },
-    "cu122": {
-      "description": "Setup CUDA 12.2 environment.",
-      "path": "cu122.sh"
-    },
-    "cp": {
-      "description": "Copy files with blob storage support.",
-      "path": "cp.py"
+      "latest": "0.1.0",
+      "versions": {
+        "0.1.0": {
+          "path": "blobmount.sh",
+          "sha256": "ae634e5577d90755a89a65c3e54d396ab795491befdff6f35e1cd6cf8e64901b",
+          "size": 2800,
+          "type": "script"
+        }
+      }
     },
     "check_py": {
       "description": "Check Python3 installation and version.",
-      "path": "check_py.sh"
+      "latest": "0.1.0",
+      "versions": {
+        "0.1.0": {
+          "path": "check_py.sh",
+          "sha256": "a382dd3ba4d50ca183c3987843917fd5101c8e356515c3d95f47e2dc3ae67227",
+          "size": 236,
+          "type": "script"
+        }
+      }
     },
-    "sysinfo": {
-      "description": "Print system, GPU, CUDA, MPI, and distributed-ML environment summary.",
-      "path": "sysinfo.sh"
+    "cp": {
+      "description": "Copy files with blob storage support.",
+      "latest": "0.1.0",
+      "versions": {
+        "0.1.0": {
+          "path": "cp.py",
+          "sha256": "338fe6910e953923308416e194738676b68f8fa71c927d3548c48a3ef026c067",
+          "size": 4687,
+          "type": "script"
+        }
+      }
+    },
+    "cu122": {
+      "description": "Setup CUDA 12.2 environment.",
+      "latest": "0.1.0",
+      "versions": {
+        "0.1.0": {
+          "path": "cu122.sh",
+          "sha256": "bb27084cf18200eceeb297ee644c2a2ebef926a41d27a590c70c873343287d8d",
+          "size": 249,
+          "type": "script"
+        }
+      }
+    },
+    "init": {
+      "description": "Initialize a new machine setup.",
+      "latest": "0.1.0",
+      "versions": {
+        "0.1.0": {
+          "path": "init.sh",
+          "sha256": "0923abe4d4650f462de95425a20f707bbb96b1d598c125bac0d0b357cb2be559",
+          "size": 6240,
+          "type": "script"
+        }
+      }
     },
     "inject-alias": {
       "description": "Insert or update the managed usm alias block in your shell rc file.",
-      "path": "inject_alias.py"
+      "latest": "0.1.0",
+      "versions": {
+        "0.1.0": {
+          "path": "inject_alias.py",
+          "sha256": "294217d05bcfa5d8928288755d0fb64824724c164075ee1fd166482bff91b9c9",
+          "size": 8478,
+          "type": "script"
+        }
+      }
+    },
+    "sysinfo": {
+      "description": "Print system, GPU, CUDA, MPI, and distributed-ML environment summary.",
+      "latest": "0.1.0",
+      "versions": {
+        "0.1.0": {
+          "path": "sysinfo.sh",
+          "sha256": "2099b80e2e4addccf9f3dd72fbfd3d61678253af8990dd19c38a0d6b03c7cf76",
+          "size": 6740,
+          "type": "script"
+        }
+      }
     }
-  }
+  },
+  "registry": {
+    "name": "default"
+  },
+  "schema_version": 2
 }
