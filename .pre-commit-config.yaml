@@ -41,3 +41,12 @@ repos:
       - id: check-yaml
       - id: end-of-file-fixer
       - id: trailing-whitespace
+
+  - repo: local
+    hooks:
+      - id: usmo-script-hashes
+        name: Sync script hashes and versions in _config.json
+        entry: python scripts/_check_hashes.py
+        language: system
+        files: '^scripts/.*'
+        pass_filenames: false

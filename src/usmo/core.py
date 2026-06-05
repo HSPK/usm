@@ -7,10 +7,13 @@ this with click + rich.
 
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 import shutil
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from importlib.metadata import version as pkg_version
 from pathlib import Path
@@ -18,9 +21,13 @@ from typing import Callable, Iterable, Iterator
 
 CACHE_DIR = Path.home() / ".cache" / "usm"
 CACHE_SCRIPT_DIR = CACHE_DIR / "scripts"
+LAST_CHECK_FILE = CACHE_DIR / ".last_check"
 CONFIG_FILENAME = "_config.json"
 RESOURCE_BASE_URL = "https://raw.githubusercontent.com/hspk/usm/main/scripts/"
 UV_INSTALL_HINT = "https://docs.astral.sh/uv/#installation"
+AUTO_CHECK_ENV = "USM_AUTO_CHECK_INTERVAL"
+DEFAULT_AUTO_CHECK_INTERVAL = 86400  # 24h, in seconds. 0 disables.
+HASH_PREFIX = "sha256:"
 
 ProgressHook = Callable[[str], None]
 
@@ -66,6 +73,8 @@ class Script:
     description: str = ""
     requirements: tuple[str, ...] = ()
     python: str | None = None
+    version: str | None = None
+    hash: str | None = None
 
     @classmethod
     def from_config(cls, name: str, raw: dict) -> Script:
@@ -75,6 +84,8 @@ class Script:
             description=raw.get("description", ""),
             requirements=tuple(raw.get("requirements") or ()),
             python=raw.get("python"),
+            version=raw.get("version"),
+            hash=raw.get("hash"),
         )
 
     @property
@@ -195,6 +206,188 @@ def resolve_version() -> str:
         return pkg_version("usmo")
     except Exception:
         return "unknown (editable install without build)"
+
+
+# Auto-check ----------------------------------------------------------------
+
+@dataclass(frozen=True)
+class VersionDiff:
+    """A script whose remote version differs from the local cached one."""
+
+    name: str
+    local_version: str | None
+    remote_version: str | None
+
+
+def _script_versions(raw_scripts: dict) -> dict[str, str | None]:
+    return {name: (entry.get("version") if isinstance(entry, dict) else None)
+            for name, entry in raw_scripts.items()}
+
+
+def _load_local_script_versions() -> dict[str, str | None] | None:
+    """Return ``{name: version}`` from the cached _config.json, or None."""
+    path = CACHE_SCRIPT_DIR / CONFIG_FILENAME
+    if not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+    return _script_versions(data.get("scripts", {}))
+
+
+def fetch_remote_script_versions(timeout: float = 5.0) -> dict[str, str | None] | None:
+    """Fetch the remote _config.json (in memory) and return per-script versions."""
+    import requests
+
+    try:
+        r = requests.get(f"{RESOURCE_BASE_URL}{CONFIG_FILENAME}", timeout=timeout)
+    except requests.RequestException:
+        return None
+    if r.status_code != 200:
+        return None
+    try:
+        data = json.loads(r.text)
+    except json.JSONDecodeError:
+        return None
+    return _script_versions(data.get("scripts", {}))
+
+
+def auto_check_interval() -> int:
+    """Read ``USM_AUTO_CHECK_INTERVAL`` (seconds). 0 disables. Invalid → default."""
+    raw = os.environ.get(AUTO_CHECK_ENV)
+    if raw is None or raw == "":
+        return DEFAULT_AUTO_CHECK_INTERVAL
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        return DEFAULT_AUTO_CHECK_INTERVAL
+
+
+def should_auto_check() -> bool:
+    """Return True if the auto-check interval has elapsed (or never ran)."""
+    interval = auto_check_interval()
+    if interval <= 0:
+        return False
+    try:
+        last = LAST_CHECK_FILE.stat().st_mtime
+    except OSError:
+        return True
+    return time.time() - last >= interval
+
+
+def mark_checked() -> None:
+    """Touch the last-check timestamp file."""
+    try:
+        CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        LAST_CHECK_FILE.touch()
+        os.utime(LAST_CHECK_FILE, None)
+    except OSError:
+        pass
+
+
+def check_for_update(*, force: bool = False) -> list[VersionDiff] | None:
+    """If due, fetch the remote manifest and diff per-script versions.
+
+    Returns the list of changed scripts (possibly empty if everything matches),
+    or ``None`` when no check was run (interval not due, cold cache, or
+    network failure). Always touches the last-check timestamp on completion.
+    """
+    if not force and not should_auto_check():
+        return None
+    local = _load_local_script_versions()
+    if local is None:
+        mark_checked()
+        return None
+    remote = fetch_remote_script_versions()
+    mark_checked()
+    if remote is None:
+        return None
+    diffs: list[VersionDiff] = []
+    for name in sorted(set(local) | set(remote)):
+        lv, rv = local.get(name), remote.get(name)
+        if lv != rv:
+            diffs.append(VersionDiff(name=name, local_version=lv, remote_version=rv))
+    return diffs
+
+
+# Manifest hashing & version bump (for pre-commit) --------------------------
+
+def compute_script_hash(path: Path) -> str:
+    """Return ``sha256:<hex>`` for the bytes of *path*."""
+    return HASH_PREFIX + hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _bump_patch(version: str | None) -> str:
+    """Bump the patch segment of an X.Y.Z version. Missing/invalid → 1.0.0."""
+    if not version:
+        return "1.0.0"
+    parts = version.split(".")
+    if len(parts) != 3 or not all(p.isdigit() for p in parts):
+        return "1.0.0"
+    major, minor, patch = (int(p) for p in parts)
+    return f"{major}.{minor}.{patch + 1}"
+
+
+@dataclass(frozen=True)
+class HashChange:
+    name: str
+    old_hash: str | None
+    new_hash: str
+    old_version: str | None
+    new_version: str
+
+
+def audit_manifest(
+    config_path: Path,
+    scripts_dir: Path | None = None,
+) -> tuple[dict, list[HashChange]]:
+    """Inspect the manifest and return ``(updated_data, changes)``.
+
+    For each script entry, compute the current file hash and compare with
+    the declared one. When they differ (or version/hash is missing), bump
+    the patch version and update the hash in the returned data.
+    """
+    scripts_dir = scripts_dir or config_path.parent
+    data = json.loads(config_path.read_text())
+    entries = data.get("scripts", {})
+    changes: list[HashChange] = []
+
+    for name, entry in entries.items():
+        if not isinstance(entry, dict) or "path" not in entry:
+            continue
+        target = scripts_dir / entry["path"]
+        if not target.exists():
+            continue
+        new_hash = compute_script_hash(target)
+        old_hash = entry.get("hash")
+        old_version = entry.get("version")
+        if new_hash == old_hash and old_version:
+            continue
+        new_version = old_version if (new_hash == old_hash and old_version) else \
+            _bump_patch(old_version)
+        entry["version"] = new_version
+        entry["hash"] = new_hash
+        changes.append(HashChange(name, old_hash, new_hash, old_version, new_version))
+
+    return data, changes
+
+
+def sync_manifest(
+    config_path: Path,
+    scripts_dir: Path | None = None,
+    *,
+    check_only: bool = False,
+) -> list[HashChange]:
+    """Update the manifest in place; return the list of changes.
+
+    With ``check_only=True``, the file is not touched. Returned list is empty
+    when everything is in sync.
+    """
+    data, changes = audit_manifest(config_path, scripts_dir)
+    if changes and not check_only:
+        config_path.write_text(json.dumps(data, indent=2) + "\n")
+    return changes
 
 
 # Script execution ----------------------------------------------------------

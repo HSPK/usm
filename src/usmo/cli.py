@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import subprocess
+import sys
 from typing import Callable
 
 import click
@@ -56,7 +57,7 @@ def _cmd_list(scripts: Scripts) -> None:
     _print_overview(scripts)
 
 
-def _cmd_update(_: Scripts) -> None:
+def _cmd_update() -> None:
     for name, updated in core.iter_updates(on_progress=_on_download):
         if updated:
             rich.print(f"  [green]✓[/green] {name}")
@@ -81,10 +82,10 @@ def _cmd_version() -> None:
 _STANDALONE_BUILTINS: dict[str, Callable[[], None]] = {
     "version": _cmd_version,
     "clean": _cmd_clean,
+    "update": _cmd_update,
 }
 _SCRIPTED_BUILTINS: dict[str, Callable[[Scripts], None]] = {
     "list": _cmd_list,
-    "update": _cmd_update,
 }
 
 _BUILTIN_HELP: list[tuple[str, str]] = [
@@ -93,6 +94,44 @@ _BUILTIN_HELP: list[tuple[str, str]] = [
     ("clean", "Remove the script cache directory."),
     ("version", "Show usm version."),
 ]
+
+
+# Auto-check ----------------------------------------------------------------
+
+# Commands that should never trigger an auto-check (cheap built-ins or the
+# update flow itself).
+_AUTO_CHECK_SKIP_COMMANDS = {"update", "clean", "version"}
+
+
+def _maybe_auto_check(command: str | None, debug: bool) -> None:
+    """Probe the remote config for per-script version bumps; prompt to update."""
+    if debug or command in _AUTO_CHECK_SKIP_COMMANDS:
+        return
+    try:
+        diffs = core.check_for_update()
+    except Exception:
+        return  # never fail the user's command on auto-check
+    if not diffs:
+        return
+    rich.print(
+        f"[bold yellow]usm:[/bold yellow] {len(diffs)} script(s) have updates available:"
+    )
+    for d in diffs:
+        local = d.local_version or "[dim]missing[/dim]"
+        remote = d.remote_version or "[dim]removed[/dim]"
+        rich.print(f"  [bold]{d.name}[/bold]: {local} → [cyan]{remote}[/cyan]")
+    if not sys.stdin.isatty():
+        rich.print("[dim]      Run 'usm update' to refresh.[/dim]")
+        return
+    try:
+        proceed = click.confirm("Run 'usm update' now?", default=False)
+    except click.Abort:
+        return
+    if proceed:
+        try:
+            _cmd_update()
+        except Exception as exc:
+            rich.print(f"[yellow]Update failed:[/yellow] {exc}")
 
 
 # Script dispatch -----------------------------------------------------------
@@ -142,6 +181,8 @@ def cli(
     upgrade: bool,
     debug: bool,
 ) -> None:
+    _maybe_auto_check(command, debug)
+
     def _load() -> Scripts:
         try:
             return core.load_scripts(
