@@ -1,104 +1,64 @@
+"""``usm`` CLI: thin click + rich layer over :mod:`usmo.core`."""
+
 from __future__ import annotations
 
-import json
-import shutil
 import subprocess
-import sys
-from importlib.metadata import version as pkg_version
-from pathlib import Path
+from typing import Callable
 
 import click
 import rich
 
-CACHE_DIR = Path.home() / ".cache" / "usm"
-CACHE_SCRIPT_DIR = CACHE_DIR / "scripts"
-CONFIG_FILENAME = "_config.json"
-RESOURCE_BASE_URL = "https://raw.githubusercontent.com/hspk/usm/main/scripts/"
-
-# Built-in commands handled directly by the CLI (not dispatched as scripts).
-BUILTIN_COMMANDS = {"list", "update", "clean", "version"}
+from usmo import core
+from usmo.core import Script, Scripts
 
 
-# ---------------------------------------------------------------------------
-# Config loading
-# ---------------------------------------------------------------------------
+# Presentation helpers ------------------------------------------------------
 
-def _download_file(filename: str) -> Path:
-    """Download a single file from the remote scripts directory."""
-    import requests
-
-    url = f"{RESOURCE_BASE_URL}{filename}"
-    rich.print(f"[bold green]Downloading:[/bold green] {filename} from {url}")
-    response = requests.get(url)
-    if response.status_code != 200:
-        raise Exception(
-            f"Failed to download {filename}. Status code: {response.status_code}"
-        )
-    dest = CACHE_SCRIPT_DIR / filename
-    CACHE_SCRIPT_DIR.mkdir(parents=True, exist_ok=True)
-    dest.write_bytes(response.content)
-    if not filename.endswith(".json"):
-        dest.chmod(dest.stat().st_mode | 0o111)
-    return dest
+def _on_download(filename: str) -> None:
+    rich.print(f"[bold green]Downloading:[/bold green] {filename}")
 
 
-def load_config(
-    *,
-    debug: bool = False,
-    force_download: bool = False,
-) -> dict[str, dict]:
-    """Return the *scripts* mapping from ``_config.json``."""
-    if debug:
-        config_path = Path.cwd() / "scripts" / CONFIG_FILENAME
-    else:
-        config_path = CACHE_SCRIPT_DIR / CONFIG_FILENAME
-        if force_download or not config_path.exists():
-            config_path = _download_file(CONFIG_FILENAME)
-
-    data = json.loads(config_path.read_text())
-    return data.get("scripts", {})
-
-
-def may_download(
-    scripts: dict[str, dict],
-    script_name: str,
-    *,
-    force_download: bool = False,
-) -> Path:
-    script_filename = scripts[script_name]["path"]
-    script_path = CACHE_SCRIPT_DIR / script_filename
-    if force_download or not script_path.exists():
-        return _download_file(script_filename)
-    return script_path
-
-
-# ---------------------------------------------------------------------------
-# Built-in sub-commands
-# ---------------------------------------------------------------------------
-
-def _cmd_list(scripts: dict[str, dict]) -> None:
-    """List all available commands."""
+def _print_overview(scripts: Scripts) -> None:
     rich.print("[bold]Available commands:[/bold]\n")
     rich.print("[bold underline]Scripts:[/bold underline]")
-    for name, info in sorted(scripts.items()):
-        cached = (CACHE_SCRIPT_DIR / info["path"]).exists()
-        status = "[green]cached[/green]" if cached else "[dim]not cached[/dim]"
-        rich.print(f"  [bold]{name:20s}[/bold] {info['description']:50s}  {status}")
+    for name in sorted(scripts):
+        s = scripts[name]
+        status = (
+            "[green]cached[/green]"
+            if s.cached_path.exists()
+            else "[dim]not cached[/dim]"
+        )
+        uv_tag = f"  [cyan]+uv[/cyan]({len(s.requirements)} req)" if s.uses_uv else ""
+        rich.print(
+            f"  [bold]{name:20s}[/bold] {s.description:50s}  {status}{uv_tag}"
+        )
     rich.print("\n[bold underline]Built-in:[/bold underline]")
-    rich.print("  [bold]list[/bold]                 List all available commands.")
-    rich.print("  [bold]update[/bold]               Re-download config and all cached scripts.")
-    rich.print("  [bold]clean[/bold]                Remove the script cache directory.")
-    rich.print("  [bold]version[/bold]              Show usm version.")
+    for name, help_text in _BUILTIN_HELP:
+        rich.print(f"  [bold]{name:20s}[/bold] {help_text}")
 
 
-def _cmd_update(scripts: dict[str, dict]) -> None:
-    """Re-download config and every script that is already cached."""
-    _download_file(CONFIG_FILENAME)
-    scripts = load_config(force_download=True)
-    for name, info in scripts.items():
-        cached = CACHE_SCRIPT_DIR / info["path"]
-        if cached.exists():
-            _download_file(info["path"])
+def _print_script_help(script: Script) -> None:
+    rich.print(f"[bold]{script.name}[/bold]: {script.description}")
+    rich.print("Usage:")
+    rich.print(f"  usm {script.name} [ARGS...]")
+    if script.requirements:
+        rich.print(
+            "Requirements (installed on first run via [cyan]uv[/cyan]): "
+            + ", ".join(script.requirements)
+        )
+    if script.python:
+        rich.print(f"Python: {script.python}")
+
+
+# Built-in commands ---------------------------------------------------------
+
+def _cmd_list(scripts: Scripts) -> None:
+    _print_overview(scripts)
+
+
+def _cmd_update(_: Scripts) -> None:
+    for name, updated in core.iter_updates(on_progress=_on_download):
+        if updated:
             rich.print(f"  [green]✓[/green] {name}")
         else:
             rich.print(f"  [dim]–[/dim] {name} (not cached, skipped)")
@@ -106,28 +66,62 @@ def _cmd_update(scripts: dict[str, dict]) -> None:
 
 
 def _cmd_clean() -> None:
-    """Remove the entire script cache directory."""
-    if CACHE_SCRIPT_DIR.exists():
-        shutil.rmtree(CACHE_SCRIPT_DIR)
-        rich.print(f"[bold green]Removed:[/bold green] {CACHE_SCRIPT_DIR}")
+    removed = core.clean_cache()
+    if removed:
+        rich.print(f"[bold green]Removed:[/bold green] {removed}")
     else:
         rich.print("[dim]Cache directory does not exist – nothing to clean.[/dim]")
 
 
 def _cmd_version() -> None:
+    rich.print(f"[bold]usm[/bold] version {core.resolve_version()}")
+
+
+# Standalone built-ins skip the config load (and its potential download).
+_STANDALONE_BUILTINS: dict[str, Callable[[], None]] = {
+    "version": _cmd_version,
+    "clean": _cmd_clean,
+}
+_SCRIPTED_BUILTINS: dict[str, Callable[[Scripts], None]] = {
+    "list": _cmd_list,
+    "update": _cmd_update,
+}
+
+_BUILTIN_HELP: list[tuple[str, str]] = [
+    ("list", "List all available commands."),
+    ("update", "Re-download config and all cached scripts."),
+    ("clean", "Remove the script cache directory."),
+    ("version", "Show usm version."),
+]
+
+
+# Script dispatch -----------------------------------------------------------
+
+def _run_script(
+    script: Script,
+    args: tuple[str, ...],
+    *,
+    debug: bool,
+    upgrade: bool,
+) -> None:
     try:
-        from usmo._version import __version__ as ver
-    except ImportError:
-        try:
-            ver = pkg_version("usmo")
-        except Exception:
-            ver = "unknown (editable install without build)"
-    rich.print(f"[bold]usm[/bold] version {ver}")
+        core.run_script(
+            script, args, debug=debug, upgrade=upgrade, on_progress=_on_download
+        )
+    except core.MissingUv as exc:
+        rich.print(
+            "[bold red]Error:[/bold red] this command declares "
+            f"requirements ({', '.join(exc.requirements)}) but 'uv' was "
+            "not found on PATH."
+        )
+        rich.print(f"Install uv first: {core.UV_INSTALL_HINT}")
+        raise click.ClickException(str(exc)) from exc
+    except (subprocess.CalledProcessError, OSError) as exc:
+        rich.print(f"[bold red]An error occurred:[/bold red] {exc}")
+        raise click.ClickException(str(exc)) from exc
 
 
-# ---------------------------------------------------------------------------
-# CLI entry-point
-# ---------------------------------------------------------------------------
+# Entry-point ---------------------------------------------------------------
 
 @click.command(
     context_settings=dict(
@@ -139,65 +133,48 @@ def _cmd_version() -> None:
 @click.argument("command", type=str, required=False, default=None)
 @click.argument("args", nargs=-1, type=str)
 @click.option("-h", "--help", "show_help", is_flag=True, help="Show this message and exit.")
-@click.option(
-    "--upgrade", "-U", is_flag=True, help="Upgrade the script before running."
-)
+@click.option("--upgrade", "-U", is_flag=True, help="Upgrade the script before running.")
 @click.option("--debug", is_flag=True, help="Enable debug mode.")
-def cli(command, args, show_help, upgrade, debug):
-    # No command or bare --help → show overview.
-    if command is None or (show_help and command is None):
-        scripts = load_config(debug=debug, force_download=upgrade)
-        _cmd_list(scripts)
+def cli(
+    command: str | None,
+    args: tuple[str, ...],
+    show_help: bool,
+    upgrade: bool,
+    debug: bool,
+) -> None:
+    def _load() -> Scripts:
+        try:
+            return core.load_scripts(
+                debug=debug, force_download=upgrade, on_progress=_on_download
+            )
+        except core.DownloadError as exc:
+            raise click.ClickException(str(exc)) from exc
+
+    if command is None:
+        _print_overview(_load())
         return
 
-    # Built-in commands -------------------------------------------------
-    if command == "version":
-        _cmd_version()
-        return
-    if command == "clean":
-        _cmd_clean()
+    if command in _STANDALONE_BUILTINS:
+        _STANDALONE_BUILTINS[command]()
         return
 
-    # Commands below need the config.
-    scripts = load_config(debug=debug, force_download=upgrade)
+    scripts = _load()
 
-    if command == "list":
-        _cmd_list(scripts)
-        return
-    if command == "update":
-        _cmd_update(scripts)
+    if command in _SCRIPTED_BUILTINS:
+        _SCRIPTED_BUILTINS[command](scripts)
         return
 
-    # Help for a specific script ----------------------------------------
-    if show_help:
-        if command in scripts:
-            rich.print(f"[bold]{command}[/bold]: {scripts[command]['description']}")
-            rich.print("Usage:")
-            rich.print(f"  usm {command} [ARGS...]")
-        else:
-            _cmd_list(scripts)
-        return
-
-    # Dispatch script ---------------------------------------------------
     if command not in scripts:
         rich.print(f"[bold red]Error:[/bold red] Unknown command '{command}'.")
-        _cmd_list(scripts)
+        _print_overview(scripts)
         raise click.ClickException(f"Unknown command '{command}'.")
 
-    if debug:
-        script_path = Path.cwd() / "scripts" / scripts[command]["path"]
-    else:
-        script_path = may_download(scripts, command, force_download=upgrade)
+    script = scripts[command]
+    if show_help:
+        _print_script_help(script)
+        return
 
-    if script_path.suffix == ".py":
-        cmd = [sys.executable, str(script_path)] + list(args)
-    else:
-        cmd = ["bash", str(script_path)] + list(args)
-    try:
-        subprocess.run(cmd, check=True, text=True)
-    except (subprocess.CalledProcessError, OSError) as e:
-        rich.print(f"[bold red]An error occurred:[/bold red] {str(e)}")
-        raise click.ClickException(str(e))
+    _run_script(script, args, debug=debug, upgrade=upgrade)
 
 
 if __name__ == "__main__":
