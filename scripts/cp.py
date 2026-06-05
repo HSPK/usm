@@ -1,10 +1,11 @@
 import datetime
+import os
 import shlex
+import subprocess
+from pathlib import Path
+
 import click
 import yaml
-from pathlib import Path
-import subprocess
-import os
 
 
 def check_blobfuse2_mountpoints():
@@ -78,7 +79,7 @@ def generate_sas_token(account_name, container_name, expiry_days: int = 7):
 )
 @click.option(
     "--dry-run",
-    "-n",
+    "-d",
     is_flag=True,
     default=False,
     help="Only print the commands that would be executed, without actually running them.",
