@@ -17,22 +17,6 @@ install_tailscale() {
     fi
 }
 
-install_pyenv() {
-    if ! command -v pyenv &>/dev/null; then
-        echo "pyenv is not installed. Installing pyenv..."
-        curl -L https://github.com/pyenv/pyenv-installer/raw/master/bin/pyenv-installer | bash
-        echo 'export PATH="$HOME/.pyenv/bin:$PATH"' >>~/.bashrc
-        echo 'eval "$(pyenv init -)"' >>~/.bashrc
-        echo 'eval "$(pyenv virtualenv-init -)"' >>~/.bashrc
-        export PATH="$HOME/.pyenv/bin:$PATH"
-        pyenv install 3.10
-        pyenv global 3.10
-        pip install click PyYaml
-    else
-        echo "pyenv is already installed."
-    fi
-}
-
 update_profile() {
     # Detect current shell and set profile file
     local profile_file
@@ -161,7 +145,8 @@ run '~/.tmux/plugins/tpm/tpm'
 
 config_nvim() {
     mkdir -p ~/.config/nvim
-    echo """syntax on
+    cat > ~/.config/nvim/init.vim <<'EOF'
+syntax on
 set tabstop=4
 set expandtab
 set shiftwidth=4
@@ -175,9 +160,9 @@ set hlsearch
 set ignorecase
 set incsearch
 inoremap jk <ESC>
-let mapleader=\"\'\"
+let mapleader="'"
 set clipboard+=unnamedplus
-""" >~/.config/nvim/init.nvim
+EOF
 }
 
 install() {
