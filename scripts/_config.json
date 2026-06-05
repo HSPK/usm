@@ -14,7 +14,8 @@
     },
     "cp": {
       "description": "Copy files with blob storage support.",
-      "path": "cp.py"
+      "path": "cp.py",
+      "requirements": ["click>=8.2.1", "psutil>=7.1.3", "pyyaml>=6.0.3"]
     },
     "check_py": {
       "description": "Check Python3 installation and version.",
@@ -26,7 +27,13 @@
     },
     "inject-alias": {
       "description": "Insert or update the managed usm alias block in your shell rc file.",
-      "path": "inject_alias.py"
+      "path": "inject_alias.py",
+      "requirements": ["click>=8.2.1"]
+    },
+    "openai-proxy": {
+      "description": "Run a local OpenAI-compatible proxy that forwards to Microsoft TRAPI.",
+      "path": "openai_proxy.py",
+      "requirements": ["azure-identity>=1.17.0"]
     }
   }
 }
