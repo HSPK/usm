@@ -54,10 +54,12 @@
       "description": "Run a local OpenAI-compatible proxy that forwards to Microsoft TRAPI.",
       "path": "openai_proxy.py",
       "requirements": [
-        "azure-identity>=1.17.0"
+        "azure-identity>=1.17.0",
+        "click>=8.2.1",
+        "httpx>=0.27.0"
       ],
-      "version": "1.0.0",
-      "hash": "sha256:c9c3c6e114de3175587d0aa26b6b8a4df28947e2ebf8f0307bd51aa2dc57c326"
+      "version": "1.0.1",
+      "hash": "sha256:4318c70cc084a59202bbdf1bfc1db546dc80268b0ddce36f25589a1cd81718fb"
     }
   }
 }
