@@ -16,10 +16,11 @@ Examples:
 
 from __future__ import annotations
 
-import argparse
 import json
 import sys
 from pathlib import Path
+
+import click
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "src"))
@@ -30,94 +31,97 @@ DEFAULT_CONFIG = REPO_ROOT / "scripts" / "_config.json"
 BUMP_LEVELS = ("patch", "minor", "major")
 
 
-def cmd_list(config_path: Path) -> int:
+def _print_list(config_path: Path) -> int:
     entries = json.loads(config_path.read_text()).get("scripts", {})
     if not entries:
-        print("No scripts defined.")
+        click.echo("No scripts defined.")
         return 0
     width = max(len(n) for n in entries)
-    print(f"  {'name':<{width}}  {'version':<8}  hash")
+    click.echo(f"  {'name':<{width}}  {'version':<8}  hash")
     for name, entry in sorted(entries.items()):
         ver = entry.get("version", "-")
         digest = (entry.get("hash") or "-")[:23]
-        print(f"  {name:<{width}}  {ver:<8}  {digest}")
+        click.echo(f"  {name:<{width}}  {ver:<8}  {digest}")
     return 0
 
 
-def report(changes: list[HashChange], *, config_path: Path, check_only: bool) -> int:
+def _report(
+    changes: list[HashChange], *, config_path: Path, check_only: bool
+) -> int:
     if not changes:
-        print(f"{config_path} is in sync.")
+        click.echo(f"{config_path} is in sync.")
         return 0
     verb = "would update" if check_only else "updated"
-    print(f"{verb} {len(changes)} script entry(ies):")
+    click.echo(f"{verb} {len(changes)} script entry(ies):")
     for c in changes:
-        print(
+        click.echo(
             f"  {c.name}: {c.old_version or '-'} -> {c.new_version}  "
             f"({(c.old_hash or '-')[:19]}... -> {c.new_hash[:19]}...)"
         )
     suffix = (
-        "Run 'python dev/bump_version.py' (without --check) and re-stage "
+        f"Run 'python dev/bump_version.py' (without --check) and re-stage "
         f"{config_path.name}."
         if check_only
         else f"Re-stage {config_path.name} before committing."
     )
-    print(f"\n{suffix}", file=sys.stderr if check_only else sys.stdout)
+    click.echo(f"\n{suffix}", err=check_only)
     return 1
 
 
-def main(argv: list[str] | None = None) -> int:
-    p = argparse.ArgumentParser(
-        description=__doc__.splitlines()[0],
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog=__doc__[__doc__.index("Examples:"):],
-    )
-    p.add_argument(
-        "names", nargs="*", metavar="NAME",
-        help="Script name(s) to operate on. Empty = all entries.",
-    )
-    p.add_argument(
-        "--check", action="store_true",
-        help="Verify only; do not rewrite the manifest. Exit 1 on drift.",
-    )
-    p.add_argument(
-        "--bump", choices=BUMP_LEVELS, default=None,
-        help=(
-            "Force a version bump at this level even if the hash matches. "
-            "Without --bump, drift triggers an auto patch bump."
-        ),
-    )
-    p.add_argument(
-        "--list", action="store_true",
-        help="Print current versions and hashes; do not modify.",
-    )
-    p.add_argument(
-        "--config", type=Path, default=DEFAULT_CONFIG,
-        help=f"Path to _config.json (default: {DEFAULT_CONFIG.relative_to(REPO_ROOT)}).",
-    )
-    p.add_argument(
-        "--scripts-dir", type=Path, default=None,
-        help="Directory holding script files (default: dir of --config).",
-    )
-    args = p.parse_args(argv)
-
-    if args.list:
-        return cmd_list(args.config)
-
+@click.command(
+    context_settings={"show_default": True, "help_option_names": ["-h", "--help"]},
+    help=__doc__.splitlines()[0],
+    epilog=__doc__[__doc__.index("Examples:"):],
+)
+@click.argument("names", nargs=-1, metavar="[NAME ...]")
+@click.option(
+    "--check", is_flag=True,
+    help="Verify only; do not rewrite the manifest. Exit 1 on drift.",
+)
+@click.option(
+    "--bump", type=click.Choice(BUMP_LEVELS), default=None,
+    help="Force a version bump at this level even if the hash matches. "
+         "Without --bump, drift triggers an auto patch bump.",
+)
+@click.option(
+    "--list", "list_mode", is_flag=True,
+    help="Print current versions and hashes; do not modify.",
+)
+@click.option(
+    "--config", "config_path",
+    type=click.Path(path_type=Path, exists=True, dir_okay=False),
+    default=DEFAULT_CONFIG, show_default=True,
+    help="Path to _config.json.",
+)
+@click.option(
+    "--scripts-dir",
+    type=click.Path(path_type=Path, exists=True, file_okay=False),
+    default=None,
+    help="Directory holding script files (default: dir of --config).",
+)
+def cli(
+    names: tuple[str, ...],
+    check: bool,
+    bump: str | None,
+    list_mode: bool,
+    config_path: Path,
+    scripts_dir: Path | None,
+) -> None:
+    if list_mode:
+        sys.exit(_print_list(config_path))
     try:
         changes = sync_manifest(
-            args.config,
-            args.scripts_dir,
-            names=args.names or None,
-            bump=args.bump or "patch",
-            force=bool(args.bump),
-            check_only=args.check,
+            config_path, scripts_dir,
+            names=names or None,
+            bump=bump or "patch",
+            force=bool(bump),
+            check_only=check,
         )
     except KeyError as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return 2
-
-    return report(changes, config_path=args.config, check_only=args.check)
+        click.echo(f"error: {exc}", err=True)
+        sys.exit(2)
+    sys.exit(_report(changes, config_path=config_path, check_only=check))
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    cli()
