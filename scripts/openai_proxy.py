@@ -1,24 +1,39 @@
 #!/usr/bin/env python3
-"""Lightweight OpenAI-compatible proxy that forwards to Microsoft TRAPI.
+"""OpenAI-compatible proxy that forwards to Microsoft TRAPI.
 
-Tokens come from azure-identity (az login / managed identity); paths and
-bodies stream through untouched. Stdlib http.server + httpx, no framework.
+Built on Starlette + uvicorn + httpx.AsyncClient so a single process
+handles hundreds of concurrent SSE streams in one event loop. Tokens
+come from azure.identity.aio (az login / managed identity).
+
+Endpoints
+---------
+* GET  /health          liveness probe (no auth)
+* GET  /status          configured upstream + api-version + api-key state
+* *    /v1/<...>        proxied to TRAPI (all OpenAI-compatible paths)
+* OPT  /<...>           CORS preflight
 """
 
 from __future__ import annotations
 
-import http.server
+import asyncio
 import json
-import socketserver
 import sys
 import urllib.parse
-from typing import Any
+from contextlib import asynccontextmanager
+from typing import Any, Awaitable, Callable
 
 import click
 import httpx
+import uvicorn
+from starlette.applications import Starlette
+from starlette.background import BackgroundTask
+from starlette.requests import Request
+from starlette.responses import JSONResponse, Response, StreamingResponse
+from starlette.routing import Route
 
 SCOPE = "api://trapi/.default"
-# Headers we never relay: transport-level, or replaced by the proxy itself.
+
+# Headers we never relay (transport-level, or replaced by the proxy itself).
 HOP_REQ = {
     "host", "content-length", "connection", "transfer-encoding", "te",
     "keep-alive", "upgrade", "proxy-connection", "trailer", "authorization",
@@ -31,22 +46,10 @@ HOP_RES = {
 # OpenAI paths that map directly under /openai/... (no deployment segment).
 NO_DEPLOY = ("/models", "/files", "/fine_tuning", "/batches", "/threads", "/assistants")
 
+AsyncTokenProvider = Callable[[], Awaitable[str]]
 
-def make_token_provider():
-    """Return a callable that yields a fresh Azure AD bearer token."""
-    try:
-        from azure.identity import (
-            AzureCliCredential, ChainedTokenCredential,
-            ManagedIdentityCredential, get_bearer_token_provider,
-        )
-    except ImportError:
-        click.echo("Missing 'azure-identity'. Install with: pip install azure-identity", err=True)
-        sys.exit(2)
-    return get_bearer_token_provider(
-        ChainedTokenCredential(AzureCliCredential(), ManagedIdentityCredential()),
-        SCOPE,
-    )
 
+# Pure helpers (unit-tested) -----------------------------------------------
 
 def resolve_url(
     path_qs: str, body_obj: Any, base: str, api_version: str, default_dep: str | None
@@ -85,119 +88,174 @@ def check_api_key(headers, expected: str | None) -> bool:
     return expected in (bearer, api_key)
 
 
-def make_handler(cfg: dict):
-    """Build a BaseHTTPRequestHandler closed over the proxy *cfg*."""
+def make_token_provider() -> AsyncTokenProvider:
+    """Return an async callable producing a fresh bearer token.
 
-    class Handler(http.server.BaseHTTPRequestHandler):
-        protocol_version = "HTTP/1.1"
-        server_version = "TrapiProxy/0.1"
+    Uses the sync ``azure-identity`` library (caches internally) and offloads
+    the call to a thread so it doesn't block the event loop. Avoids pulling
+    in ``aiohttp`` (the default transport for ``azure-identity.aio``).
+    """
+    try:
+        from azure.identity import (
+            AzureCliCredential, ChainedTokenCredential,
+            ManagedIdentityCredential, get_bearer_token_provider,
+        )
+    except ImportError:
+        click.echo("Missing 'azure-identity'. Install: pip install azure-identity", err=True)
+        sys.exit(2)
+    sync_provider = get_bearer_token_provider(
+        ChainedTokenCredential(AzureCliCredential(), ManagedIdentityCredential()),
+        SCOPE,
+    )
 
-        def log_message(self, fmt: str, *args: Any) -> None:
-            sys.stderr.write(
-                f"{self.address_string()} - [{self.log_date_time_string()}] {fmt % args}\n"
-            )
+    async def async_provider() -> str:
+        return await asyncio.to_thread(sync_provider)
 
-        def _err(self, status: int, code: str, message: str) -> None:
-            payload = json.dumps({"error": {"code": code, "message": message}}).encode()
+    return async_provider
+
+
+# Route handlers -----------------------------------------------------------
+
+def _json_error(status: int, code: str, message: str) -> JSONResponse:
+    return JSONResponse({"error": {"code": code, "message": message}}, status_code=status)
+
+
+async def health(_request: Request) -> JSONResponse:
+    return JSONResponse({"status": "ok"})
+
+
+async def status_endpoint(request: Request) -> JSONResponse:
+    cfg = request.app.state.cfg
+    return JSONResponse({
+        "endpoint": cfg["endpoint"],
+        "instance": cfg["instance"],
+        "api_version": cfg["api_version"],
+        "default_deployment": cfg["default_dep"],
+        "api_key_required": cfg["api_key"] is not None,
+    })
+
+
+async def options_preflight(request: Request) -> Response:
+    return Response(
+        status_code=204,
+        headers={
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "GET,POST,PUT,PATCH,DELETE,OPTIONS",
+            "Access-Control-Allow-Headers":
+                request.headers.get("Access-Control-Request-Headers", "*"),
+        },
+    )
+
+
+async def proxy(request: Request) -> Response:
+    state = request.app.state
+    cfg = state.cfg
+    raw = await request.body()
+
+    if not check_api_key(request.headers, cfg["api_key"]):
+        return _json_error(401, "invalid_api_key", "Missing or invalid API key.")
+
+    try:
+        body_obj = json.loads(raw) if raw else None
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        body_obj = None
+
+    path_qs = request.url.path + (("?" + request.url.query) if request.url.query else "")
+    url = resolve_url(path_qs, body_obj, cfg["base"], cfg["api_version"], cfg["default_dep"])
+    if url is None:
+        return _json_error(
+            400, "missing_model",
+            "Request must include 'model' or start the proxy with --deployment.",
+        )
+
+    headers = {k: v for k, v in request.headers.items() if k.lower() not in HOP_REQ}
+    try:
+        headers["Authorization"] = "Bearer " + await state.token_provider()
+    except Exception as exc:
+        return _json_error(500, "auth_failed", f"Token error: {exc}")
+
+    try:
+        upstream_req = state.client.build_request(
+            request.method, url, content=raw or None, headers=headers,
+        )
+        upstream_resp = await state.client.send(upstream_req, stream=True)
+    except httpx.HTTPError as exc:
+        return _json_error(502, "upstream_unreachable", str(exc))
+
+    response_headers = {
+        k: v for k, v in upstream_resp.headers.items() if k.lower() not in HOP_RES
+    }
+    if "text/event-stream" in (upstream_resp.headers.get("content-type") or "").lower():
+        response_headers["Cache-Control"] = "no-cache"
+        response_headers["X-Accel-Buffering"] = "no"
+
+    return StreamingResponse(
+        upstream_resp.aiter_raw(),
+        status_code=upstream_resp.status_code,
+        headers=response_headers,
+        background=BackgroundTask(upstream_resp.aclose),
+    )
+
+
+# App factory --------------------------------------------------------------
+
+def build_app(
+    cfg: dict,
+    *,
+    token_provider: AsyncTokenProvider | None = None,
+    client: httpx.AsyncClient | None = None,
+) -> Starlette:
+    """Build the ASGI app.
+
+    Test seams: pass *token_provider* and/or *client* to skip the real
+    azure-identity wiring and outbound httpx.AsyncClient instantiation.
+    """
+
+    @asynccontextmanager
+    async def lifespan(app: Starlette):
+        app.state.cfg = cfg
+        owned_client = client is None
+        app.state.client = client or httpx.AsyncClient(
+            timeout=cfg.get("timeout", 600.0), follow_redirects=True,
+        )
+        app.state.token_provider = token_provider or make_token_provider()
+
+        if not cfg.get("skip_warmup"):
             try:
-                self.send_response(status)
-                self.send_header("Content-Type", "application/json")
-                self.send_header("Content-Length", str(len(payload)))
-                self.send_header("Connection", "close")
-                self.end_headers()
-                self.wfile.write(payload)
-            except (BrokenPipeError, ConnectionResetError):
-                pass
-
-        def _proxy(self) -> None:
-            length = int(self.headers.get("Content-Length") or 0)
-            raw = self.rfile.read(length) if length > 0 else b""
-
-            if not check_api_key(self.headers, cfg["api_key"]):
-                return self._err(401, "invalid_api_key", "Missing or invalid API key.")
-
-            try:
-                body_obj = json.loads(raw) if raw else None
-            except (UnicodeDecodeError, json.JSONDecodeError):
-                body_obj = None
-
-            url = resolve_url(
-                self.path or "/", body_obj,
-                cfg["base"], cfg["api_version"], cfg["default_dep"],
-            )
-            if url is None:
-                return self._err(
-                    400, "missing_model",
-                    "Request must include 'model' or start the proxy with --deployment.",
-                )
-
-            headers = {k: v for k, v in self.headers.items() if k.lower() not in HOP_REQ}
-            try:
-                headers["Authorization"] = "Bearer " + cfg["token_provider"]()
+                await app.state.token_provider()
             except Exception as exc:
-                return self._err(500, "auth_failed", f"Token error: {exc}")
+                click.echo(
+                    f"Failed to acquire Azure AD token: {exc}\n"
+                    f"Try: az login --scope {SCOPE}",
+                    err=True,
+                )
+                raise SystemExit(2)
 
-            try:
-                with cfg["client"].stream(
-                    self.command, url, content=raw or None, headers=headers
-                ) as r:
-                    self._relay(r)
-            except httpx.HTTPError as exc:
-                self._err(502, "upstream_unreachable", str(exc))
+        try:
+            yield
+        finally:
+            if owned_client:
+                await app.state.client.aclose()
 
-        def _relay(self, r: httpx.Response) -> None:
-            is_sse = "text/event-stream" in (r.headers.get("content-type") or "").lower()
-            try:
-                self.send_response(r.status_code)
-                for k, v in r.headers.items():
-                    if k.lower() not in HOP_RES:
-                        self.send_header(k, v)
-                if is_sse:
-                    self.send_header("Cache-Control", "no-cache")
-                    self.send_header("X-Accel-Buffering", "no")
-                    self.send_header("Connection", "close")
-                    self.end_headers()
-                    try:
-                        for chunk in r.iter_raw():
-                            self.wfile.write(chunk)
-                            self.wfile.flush()
-                    except (BrokenPipeError, ConnectionResetError):
-                        pass
-                else:
-                    data = r.read()
-                    self.send_header("Content-Length", str(len(data)))
-                    self.send_header("Connection", "close")
-                    self.end_headers()
-                    self.wfile.write(data)
-            except (BrokenPipeError, ConnectionResetError):
-                pass
-
-        # http.server dispatches via getattr(self, 'do_<VERB>').
-        do_GET = do_POST = do_PUT = do_PATCH = do_DELETE = _proxy  # noqa: N815
-
-        def do_OPTIONS(self) -> None:  # noqa: N802 - CORS preflight
-            self.send_response(204)
-            self.send_header("Access-Control-Allow-Origin", "*")
-            self.send_header("Access-Control-Allow-Methods", "GET,POST,PUT,PATCH,DELETE,OPTIONS")
-            self.send_header(
-                "Access-Control-Allow-Headers",
-                self.headers.get("Access-Control-Request-Headers", "*"),
-            )
-            self.send_header("Content-Length", "0")
-            self.send_header("Connection", "close")
-            self.end_headers()
-
-    return Handler
+    return Starlette(
+        lifespan=lifespan,
+        routes=[
+            Route("/health", health, methods=["GET"]),
+            Route("/status", status_endpoint, methods=["GET"]),
+            Route("/{path:path}", options_preflight, methods=["OPTIONS"]),
+            Route(
+                "/{path:path}", proxy,
+                methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
+            ),
+        ],
+    )
 
 
-class _Server(socketserver.ThreadingMixIn, http.server.HTTPServer):
-    daemon_threads = True
-    allow_reuse_address = True
-
+# CLI ----------------------------------------------------------------------
 
 @click.command(
     context_settings={"show_default": True, "help_option_names": ["-h", "--help"]},
-    help="Lightweight OpenAI-compatible proxy forwarding to Microsoft TRAPI.",
+    help="OpenAI-compatible async proxy forwarding to Microsoft TRAPI.",
 )
 @click.option("--host", default="127.0.0.1", envvar="TRAPI_PROXY_HOST",
               help="Bind address. 0.0.0.0 exposes on all interfaces.")
@@ -211,43 +269,33 @@ class _Server(socketserver.ThreadingMixIn, http.server.HTTPServer):
               help="Default deployment when the request omits 'model'.")
 @click.option("--timeout", type=float, default=600.0, envvar="TRAPI_PROXY_TIMEOUT")
 @click.option("--api-key", default=None, envvar="TRAPI_PROXY_API_KEY",
-              help="If set, clients must present this via 'Authorization: Bearer <key>' "
-                   "or 'api-key' header.")
+              help="If set, clients must present this via 'Authorization: Bearer "
+                   "<key>' or 'api-key' header.")
 @click.option("--skip-token-warmup", is_flag=True,
               help="Skip the upfront token fetch.")
+@click.option("--log-level", default="info", envvar="TRAPI_PROXY_LOG_LEVEL",
+              type=click.Choice(["debug", "info", "warning", "error"]))
 def cli(host, port, instance, api_version, endpoint, deployment, timeout, api_key,
-        skip_token_warmup):
-    tp = make_token_provider()
-    if not skip_token_warmup:
-        try:
-            tp()
-        except Exception as exc:
-            click.echo(f"Failed to acquire token: {exc}\n"
-                       f"Try: az login --scope {SCOPE}", err=True)
-            sys.exit(2)
-
+        skip_token_warmup, log_level):
     base = f"{endpoint.rstrip('/')}/{instance.strip('/')}/openai"
     cfg = {
-        "token_provider": tp,
-        "api_key": api_key or None,
-        "client": httpx.Client(timeout=timeout, follow_redirects=True),
+        "endpoint": endpoint,
+        "instance": instance,
         "base": base,
         "api_version": api_version,
         "default_dep": deployment,
+        "api_key": api_key or None,
+        "timeout": timeout,
+        "skip_warmup": skip_token_warmup,
     }
-    server = _Server((host, port), make_handler(cfg))
     click.echo(
-        f"TRAPI proxy on http://{host}:{port}\n  upstream:    {base}\n"
-        f"  api-version: {api_version}",
+        f"TRAPI proxy on http://{host}:{port}\n"
+        f"  upstream:    {base}\n"
+        f"  api-version: {api_version}\n"
+        f"  endpoints:   /health, /status, /v1/*",
         err=True,
     )
-    try:
-        server.serve_forever()
-    except KeyboardInterrupt:
-        click.echo("\nShutting down...", err=True)
-    finally:
-        server.server_close()
-        cfg["client"].close()
+    uvicorn.run(build_app(cfg), host=host, port=port, log_level=log_level)
 
 
 if __name__ == "__main__":

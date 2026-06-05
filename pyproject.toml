@@ -19,16 +19,21 @@ Repository = "https://github.com/HSPK/usm"
 Issues = "https://github.com/HSPK/usm/issues"
 
 [dependency-groups]
-# Installed by `uv sync` (the default group). Includes pytest plus every
-# runtime dep declared by scripts in scripts/_config.json so contributors
-# can iterate on scripts via `usm --debug <cmd>` without uv-on-the-fly.
+# Installed by `uv sync` (the default group). Includes test infrastructure
+# plus every runtime dep declared by scripts in scripts/_config.json so
+# contributors can iterate on scripts via `usm --debug <cmd>` without
+# uv-on-the-fly per invocation.
 dev = [
     "pytest>=8.0.0",
+    "pytest-asyncio>=0.24.0",
+    "asgi-lifespan>=2.1.0",  # tests only: lets httpx.ASGITransport fire lifespan
     # Mirror of scripts/_config.json requirements (kept in sync manually).
     "azure-identity>=1.17.0",
     "httpx>=0.27.0",
     "psutil>=7.1.3",
     "pyyaml>=6.0.3",
+    "starlette>=0.36.0",
+    "uvicorn>=0.30.0",
 ]
 
 [tool.uv]
@@ -36,6 +41,7 @@ package = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+asyncio_mode = "auto"
 
 [build-system]
 requires = ["hatchling", "hatch-vcs"]

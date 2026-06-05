@@ -56,10 +56,12 @@
       "requirements": [
         "azure-identity>=1.17.0",
         "click>=8.2.1",
-        "httpx>=0.27.0"
+        "httpx>=0.27.0",
+        "starlette>=0.36.0",
+        "uvicorn>=0.30.0"
       ],
-      "version": "1.0.2",
-      "hash": "sha256:c9ce741d0a2dfe9726f39d2a0de8a8d1fb39be7b888e2c8aed201e078929d61e"
+      "version": "1.0.4",
+      "hash": "sha256:99b49299b9bf3c71a11b16479f33259cb6ed58182775f76eabcf093653ececeb"
     }
   }
 }
