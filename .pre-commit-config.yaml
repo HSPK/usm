@@ -44,9 +44,9 @@ repos:
 
   - repo: local
     hooks:
-      - id: usmo-script-hashes
-        name: Sync script hashes and versions in _config.json
-        entry: python scripts/_check_hashes.py
+      - id: usmo-bump-version
+        name: Sync script versions and hashes in _config.json
+        entry: python dev/bump_version.py
         language: system
         files: '^scripts/.*'
         pass_filenames: false
