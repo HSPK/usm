@@ -145,41 +145,124 @@ run '~/.tmux/plugins/tpm/tpm'
 
 config_nvim() {
     mkdir -p ~/.config/nvim
+    mkdir -p ~/.local/share/nvim/undo
     cat > ~/.config/nvim/init.vim <<'EOF'
+" --- Visual ---
 syntax on
-set tabstop=4
-set expandtab
-set shiftwidth=4
-set backspace=indent,eol,start
-set autoindent
-set showmatch
-set cul
 set number
-set noswapfile
+set relativenumber
+set cursorline
+set termguicolors
+set showmatch
+set scrolloff=5
+set sidescrolloff=8
+set signcolumn=yes
+set list listchars=tab:»·,trail:·,nbsp:␣
+
+" --- Indentation ---
+set tabstop=4
+set shiftwidth=4
+set expandtab
+set autoindent
+set smartindent
+set backspace=indent,eol,start
+
+" --- Search ---
 set hlsearch
-set ignorecase
 set incsearch
-inoremap jk <ESC>
-let mapleader="'"
+set ignorecase
+set smartcase
+set inccommand=split
+
+" --- Editing / Buffers / Windows ---
+set hidden
+set confirm
+set noswapfile
+set undofile
+set undodir=~/.local/share/nvim/undo//
+set splitbelow
+set splitright
+set mouse=a
+set timeoutlen=500
 set clipboard+=unnamedplus
+filetype plugin indent on
+
+" --- Keymaps ---
+let mapleader="'"
+inoremap jk <ESC>
+nnoremap <leader>w :w<CR>
+nnoremap <leader>q :q<CR>
+nnoremap <leader>h :nohlsearch<CR>
+nnoremap <C-h> <C-w>h
+nnoremap <C-j> <C-w>j
+nnoremap <C-k> <C-w>k
+nnoremap <C-l> <C-w>l
+tnoremap <Esc> <C-\><C-n>
+EOF
+    echo "Wrote ~/.config/nvim/init.vim"
+}
+
+usage() {
+    cat <<'EOF'
+Usage: usm init [SUBCOMMAND ...]
+
+With no SUBCOMMAND, runs the full bootstrap pipeline.
+Otherwise runs each named step in order.
+
+Subcommands:
+  all          Full bootstrap (essentials, nvim, profile, uv, tools, tmux)
+  essentials   apt + snap packages + dua-cli
+  nvim         Write ~/.config/nvim/init.vim
+  profile      Insert/update the managed alias block in ~/.bashrc or ~/.zshrc
+  uv           Install uv via the official installer
+  tools        Install uv-managed tools (azure-cli, nvitop, amlt)
+  tmux         Install tmux plugin manager and write ~/.tmux.conf
+  tailscale    Install tailscale and bring up the node
+
+  -p           Alias for 'profile' (back-compat)
+  -h, --help   Show this help
+
+Examples:
+  usm init                 # full bootstrap
+  usm init nvim            # only neovim config
+  usm init nvim profile    # multiple steps in order
 EOF
 }
 
-install() {
-    if [ "$1" == "-p" ]; then
-        update_profile
-        echo "Profile updated. Please restart your terminal or source your profile file to apply changes."
-        return
-    fi
-
-    install_nesseraries
-    config_nvim
-    update_profile
-    install_uv
-    install_uv_tools
-    install_tmux_plugins
-
-    echo "Installation complete. Please restart your terminal or run 'source ~/.bashrc' to apply changes."
+run_step() {
+    case "$1" in
+        all)
+            install_nesseraries
+            config_nvim
+            update_profile
+            install_uv
+            install_uv_tools
+            install_tmux_plugins
+            echo "Installation complete. Please restart your terminal or run 'source ~/.bashrc' to apply changes."
+            ;;
+        essentials)   install_nesseraries ;;
+        nvim)         config_nvim ;;
+        profile|-p)   update_profile ;;
+        uv)           install_uv ;;
+        tools)        install_uv_tools ;;
+        tmux)         install_tmux_plugins ;;
+        tailscale)    install_tailscale ;;
+        -h|--help)    usage ;;
+        *)
+            echo "Unknown subcommand: $1" >&2
+            usage >&2
+            return 2 ;;
+    esac
 }
 
-install "$@"
+main() {
+    if [ $# -eq 0 ]; then
+        run_step all
+        return
+    fi
+    for step in "$@"; do
+        run_step "$step" || return $?
+    done
+}
+
+main "$@"
