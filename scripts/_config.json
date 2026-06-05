@@ -58,8 +58,8 @@
         "click>=8.2.1",
         "httpx>=0.27.0"
       ],
-      "version": "1.0.1",
-      "hash": "sha256:4318c70cc084a59202bbdf1bfc1db546dc80268b0ddce36f25589a1cd81718fb"
+      "version": "1.0.2",
+      "hash": "sha256:c9ce741d0a2dfe9726f39d2a0de8a8d1fb39be7b888e2c8aed201e078929d61e"
     }
   }
 }
