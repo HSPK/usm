@@ -1,7 +1,7 @@
 install_nesseraries() {
     echo "Installing necessary packages..."
     sudo apt-get update
-    sudo apt-get install build-essential zlib1g-dev libffi-dev libssl-dev libbz2-dev libreadline-dev libsqlite3-dev liblzma-dev libncurses-dev tk-dev python3-dev pipx ffmpeg cmake autossh neovim zsh tmux -y
+    sudo apt-get install build-essential zlib1g-dev libffi-dev libssl-dev libbz2-dev libreadline-dev libsqlite3-dev liblzma-dev libncurses-dev tk-dev python3-dev ffmpeg cmake autossh neovim zsh tmux -y
     sudo snap install btop gh -y
     curl -LSfs https://raw.githubusercontent.com/Byron/dua-cli/master/ci/install.sh | \
         sh -s -- --git Byron/dua-cli --target x86_64-unknown-linux-musl --crate dua --tag v2.29.0
@@ -101,30 +101,30 @@ export AZCOPY_AUTO_LOGIN_TYPE=AZCLI
     fi
 }
 
-install_pipx() {
-    if ! command -v pipx &>/dev/null; then
-        echo "pipx is not installed. Installing pipx..."
-        sudo apt install pipx -y
-        pipx ensurepath
+install_uv() {
+    if ! command -v uv &>/dev/null; then
+        echo "uv is not installed. Installing uv..."
+        curl -LsSf https://astral.sh/uv/install.sh | sh
+        export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
+        uv tool update-shell 2>/dev/null || true
     else
-        echo "pipx is already installed."
+        echo "uv is already installed."
     fi
 }
 
-install_pipx_packages() {
-    export PATH="$HOME/.local/bin:$PATH"
+install_uv_tools() {
+    export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
     local packages=(
-        "uv"
         "azure-cli"
         "nvitop"
     )
 
     for package in "${packages[@]}"; do
-        echo "Installing $package using pipx..."
-        pipx install $package
+        echo "Installing $package using uv tool..."
+        uv tool install --upgrade "$package"
     done
 
-    pipx install amlt --pip-args='--index-url https://msrpypi.azurewebsites.net/stable/leloojoo'
+    uv tool install --upgrade amlt --index-url https://msrpypi.azurewebsites.net/stable/leloojoo
 }
 
 install_tmux_plugins() {
@@ -189,10 +189,9 @@ install() {
 
     install_nesseraries
     config_nvim
-    install_pyenv
     update_profile
-    install_pipx
-    install_pipx_packages
+    install_uv
+    install_uv_tools
     install_tmux_plugins
 
     echo "Installation complete. Please restart your terminal or run 'source ~/.bashrc' to apply changes."

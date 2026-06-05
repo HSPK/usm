@@ -15,8 +15,8 @@ The package installs as `usmo`, but the executable command is `usm`.
 
 - One entrypoint for machine setup, storage helpers, and quick admin tasks.
 - On-demand script download and caching under `~/.cache/usm/scripts`.
-- Python subcommands run with the package interpreter, which keeps `pipx` installs
-  isolated and reliable.
+- Python subcommands run with the package interpreter, which keeps `uv tool`
+  installs isolated and reliable.
 - Local `--debug` mode for iterating on scripts in this repository without
   downloading from GitHub.
 - Simple release flow driven by Git tags.
@@ -29,16 +29,20 @@ The package installs as `usmo`, but the executable command is `usm`.
 curl -fsSL https://raw.githubusercontent.com/HSPK/usm/main/scripts/install.sh | bash
 ```
 
-The script will automatically install `pipx` if needed, then install `usmo` via
-`pipx`. You may need to run `source ~/.bashrc` (or restart your shell) afterwards
+The script will automatically install `uv` (via the official installer at
+<https://astral.sh/uv>) if needed, then install `usmo` via `uv tool install`.
+You may need to run `source ~/.bashrc` (or restart your shell) afterwards
 for the `usm` command to become available.
 
 ### Manual Install
 
-Install from PyPI with `pipx`:
+Install [uv](https://docs.astral.sh/uv/#installation) first, then install
+`usmo` as a uv-managed tool:
 
 ```bash
-pipx install usmo
+uv tool install usmo
+# upgrade later with:
+uv tool install --upgrade usmo
 ```
 
 PyPI package page: <https://pypi.org/project/usmo/>
@@ -47,7 +51,7 @@ Or install from a local checkout while developing:
 
 ```bash
 uv sync
-pipx install --force .
+uv tool install --force .
 ```
 
 After installation, the CLI is available as:
@@ -66,7 +70,7 @@ changes required.
 
 | Command | Description |
 | --- | --- |
-| `usm init` | Bootstrap a fresh Ubuntu machine with common packages, shell aliases, `pipx` tools, tmux plugins, and Neovim config. |
+| `usm init` | Bootstrap a fresh Ubuntu machine with common packages, shell aliases, `uv` tools, tmux plugins, and Neovim config. |
 | `usm blobmount <mount_dir> <account> <container>` | Install `blobfuse2` if needed, generate a SAS token from your Azure CLI login, and mount a blob container locally. |
 | `usm cu122` | Install NVIDIA driver 535, CUDA 12.2, and Vulkan-related packages on Ubuntu. |
 | `usm cp [--use-sas-token] <source>... <destination>` | Copy between local paths and blobfuse2 mountpoints, delegating to `azcopy` when Azure storage is involved. |
