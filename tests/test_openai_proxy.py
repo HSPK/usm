@@ -21,11 +21,11 @@ import pytest
 import uvicorn
 from asgi_lifespan import LifespanManager
 
-import openai_proxy as oxp
 from openai_proxy import build_app, check_api_key, resolve_url
 
 
 # --- Unit: resolve_url -----------------------------------------------------
+
 
 class TestResolveUrl:
     def _u(self, **kwargs):
@@ -45,24 +45,34 @@ class TestResolveUrl:
         )
 
     def test_no_v1_prefix_still_works(self):
-        assert "/deployments/gpt-4/chat/completions" in self._u(path_qs="/chat/completions")
+        assert "/deployments/gpt-4/chat/completions" in self._u(
+            path_qs="/chat/completions"
+        )
 
     def test_models_no_deployment(self):
         assert self._u(path_qs="/v1/models", body_obj=None) == (
             "https://x/openai/models?api-version=2024-10-21"
         )
 
-    @pytest.mark.parametrize("path", [
-        "/v1/files/abc", "/v1/fine_tuning/jobs", "/v1/batches",
-        "/v1/threads/x", "/v1/assistants/y",
-    ])
+    @pytest.mark.parametrize(
+        "path",
+        [
+            "/v1/files/abc",
+            "/v1/fine_tuning/jobs",
+            "/v1/batches",
+            "/v1/threads/x",
+            "/v1/assistants/y",
+        ],
+    )
     def test_other_no_deployment_paths(self, path):
         url = self._u(path_qs=path, body_obj=None)
         assert "/deployments" not in url
         assert path.replace("/v1", "") in url
 
     def test_default_deployment_when_body_missing_model(self):
-        assert "/deployments/default-d/" in self._u(body_obj={}, default_dep="default-d")
+        assert "/deployments/default-d/" in self._u(
+            body_obj={}, default_dep="default-d"
+        )
 
     def test_missing_model_returns_none(self):
         assert self._u(body_obj={}) is None
@@ -88,48 +98,79 @@ class TestResolveUrl:
     def test_falls_back_to_deployment_field(self):
         assert "/deployments/m2/" in self._u(body_obj={"deployment": "m2"})
 
+    @pytest.mark.parametrize(
+        "evil_path",
+        [
+            "/v1/chat/../../../../../etc/admin-only",
+            "/v1/chat/../management/secrets",
+            "/v1/x/%2e%2e/%2e%2e/etc/passwd",
+            "/v1/x/..%2fadmin",
+            "/v1/..",
+            "/v1/foo/..",
+        ],
+    )
+    def test_rejects_path_traversal(self, evil_path):
+        # Authenticated clients must not be able to escape the deployment
+        # scope via `..` segments — httpx.Request would RFC-3986-normalize
+        # them away and leak the AAD bearer token to arbitrary upstream
+        # endpoints. resolve_url must return None for any such input.
+        assert self._u(path_qs=evil_path) is None
+
 
 # --- Unit: check_api_key ---------------------------------------------------
+
 
 class TestCheckApiKey:
     def test_no_expected_always_passes(self):
         assert check_api_key({}, None) is True
         assert check_api_key({"Authorization": "Bearer wrong"}, None) is True
 
-    @pytest.mark.parametrize("headers", [
-        {"Authorization": "Bearer sekret"},
-        {"Authorization": "bearer sekret"},
-        {"api-key": "sekret"},
-        {"Api-Key": "sekret"},
-    ])
+    @pytest.mark.parametrize(
+        "headers",
+        [
+            {"Authorization": "Bearer sekret"},
+            {"Authorization": "bearer sekret"},
+            {"api-key": "sekret"},
+            {"Api-Key": "sekret"},
+        ],
+    )
     def test_match(self, headers):
         assert check_api_key(headers, "sekret") is True
 
-    @pytest.mark.parametrize("headers", [
-        {}, {"Authorization": "Bearer wrong"}, {"api-key": "wrong"},
-        {"Authorization": "Basic sekret"},
-    ])
+    @pytest.mark.parametrize(
+        "headers",
+        [
+            {},
+            {"Authorization": "Bearer wrong"},
+            {"api-key": "wrong"},
+            {"Authorization": "Basic sekret"},
+        ],
+    )
     def test_no_match(self, headers):
         assert check_api_key(headers, "sekret") is False
 
 
 # --- Fake upstream HTTP server --------------------------------------------
 
+
 class _Upstream(BaseHTTPRequestHandler):
     captured: list[dict] = []
     responses: dict[str, Callable] = {}
 
-    def log_message(self, *a, **k): return
+    def log_message(self, *a, **k):
+        return
 
     def _handle(self):
         n = int(self.headers.get("Content-Length") or 0)
         body = self.rfile.read(n) if n else b""
-        self.captured.append({
-            "method": self.command,
-            "path": self.path,
-            "headers": {k.lower(): v for k, v in self.headers.items()},
-            "body": body,
-        })
+        self.captured.append(
+            {
+                "method": self.command,
+                "path": self.path,
+                "headers": {k.lower(): v for k, v in self.headers.items()},
+                "body": body,
+            }
+        )
         h = self.responses.get(self.path.split("?")[0])
         if h is None:
             payload = b'{"ok": true}'
@@ -151,7 +192,10 @@ class _ThreadedHTTP(socketserver.ThreadingMixIn, HTTPServer):
 
 
 def _free_port() -> int:
-    s = socket.socket(); s.bind(("127.0.0.1", 0)); p = s.getsockname()[1]; s.close()
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    p = s.getsockname()[1]
+    s.close()
     return p
 
 
@@ -175,8 +219,9 @@ async def _fake_token() -> str:
     return "TEST-TOKEN"
 
 
-def _build_for(upstream_url: str, *, api_key: str | None = None,
-               default_dep: str | None = None) -> tuple[object, dict]:
+def _build_for(
+    upstream_url: str, *, api_key: str | None = None, default_dep: str | None = None
+) -> tuple[object, dict]:
     """Return (app, cfg) wired against *upstream_url*."""
     cfg = {
         "endpoint": upstream_url,
@@ -198,7 +243,8 @@ async def client(upstream):
     async with LifespanManager(app):
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app),
-            base_url="http://test", timeout=10,
+            base_url="http://test",
+            timeout=10,
         ) as ac:
             yield ac
 
@@ -215,8 +261,12 @@ async def live_proxy(upstream):
     app, _ = _build_for(upstream_url)
     port = _free_port()
     config = uvicorn.Config(
-        app, host="127.0.0.1", port=port,
-        log_level="error", lifespan="on", access_log=False,
+        app,
+        host="127.0.0.1",
+        port=port,
+        log_level="error",
+        lifespan="on",
+        access_log=False,
     )
     server = uvicorn.Server(config)
     task = asyncio.create_task(server.serve())
@@ -232,6 +282,7 @@ async def live_proxy(upstream):
 
 
 # --- Built-in endpoints ---------------------------------------------------
+
 
 class TestBuiltinEndpoints:
     async def test_health(self, client):
@@ -259,6 +310,7 @@ class TestBuiltinEndpoints:
 
 # --- End-to-end proxying --------------------------------------------------
 
+
 class TestEndToEnd:
     async def test_post_with_model_injects_token(self, client, upstream):
         _, captured, responses = upstream
@@ -271,6 +323,7 @@ class TestEndToEnd:
             h.send_header("Connection", "close")
             h.end_headers()
             h.wfile.write(payload)
+
         responses["/openai/deployments/gpt-4/chat/completions"] = echo
 
         r = await client.post(
@@ -295,6 +348,7 @@ class TestEndToEnd:
             h.send_header("Connection", "close")
             h.end_headers()
             h.wfile.write(payload)
+
         responses["/openai/models"] = listm
 
         r = await client.get("/v1/models")
@@ -312,8 +366,11 @@ class TestEndToEnd:
         _, captured, responses = upstream
 
         def ok(h, _body):
-            h.send_response(200); h.send_header("Content-Length", "0")
-            h.send_header("Connection", "close"); h.end_headers()
+            h.send_response(200)
+            h.send_header("Content-Length", "0")
+            h.send_header("Connection", "close")
+            h.end_headers()
+
         responses["/openai/deployments/m/chat/completions"] = ok
 
         await client.post(
@@ -327,16 +384,21 @@ class TestEndToEnd:
 
     async def test_upstream_unreachable_502(self):
         cfg = {
-            "endpoint": "http://127.0.0.1:1", "instance": "openai",
-            "base": "http://127.0.0.1:1/openai", "api_version": "v",
-            "default_dep": None, "api_key": None,
-            "timeout": 2, "skip_warmup": True,
+            "endpoint": "http://127.0.0.1:1",
+            "instance": "openai",
+            "base": "http://127.0.0.1:1/openai",
+            "api_version": "v",
+            "default_dep": None,
+            "api_key": None,
+            "timeout": 2,
+            "skip_warmup": True,
         }
         app = build_app(cfg, token_provider=_fake_token)
         async with LifespanManager(app):
             async with httpx.AsyncClient(
                 transport=httpx.ASGITransport(app),
-                base_url="http://test", timeout=5,
+                base_url="http://test",
+                timeout=5,
             ) as c:
                 r = await c.post("/v1/chat/completions", json={"model": "m"})
         assert r.status_code == 502
@@ -344,6 +406,7 @@ class TestEndToEnd:
 
 
 # --- API-key gate ---------------------------------------------------------
+
 
 class TestApiKeyGate:
     @pytest.fixture
@@ -353,7 +416,8 @@ class TestApiKeyGate:
         async with LifespanManager(app):
             async with httpx.AsyncClient(
                 transport=httpx.ASGITransport(app),
-                base_url="http://test", timeout=10,
+                base_url="http://test",
+                timeout=10,
             ) as ac:
                 yield ac
 
@@ -364,27 +428,31 @@ class TestApiKeyGate:
 
     async def test_wrong_key_401(self, gated):
         r = await gated.post(
-            "/v1/chat/completions", json={},
+            "/v1/chat/completions",
+            json={},
             headers={"Authorization": "Bearer wrong"},
         )
         assert r.status_code == 401
 
     async def test_right_bearer_passes(self, gated):
         r = await gated.post(
-            "/v1/chat/completions", json={},
+            "/v1/chat/completions",
+            json={},
             headers={"Authorization": "Bearer sekret"},
         )
         assert r.status_code == 400  # passes gate, then missing_model
 
     async def test_right_api_key_header_passes(self, gated):
         r = await gated.post(
-            "/v1/chat/completions", json={},
+            "/v1/chat/completions",
+            json={},
             headers={"api-key": "sekret"},
         )
         assert r.status_code == 400
 
 
 # --- SSE streaming relay --------------------------------------------------
+
 
 class TestStreaming:
     def _sse_handler(self, n_chunks: int, sleep_s: float):
@@ -401,13 +469,16 @@ class TestStreaming:
                 time.sleep(sleep_s)
             h.wfile.write(b"0\r\n\r\n")
             h.wfile.flush()
+
         return handler
 
     async def test_all_chunks_preserved(self, client, upstream):
         _, _, responses = upstream
         responses["/openai/deployments/m/chat/completions"] = self._sse_handler(3, 0.0)
         async with client.stream(
-            "POST", "/v1/chat/completions", json={"model": "m", "stream": True},
+            "POST",
+            "/v1/chat/completions",
+            json={"model": "m", "stream": True},
         ) as r:
             assert r.status_code == 200
             assert "text/event-stream" in r.headers.get("content-type", "")
@@ -421,7 +492,9 @@ class TestStreaming:
         _, _, responses = upstream
         responses["/openai/deployments/m/chat/completions"] = self._sse_handler(1, 0.0)
         async with client.stream(
-            "POST", "/v1/chat/completions", json={"model": "m", "stream": True},
+            "POST",
+            "/v1/chat/completions",
+            json={"model": "m", "stream": True},
         ) as r:
             assert r.headers.get("cache-control") == "no-cache"
             assert r.headers.get("x-accel-buffering") == "no"
@@ -438,7 +511,8 @@ class TestStreaming:
         ts: list[float] = []
         async with httpx.AsyncClient(timeout=10) as c:
             async with c.stream(
-                "POST", f"{base}/v1/chat/completions",
+                "POST",
+                f"{base}/v1/chat/completions",
                 json={"model": "m", "stream": True},
             ) as r:
                 async for _ in r.aiter_raw():
@@ -448,6 +522,7 @@ class TestStreaming:
 
 
 # --- Concurrency: many simultaneous SSE streams ---------------------------
+
 
 class TestConcurrency:
     async def test_many_concurrent_sse_streams(self, client, upstream):
@@ -462,14 +537,17 @@ class TestConcurrency:
             for i in range(2):
                 chunk = f"data: chunk{i}\n\n".encode()
                 size = f"{len(chunk):x}\r\n".encode()
-                h.wfile.write(size + chunk + b"\r\n"); h.wfile.flush()
+                h.wfile.write(size + chunk + b"\r\n")
+                h.wfile.flush()
                 time.sleep(0.05)
             h.wfile.write(b"0\r\n\r\n")
+
         responses["/openai/deployments/m/chat/completions"] = slow_sse
 
         async def one_stream(i):
             async with client.stream(
-                "POST", "/v1/chat/completions",
+                "POST",
+                "/v1/chat/completions",
                 json={"model": "m", "stream": True},
             ) as r:
                 body = ""

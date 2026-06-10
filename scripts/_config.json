@@ -60,8 +60,8 @@
         "starlette>=0.36.0",
         "uvicorn>=0.30.0"
       ],
-      "version": "1.0.4",
-      "hash": "sha256:99b49299b9bf3c71a11b16479f33259cb6ed58182775f76eabcf093653ececeb"
+      "version": "1.0.5",
+      "hash": "sha256:5f3cacbcae16756f7a137436d786c8cf5a3bf98070f5d8205e85ce3229aabef1"
     },
     "tunnel": {
       "description": "Manage SSH tunnels (local/remote/SOCKS) with persistent state and systemd autostart.",

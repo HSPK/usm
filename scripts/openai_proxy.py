@@ -35,13 +35,27 @@ SCOPE = "api://trapi/.default"
 
 # Headers we never relay (transport-level, or replaced by the proxy itself).
 HOP_REQ = {
-    "host", "content-length", "connection", "transfer-encoding", "te",
-    "keep-alive", "upgrade", "proxy-connection", "trailer", "authorization",
-    "api-key", "expect",
+    "host",
+    "content-length",
+    "connection",
+    "transfer-encoding",
+    "te",
+    "keep-alive",
+    "upgrade",
+    "proxy-connection",
+    "trailer",
+    "authorization",
+    "api-key",
+    "expect",
 }
 HOP_RES = {
-    "transfer-encoding", "content-encoding", "content-length", "connection",
-    "keep-alive", "trailer", "upgrade",
+    "transfer-encoding",
+    "content-encoding",
+    "content-length",
+    "connection",
+    "keep-alive",
+    "trailer",
+    "upgrade",
 }
 # OpenAI paths that map directly under /openai/... (no deployment segment).
 NO_DEPLOY = ("/models", "/files", "/fine_tuning", "/batches", "/threads", "/assistants")
@@ -51,16 +65,24 @@ AsyncTokenProvider = Callable[[], Awaitable[str]]
 
 # Pure helpers (unit-tested) -----------------------------------------------
 
+
 def resolve_url(
     path_qs: str, body_obj: Any, base: str, api_version: str, default_dep: str | None
 ) -> str | None:
-    """Translate inbound path+body → upstream URL, or None if 'model' missing."""
+    """Translate inbound path+body → upstream URL, or None if 'model' missing
+    or the path attempts directory traversal."""
     if path_qs.startswith("/v1/"):
         path_qs = path_qs[3:]
     elif path_qs == "/v1":
         path_qs = "/"
     parts = urllib.parse.urlsplit(path_qs)
     path = parts.path or "/"
+    # Refuse any `..` segment. httpx.Request RFC-3986-normalizes the URL when
+    # built, collapsing `…/deployments/X/../../foo` into a sibling of the
+    # deployment scope on the upstream host — which would leak the proxy's
+    # AAD bearer token to arbitrary endpoints.
+    if ".." in urllib.parse.unquote(path).split("/"):
+        return None
     query = dict(urllib.parse.parse_qsl(parts.query, keep_blank_values=True))
 
     dep = None
@@ -83,7 +105,9 @@ def check_api_key(headers, expected: str | None) -> bool:
     if not expected:
         return True
     auth = headers.get("Authorization") or ""
-    bearer = auth.split(None, 1)[1].strip() if auth.lower().startswith("bearer ") else ""
+    bearer = (
+        auth.split(None, 1)[1].strip() if auth.lower().startswith("bearer ") else ""
+    )
     api_key = (headers.get("api-key") or headers.get("Api-Key") or "").strip()
     return expected in (bearer, api_key)
 
@@ -97,11 +121,15 @@ def make_token_provider() -> AsyncTokenProvider:
     """
     try:
         from azure.identity import (
-            AzureCliCredential, ChainedTokenCredential,
-            ManagedIdentityCredential, get_bearer_token_provider,
+            AzureCliCredential,
+            ChainedTokenCredential,
+            ManagedIdentityCredential,
+            get_bearer_token_provider,
         )
     except ImportError:
-        click.echo("Missing 'azure-identity'. Install: pip install azure-identity", err=True)
+        click.echo(
+            "Missing 'azure-identity'. Install: pip install azure-identity", err=True
+        )
         sys.exit(2)
     sync_provider = get_bearer_token_provider(
         ChainedTokenCredential(AzureCliCredential(), ManagedIdentityCredential()),
@@ -116,8 +144,11 @@ def make_token_provider() -> AsyncTokenProvider:
 
 # Route handlers -----------------------------------------------------------
 
+
 def _json_error(status: int, code: str, message: str) -> JSONResponse:
-    return JSONResponse({"error": {"code": code, "message": message}}, status_code=status)
+    return JSONResponse(
+        {"error": {"code": code, "message": message}}, status_code=status
+    )
 
 
 async def health(_request: Request) -> JSONResponse:
@@ -126,13 +157,15 @@ async def health(_request: Request) -> JSONResponse:
 
 async def status_endpoint(request: Request) -> JSONResponse:
     cfg = request.app.state.cfg
-    return JSONResponse({
-        "endpoint": cfg["endpoint"],
-        "instance": cfg["instance"],
-        "api_version": cfg["api_version"],
-        "default_deployment": cfg["default_dep"],
-        "api_key_required": cfg["api_key"] is not None,
-    })
+    return JSONResponse(
+        {
+            "endpoint": cfg["endpoint"],
+            "instance": cfg["instance"],
+            "api_version": cfg["api_version"],
+            "default_deployment": cfg["default_dep"],
+            "api_key_required": cfg["api_key"] is not None,
+        }
+    )
 
 
 async def options_preflight(request: Request) -> Response:
@@ -141,8 +174,9 @@ async def options_preflight(request: Request) -> Response:
         headers={
             "Access-Control-Allow-Origin": "*",
             "Access-Control-Allow-Methods": "GET,POST,PUT,PATCH,DELETE,OPTIONS",
-            "Access-Control-Allow-Headers":
-                request.headers.get("Access-Control-Request-Headers", "*"),
+            "Access-Control-Allow-Headers": request.headers.get(
+                "Access-Control-Request-Headers", "*"
+            ),
         },
     )
 
@@ -160,11 +194,16 @@ async def proxy(request: Request) -> Response:
     except (UnicodeDecodeError, json.JSONDecodeError):
         body_obj = None
 
-    path_qs = request.url.path + (("?" + request.url.query) if request.url.query else "")
-    url = resolve_url(path_qs, body_obj, cfg["base"], cfg["api_version"], cfg["default_dep"])
+    path_qs = request.url.path + (
+        ("?" + request.url.query) if request.url.query else ""
+    )
+    url = resolve_url(
+        path_qs, body_obj, cfg["base"], cfg["api_version"], cfg["default_dep"]
+    )
     if url is None:
         return _json_error(
-            400, "missing_model",
+            400,
+            "missing_model",
             "Request must include 'model' or start the proxy with --deployment.",
         )
 
@@ -176,7 +215,10 @@ async def proxy(request: Request) -> Response:
 
     try:
         upstream_req = state.client.build_request(
-            request.method, url, content=raw or None, headers=headers,
+            request.method,
+            url,
+            content=raw or None,
+            headers=headers,
         )
         upstream_resp = await state.client.send(upstream_req, stream=True)
     except httpx.HTTPError as exc:
@@ -199,6 +241,7 @@ async def proxy(request: Request) -> Response:
 
 # App factory --------------------------------------------------------------
 
+
 def build_app(
     cfg: dict,
     *,
@@ -216,7 +259,8 @@ def build_app(
         app.state.cfg = cfg
         owned_client = client is None
         app.state.client = client or httpx.AsyncClient(
-            timeout=cfg.get("timeout", 600.0), follow_redirects=True,
+            timeout=cfg.get("timeout", 600.0),
+            follow_redirects=True,
         )
         app.state.token_provider = token_provider or make_token_provider()
 
@@ -244,7 +288,8 @@ def build_app(
             Route("/status", status_endpoint, methods=["GET"]),
             Route("/{path:path}", options_preflight, methods=["OPTIONS"]),
             Route(
-                "/{path:path}", proxy,
+                "/{path:path}",
+                proxy,
                 methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
             ),
         ],
@@ -253,30 +298,63 @@ def build_app(
 
 # CLI ----------------------------------------------------------------------
 
+
 @click.command(
     context_settings={"show_default": True, "help_option_names": ["-h", "--help"]},
     help="OpenAI-compatible async proxy forwarding to Microsoft TRAPI.",
 )
-@click.option("--host", default="127.0.0.1", envvar="TRAPI_PROXY_HOST",
-              help="Bind address. 0.0.0.0 exposes on all interfaces.")
+@click.option(
+    "--host",
+    default="127.0.0.1",
+    envvar="TRAPI_PROXY_HOST",
+    help="Bind address. 0.0.0.0 exposes on all interfaces.",
+)
 @click.option("--port", type=int, default=8080, envvar="TRAPI_PROXY_PORT")
-@click.option("--instance", default="gcr/shared", envvar="TRAPI_INSTANCE",
-              help="TRAPI instance. See https://aka.ms/trapi/models.")
+@click.option(
+    "--instance",
+    default="gcr/shared",
+    envvar="TRAPI_INSTANCE",
+    help="TRAPI instance. See https://aka.ms/trapi/models.",
+)
 @click.option("--api-version", default="2024-10-21", envvar="TRAPI_API_VERSION")
-@click.option("--endpoint", default="https://trapi.research.microsoft.com",
-              envvar="TRAPI_ENDPOINT")
-@click.option("--deployment", default=None, envvar="TRAPI_DEFAULT_DEPLOYMENT",
-              help="Default deployment when the request omits 'model'.")
+@click.option(
+    "--endpoint",
+    default="https://trapi.research.microsoft.com",
+    envvar="TRAPI_ENDPOINT",
+)
+@click.option(
+    "--deployment",
+    default=None,
+    envvar="TRAPI_DEFAULT_DEPLOYMENT",
+    help="Default deployment when the request omits 'model'.",
+)
 @click.option("--timeout", type=float, default=600.0, envvar="TRAPI_PROXY_TIMEOUT")
-@click.option("--api-key", default=None, envvar="TRAPI_PROXY_API_KEY",
-              help="If set, clients must present this via 'Authorization: Bearer "
-                   "<key>' or 'api-key' header.")
-@click.option("--skip-token-warmup", is_flag=True,
-              help="Skip the upfront token fetch.")
-@click.option("--log-level", default="info", envvar="TRAPI_PROXY_LOG_LEVEL",
-              type=click.Choice(["debug", "info", "warning", "error"]))
-def cli(host, port, instance, api_version, endpoint, deployment, timeout, api_key,
-        skip_token_warmup, log_level):
+@click.option(
+    "--api-key",
+    default=None,
+    envvar="TRAPI_PROXY_API_KEY",
+    help="If set, clients must present this via 'Authorization: Bearer "
+    "<key>' or 'api-key' header.",
+)
+@click.option("--skip-token-warmup", is_flag=True, help="Skip the upfront token fetch.")
+@click.option(
+    "--log-level",
+    default="info",
+    envvar="TRAPI_PROXY_LOG_LEVEL",
+    type=click.Choice(["debug", "info", "warning", "error"]),
+)
+def cli(
+    host,
+    port,
+    instance,
+    api_version,
+    endpoint,
+    deployment,
+    timeout,
+    api_key,
+    skip_token_warmup,
+    log_level,
+):
     base = f"{endpoint.rstrip('/')}/{instance.strip('/')}/openai"
     cfg = {
         "endpoint": endpoint,
