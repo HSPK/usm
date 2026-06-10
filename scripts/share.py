@@ -126,14 +126,30 @@ def open_reverse_tunnel(spec: str, lport: int) -> tuple[subprocess.Popen, int, s
     return _spawn_ssh(argv), rport, ssh_target
 
 
-def probe_remote_path(ssh_target: str, path: str) -> str:
-    """Return 'dir' or 'file'; raise ClickException otherwise."""
+_RUNTIME_PREFIX: dict[str, str] = {
+    "uv": "uv run --no-project --quiet python",
+    "python3": "python3",
+}
+
+
+@dataclass(frozen=True)
+class RemoteProbe:
+    kind: str
+    runtime: str
+    label: str
+
+
+def probe_remote(ssh_target: str, path: str) -> RemoteProbe:
+    """Probe host for path kind + a usable Python runtime (uv preferred)."""
     quoted = shlex.quote(path)
     snippet = (
-        f"command -v python3 >/dev/null 2>&1 || {{ echo no-python; exit 0; }}; "
-        f"if [ -d {quoted} ]; then echo dir; "
-        f"elif [ -f {quoted} ]; then echo file; "
-        f"else echo missing; fi"
+        "if command -v uv >/dev/null 2>&1; then RT=uv; "
+        "elif command -v python3 >/dev/null 2>&1; then RT=python3; "
+        "else echo no-runtime; exit 0; fi; "
+        f"if [ -d {quoted} ]; then K=dir; "
+        f"elif [ -f {quoted} ]; then K=file; "
+        "else echo missing; exit 0; fi; "
+        'echo "$RT $K"'
     )
     try:
         r = subprocess.run(
@@ -157,25 +173,31 @@ def probe_remote_path(ssh_target: str, path: str) -> str:
     if r.returncode != 0:
         msg = r.stderr.strip() or f"exit {r.returncode}"
         raise click.ClickException(f"ssh {ssh_target} probe failed: {msg}")
-    kind = (r.stdout.strip().splitlines() or [""])[-1]
-    if kind == "no-python":
+    out = (r.stdout.strip().splitlines() or [""])[-1]
+    if out == "no-runtime":
         raise click.ClickException(
-            f"python3 not found on {ssh_target}; can't run remote http.server."
+            f"neither uv nor python3 found on {ssh_target}; can't run remote http.server."
         )
-    if kind == "missing":
+    if out == "missing":
         raise click.ClickException(f"path not found on {ssh_target}: {path}")
-    if kind not in ("dir", "file"):
+    parts = out.split()
+    if (
+        len(parts) != 2
+        or parts[0] not in _RUNTIME_PREFIX
+        or parts[1] not in ("dir", "file")
+    ):
         raise click.ClickException(f"unexpected probe output: {r.stdout!r}")
-    return kind
+    rt, kind = parts
+    return RemoteProbe(kind=kind, runtime=_RUNTIME_PREFIX[rt], label=rt)
 
 
 def open_forward_serve(
-    ssh_target: str, remote_dir: str, lport: int, bind: str
+    ssh_target: str, remote_dir: str, runtime: str, lport: int, bind: str
 ) -> tuple[subprocess.Popen, int]:
-    """ssh -L LPORT:127.0.0.1:RPORT + python3 -m http.server on the remote (pull)."""
+    """ssh -L LPORT:127.0.0.1:RPORT + `<runtime> -m http.server` on the remote (pull)."""
     rport = random.randint(20000, 65000)
     remote_cmd = (
-        f"exec python3 -m http.server {rport} "
+        f"exec {runtime} -m http.server {rport} "
         f"--bind 127.0.0.1 --directory {shlex.quote(remote_dir)}"
     )
     forward = (
@@ -307,19 +329,21 @@ class RemoteSource:
     remote_path: str
 
     def open(self, port: int, bind: str) -> Session:
-        kind = probe_remote_path(self.ssh_target, self.remote_path)
-        if kind == "dir":
+        probe = probe_remote(self.ssh_target, self.remote_path)
+        if probe.kind == "dir":
             remote_dir, suffix = self.remote_path, "/"
         else:
             remote_dir = os.path.dirname(self.remote_path) or "/"
             suffix = "/" + os.path.basename(self.remote_path)
 
-        proc, rport = open_forward_serve(self.ssh_target, remote_dir, port, bind)
+        proc, rport = open_forward_serve(
+            self.ssh_target, remote_dir, probe.runtime, port, bind
+        )
         sess = Session(
-            headline=f"{self.ssh_target}:{self.remote_path} [dim]({kind})[/dim]",
+            headline=f"{self.ssh_target}:{self.remote_path} [dim]({probe.kind})[/dim]",
             lines=[
                 f"  local:  http://{bind}:{port}{suffix}  "
-                f"[dim](ssh -L {port}->{rport}; python3 -m http.server on remote)[/dim]",
+                f"[dim](ssh -L {port}->{rport}; {probe.label} -m http.server on remote)[/dim]",
             ],
         )
         sess.add_proc(proc)
