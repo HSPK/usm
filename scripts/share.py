@@ -75,14 +75,32 @@ def resolve_port(port: int | None) -> int:
     return port
 
 
-_REMOTE_RE = re.compile(r"^[^/\s:@]+@[^/\s:@]+:.+$")
+_HOST_RE = re.compile(r"^(?:[^@\s:]+@)?[^@\s:/]+$")
 
 
 def parse_remote(spec: str) -> tuple[str, str] | None:
-    if not _REMOTE_RE.match(spec):
+    """scp-style ``[user@]host:[path]``. Returns ``(target, path)`` or ``None``.
+
+    Heuristic matches scp/rsync: the segment before the first ``:`` is the
+    host (with optional ``user@``) only if it has no ``/`` — that disambiguates
+    ``./foo:bar`` (local) from ``host:path`` (remote). Empty path defaults to
+    the remote ``~``.
+    """
+    head, sep, path = spec.partition(":")
+    if not sep or "/" in head or not _HOST_RE.match(head):
         return None
-    ssh_target, _, remote_path = spec.partition(":")
-    return ssh_target, remote_path
+    return head, path or "~"
+
+
+def _quote_remote_path(p: str) -> str:
+    """shlex.quote that preserves leading ``~`` / ``~user`` expansion."""
+    if p in ("~",) or re.fullmatch(r"~[^/]+", p):
+        return p
+    m = re.match(r"^(~[^/]*)/(.*)$", p)
+    if m:
+        prefix, rest = m.group(1), m.group(2)
+        return f"{prefix}/{shlex.quote(rest)}" if rest else f"{prefix}/"
+    return shlex.quote(p)
 
 
 # ---- ssh primitives ---------------------------------------------------------
@@ -141,7 +159,7 @@ class RemoteProbe:
 
 def probe_remote(ssh_target: str, path: str) -> RemoteProbe:
     """Probe host for path kind + a usable Python runtime (uv preferred)."""
-    quoted = shlex.quote(path)
+    quoted = _quote_remote_path(path)
     snippet = (
         "if command -v uv >/dev/null 2>&1; then RT=uv; "
         "elif command -v python3 >/dev/null 2>&1; then RT=python3; "
@@ -198,7 +216,7 @@ def open_forward_serve(
     rport = random.randint(20000, 65000)
     remote_cmd = (
         f"exec {runtime} -m http.server {rport} "
-        f"--bind 127.0.0.1 --directory {shlex.quote(remote_dir)}"
+        f"--bind 127.0.0.1 --directory {_quote_remote_path(remote_dir)}"
     )
     forward = (
         f"{lport}:127.0.0.1:{rport}"
@@ -333,7 +351,8 @@ class RemoteSource:
         if probe.kind == "dir":
             remote_dir, suffix = self.remote_path, "/"
         else:
-            remote_dir = os.path.dirname(self.remote_path) or "/"
+            parent = os.path.dirname(self.remote_path)
+            remote_dir = parent if parent else "~"
             suffix = "/" + os.path.basename(self.remote_path)
 
         proc, rport = open_forward_serve(

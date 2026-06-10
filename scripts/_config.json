@@ -163,8 +163,8 @@
         "click>=8.2.1",
         "rich>=13.0"
       ],
-      "version": "1.0.3",
-      "hash": "sha256:035c9e5d11005102c214810c6aef56b9f5638c979aa2a7110fd904f902b9b489"
+      "version": "1.0.4",
+      "hash": "sha256:39be22f5c42a3d01d8012a7dabf56b7f6d109fd07a4e7e5c8c9a083f2eb2e98c"
     }
   }
 }
