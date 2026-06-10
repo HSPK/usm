@@ -76,8 +76,17 @@ changes required.
 | `usm cp [--use-sas-token] <source>... <destination>` | Copy between local paths and blobfuse2 mountpoints, delegating to `azcopy` when Azure storage is involved. |
 | `usm check_py` | Print the active Python and pip locations and versions. |
 | `usm sysinfo` | Print system, GPU, CUDA, MPI, and distributed-ML environment summary. |
-| `usm inject-alias [--shell bash\|zsh\|powershell] [--file PATH]` | Insert or update the managed `usm` alias block in your shell rc file. Defaults to `~/.bashrc` on Unix-like systems and the PowerShell profile on Windows, with interactive shell selection when run in a TTY. You can combine `--shell` with `--file` to control the syntax written to a custom path. |
-| `usm tunnel <local\|remote\|socks\|ls\|stop\|start\|restart\|rm\|enable\|disable\|show\|logs>` | Start and manage SSH tunnels with persistent state. Runs detached by default, tracks PID/route under `~/.cache/usm/tunnels/`, and accepts short specs like `PORT`, `LPORT:RPORT`, `LPORT:RHOST:RPORT`. `enable`/`disable` install/remove a systemd `--user` unit for boot-time autostart (with `Restart=on-failure`). |
+| `usm inject-alias [--shell bash\|zsh\|powershell] [--file PATH]` | Insert or update the managed `usm` alias block in your shell rc file. |
+| `usm tunnel <local\|remote\|socks\|ls\|stop\|start\|restart\|rm\|enable\|disable\|show\|logs>` | Start and manage SSH tunnels with persistent state; `enable`/`disable` install/remove a systemd `--user` unit for boot-time autostart. |
+| `usm gpu [free\|watch\|kill]` | GPU inventory, free-picker (`CUDA_VISIBLE_DEVICES=$(usm gpu free 2)`), live watch, kill CUDA processes. |
+| `usm port [PORT\|ls\|kill PORT]` | Show what's listening on a port; free a port by killing the holder. |
+| `usm notify [config\|test] [-- CMD ARGS]` | Wrap a command and ping ntfy.sh / Telegram / generic webhook when it exits. |
+| `usm secret <set\|get\|ls\|rm\|export\|run>` | Encrypted local env store (Fernet). Inject secrets into shells or processes. |
+| `usm rsync [OPTIONS] SRC... DST` | rsync wrapper with sensible defaults + auto-excludes (`.git/`, `__pycache__/`, `.venv/`, ...). |
+| `usm clip [paste]` | Cross-platform clipboard from stdin; OSC52 fallback for SSH sessions. |
+| `usm wait TARGET...` | Block until host:port / TCP / HTTP endpoints are reachable (AND semantics). |
+| `usm bench [--quick\|--full]` | Quick machine benchmark — CPU / memory / disk / network / optional GPU. |
+| `usm share PATH [--tunnel SSH_TARGET[:PORT]]` | Serve a file/dir over HTTP; optionally exposed to a remote via `ssh -R`. |
 
 ### Built-in helpers
 

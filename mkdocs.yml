@@ -67,6 +67,15 @@ nav:
   - Commands:
       - Overview: commands/index.md
       - tunnel — SSH tunnels: commands/tunnel.md
+      - gpu — GPU picker/watch: commands/gpu.md
+      - port — Port discovery/kill: commands/port.md
+      - notify — Long-task pings: commands/notify.md
+      - secret — Encrypted env store: commands/secret.md
+      - rsync — Smart rsync wrapper: commands/rsync.md
+      - clip — Clipboard / OSC52: commands/clip.md
+      - wait — wait-for-it: commands/wait.md
+      - bench — Machine benchmark: commands/bench.md
+      - share — File share over HTTP: commands/share.md
       - init — Machine bootstrap: commands/init.md
       - blobmount — Mount Azure Blob: commands/blobmount.md
       - cp — Copy with Azure support: commands/cp.md

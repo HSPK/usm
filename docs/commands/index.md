@@ -14,6 +14,15 @@ Every subcommand of `usm` falls into one of two buckets:
 | Command | Page |
 | --- | --- |
 | `tunnel` | [SSH tunnel manager](tunnel.md) |
+| `gpu` | [GPU picker/watch](gpu.md) |
+| `port` | [Port discovery/kill](port.md) |
+| `notify` | [Long-task pings](notify.md) |
+| `secret` | [Encrypted env store](secret.md) |
+| `rsync` | [Smart rsync wrapper](rsync.md) |
+| `clip` | [Clipboard / OSC52](clip.md) |
+| `wait` | [wait-for-it](wait.md) |
+| `bench` | [Machine benchmark](bench.md) |
+| `share` | [File share over HTTP](share.md) |
 | `init` | [Machine bootstrap](init.md) |
 | `blobmount` | [Mount Azure blob](blobmount.md) |
 | `cp` | [Copy with Azure support](cp.md) |

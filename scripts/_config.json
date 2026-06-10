@@ -72,6 +72,99 @@
       ],
       "version": "1.3.1",
       "hash": "sha256:d3d7df5c0cd0964847e52961588881a678e7efaecbe04caace29151a65cc775c"
+    },
+    "gpu": {
+      "description": "GPU inventory, free-picker, watch, and kill (nvidia-smi wrapper).",
+      "path": "gpu.py",
+      "requirements": [
+        "click>=8.2.1",
+        "rich>=13.0"
+      ],
+      "version": "1.0.0",
+      "hash": "sha256:9fa76344845bd3d6e82c5821887e420e951fe10a0d07cf394222439425a46f49"
+    },
+    "port": {
+      "description": "Show what's listening on which port; free ports by killing the holder.",
+      "path": "port.py",
+      "requirements": [
+        "click>=8.2.1",
+        "psutil>=7.1.3",
+        "rich>=13.0"
+      ],
+      "version": "1.0.0",
+      "hash": "sha256:edc30dacfa016ca389ff20b5de260d47e32cf1b8e02ecdccafd846c95d157207"
+    },
+    "clip": {
+      "description": "Cross-platform clipboard from stdin; OSC52 fallback for SSH sessions.",
+      "path": "clip.py",
+      "requirements": [
+        "click>=8.2.1"
+      ],
+      "version": "1.0.0",
+      "hash": "sha256:ac2c34d43ebd5f218338436a09b8b555150ac28854e7f54c9cd0fabff30eb603"
+    },
+    "wait": {
+      "description": "wait-for-it: block until host:port / TCP / HTTP endpoints are reachable.",
+      "path": "wait.py",
+      "requirements": [
+        "click>=8.2.1",
+        "httpx>=0.27.0",
+        "rich>=13.0"
+      ],
+      "version": "1.0.0",
+      "hash": "sha256:69e06e6f5c3408e89a25b91e4fc753b1583d393c73ecbf7376d88243228e5785"
+    },
+    "rsync": {
+      "description": "rsync wrapper with sensible defaults and auto-excludes (.git, __pycache__, .venv, ...).",
+      "path": "rsync.py",
+      "requirements": [
+        "click>=8.2.1"
+      ],
+      "version": "1.0.0",
+      "hash": "sha256:25e905679972a315e179f0c56c9ded585ab40682a2edd88eaeb81ac03f89e5b3"
+    },
+    "notify": {
+      "description": "Wrap a command and ping ntfy.sh / Telegram / webhook when it exits.",
+      "path": "notify.py",
+      "requirements": [
+        "click>=8.2.1",
+        "httpx>=0.27.0",
+        "rich>=13.0"
+      ],
+      "version": "1.0.2",
+      "hash": "sha256:dab1e59138a349ef41ab321063dc6d47bc6e79bcde2dcd32d71e10249e81b66f"
+    },
+    "secret": {
+      "description": "Encrypted local env store (Fernet); inject secrets into shells or processes.",
+      "path": "secret.py",
+      "requirements": [
+        "click>=8.2.1",
+        "cryptography>=42.0.0",
+        "rich>=13.0"
+      ],
+      "version": "1.0.0",
+      "hash": "sha256:1bfa9c4ad3e82d112438dd4c970e901ce411e4abe6b09b0b17f46fe2259dfcbd"
+    },
+    "bench": {
+      "description": "Quick machine benchmark \u2014 CPU / memory / disk / network / optional GPU.",
+      "path": "bench.py",
+      "requirements": [
+        "click>=8.2.1",
+        "psutil>=7.1.3",
+        "rich>=13.0"
+      ],
+      "version": "1.0.0",
+      "hash": "sha256:78972b87a4f637ff34ff923271f91b5805b0dc02027307caa38951c961a7bdb7"
+    },
+    "share": {
+      "description": "Serve a file/dir over HTTP, optionally exposed to a remote via ssh -R.",
+      "path": "share.py",
+      "requirements": [
+        "click>=8.2.1",
+        "rich>=13.0"
+      ],
+      "version": "1.0.0",
+      "hash": "sha256:ef251a9aaaa8c82dfac65bab2e23cccf2cdf75b63dc0a04f4486dc23a76890ab"
     }
   }
 }

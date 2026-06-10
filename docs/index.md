@@ -48,6 +48,15 @@ you want from the [Commands](commands/index.md) section.
 | Command | What it does |
 | --- | --- |
 | [`usm tunnel`](commands/tunnel.md) | SSH tunnels (local / remote / SOCKS) with state + systemd autostart |
+| [`usm gpu`](commands/gpu.md) | GPU inventory, free-picker, watch, kill (nvidia-smi wrapper) |
+| [`usm port`](commands/port.md) | Show what's on a port; kill the holder |
+| [`usm notify`](commands/notify.md) | Wrap a command and ping ntfy.sh / Telegram / webhook when it exits |
+| [`usm secret`](commands/secret.md) | Encrypted local env store; inject into shells or processes |
+| [`usm rsync`](commands/rsync.md) | rsync with sensible defaults + auto-excludes |
+| [`usm clip`](commands/clip.md) | Cross-platform clipboard; OSC52 fallback for SSH |
+| [`usm wait`](commands/wait.md) | wait-for-it (host:port, TCP, HTTP) |
+| [`usm bench`](commands/bench.md) | Quick machine benchmark (CPU / mem / disk / network / GPU) |
+| [`usm share`](commands/share.md) | Serve a file/dir over HTTP, optionally tunneled out |
 | [`usm init`](commands/init.md) | Bootstrap a fresh Ubuntu machine |
 | [`usm blobmount`](commands/blobmount.md) | Mount an Azure blob container locally |
 | [`usm cp`](commands/cp.md) | Copy across local + blobfuse mountpoints, delegating to azcopy |
