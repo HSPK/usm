@@ -1,0 +1,70 @@
+# usm
+
+[![Release](https://img.shields.io/github/v/release/HSPK/usm)](https://github.com/HSPK/usm/releases)
+[![PyPI](https://img.shields.io/pypi/v/usmo)](https://pypi.org/project/usmo/)
+[![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/)
+
+> Bootstrap machines and run cached utility scripts from one CLI.
+
+`usm` is a lightweight CLI that wraps machine-setup tasks, Azure/blobfuse
+workflows, and a handful of day-to-day productivity helpers behind a single
+entry point. Scripts are fetched on demand, cached locally, and pinned by
+content hash — so a fresh machine can be productive in one command.
+
+The package installs as `usmo`, but the executable is `usm`.
+
+## Highlights
+
+- **One entry point** for machine setup, storage helpers, and quick admin tasks.
+- **On-demand script download** with per-script versioning and SHA-256 pinning;
+  cached under `~/.cache/usm/scripts`.
+- **uv-managed isolation** for Python scripts — every script declares its own
+  requirements, resolved per-invocation, never polluting your Python env.
+- **`--debug` mode** runs scripts from a local checkout, so iterating on a
+  script feels like editing any other repo file.
+- **Auto-update probe** notifies you when a cached script has a newer version
+  upstream; you stay in control of when to actually upgrade.
+
+## Quick start
+
+```bash
+# 1. install
+curl -fsSL https://raw.githubusercontent.com/HSPK/usm/main/scripts/install.sh | bash
+
+# 2. see what's available
+usm list
+
+# 3. run something
+usm sysinfo
+usm tunnel local 8080:db:5432 user@bastion
+usm inject-alias --shell zsh
+```
+
+See [Installation](installation.md) for alternatives, or jump to the command
+you want from the [Commands](commands/index.md) section.
+
+## At a glance
+
+| Command | What it does |
+| --- | --- |
+| [`usm tunnel`](commands/tunnel.md) | SSH tunnels (local / remote / SOCKS) with state + systemd autostart |
+| [`usm init`](commands/init.md) | Bootstrap a fresh Ubuntu machine |
+| [`usm blobmount`](commands/blobmount.md) | Mount an Azure blob container locally |
+| [`usm cp`](commands/cp.md) | Copy across local + blobfuse mountpoints, delegating to azcopy |
+| [`usm cu122`](commands/cu122.md) | Install NVIDIA driver 535 + CUDA 12.2 on Ubuntu |
+| [`usm inject-alias`](commands/inject-alias.md) | Manage a marker-fenced alias block in your shell rc |
+| [`usm openai-proxy`](commands/openai-proxy.md) | Run a local OpenAI-compatible proxy to Microsoft TRAPI |
+| [`usm sysinfo` / `check_py`](commands/sysinfo.md) | Print system / Python info |
+| [Built-in helpers](commands/builtin.md) | `list`, `update`, `clean`, `version` |
+
+## How it works in 30 seconds
+
+Scripts are declared in
+[`scripts/_config.json`](https://github.com/HSPK/usm/blob/main/scripts/_config.json)
+and downloaded from `raw.githubusercontent.com/HSPK/usm/main/scripts/`. The
+CLI looks the command up, fetches + caches the file (if missing), then runs
+it: shell scripts under `bash`, Python scripts under the current interpreter,
+and Python scripts with declared `requirements` under
+`uv run --with <req> ...` for hermetic, per-invocation dependency resolution.
+
+See [Architecture](architecture.md) for the full picture.

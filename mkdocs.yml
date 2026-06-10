@@ -1,0 +1,88 @@
+site_name: usm
+site_description: Bootstrap machines and run cached utility scripts from one CLI.
+site_url: https://hspk.github.io/usm/
+repo_url: https://github.com/HSPK/usm
+repo_name: HSPK/usm
+edit_uri: edit/main/docs/
+
+theme:
+  name: material
+  features:
+    - navigation.instant
+    - navigation.tracking
+    - navigation.tabs
+    - navigation.sections
+    - navigation.expand
+    - navigation.top
+    - navigation.footer
+    - search.suggest
+    - search.highlight
+    - content.code.copy
+    - content.code.annotate
+    - content.action.edit
+    - toc.follow
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  icon:
+    repo: fontawesome/brands/github
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - def_list
+  - footnotes
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.details
+  - pymdownx.highlight:
+      anchor_linenums: true
+      line_spans: __span
+      pygments_lang_class: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.superfences
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.tasklist:
+      custom_checkbox: true
+
+nav:
+  - Home: index.md
+  - Installation: installation.md
+  - Commands:
+      - Overview: commands/index.md
+      - tunnel — SSH tunnels: commands/tunnel.md
+      - init — Machine bootstrap: commands/init.md
+      - blobmount — Mount Azure Blob: commands/blobmount.md
+      - cp — Copy with Azure support: commands/cp.md
+      - cu122 — CUDA 12.2: commands/cu122.md
+      - inject-alias — Shell aliases: commands/inject-alias.md
+      - openai-proxy — TRAPI proxy: commands/openai-proxy.md
+      - sysinfo / check_py: commands/sysinfo.md
+      - Built-in helpers: commands/builtin.md
+  - Architecture: architecture.md
+  - Development: development.md
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/HSPK/usm
+    - icon: fontawesome/brands/python
+      link: https://pypi.org/project/usmo/
+
+copyright: "Released under the terms of the project's LICENSE."
