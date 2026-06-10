@@ -62,6 +62,16 @@
       ],
       "version": "1.0.4",
       "hash": "sha256:99b49299b9bf3c71a11b16479f33259cb6ed58182775f76eabcf093653ececeb"
+    },
+    "tunnel": {
+      "description": "Manage SSH tunnels (local/remote/SOCKS) with persistent state and systemd autostart.",
+      "path": "tunnel.py",
+      "requirements": [
+        "click>=8.2.1",
+        "rich>=13.0"
+      ],
+      "version": "1.2.0",
+      "hash": "sha256:5d3a620d4c377b3944c769a8aa01d5614a04beee643c6fe92a962c480346623d"
     }
   }
 }

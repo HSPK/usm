@@ -77,6 +77,7 @@ changes required.
 | `usm check_py` | Print the active Python and pip locations and versions. |
 | `usm sysinfo` | Print system, GPU, CUDA, MPI, and distributed-ML environment summary. |
 | `usm inject-alias [--shell bash\|zsh\|powershell] [--file PATH]` | Insert or update the managed `usm` alias block in your shell rc file. Defaults to `~/.bashrc` on Unix-like systems and the PowerShell profile on Windows, with interactive shell selection when run in a TTY. You can combine `--shell` with `--file` to control the syntax written to a custom path. |
+| `usm tunnel <local\|remote\|socks\|ls\|stop\|start\|restart\|rm\|enable\|disable\|show\|logs>` | Start and manage SSH tunnels with persistent state. Runs detached by default, tracks PID/route under `~/.cache/usm/tunnels/`, and accepts short specs like `PORT`, `LPORT:RPORT`, `LPORT:RHOST:RPORT`. `enable`/`disable` install/remove a systemd `--user` unit for boot-time autostart (with `Restart=on-failure`). |
 
 ### Built-in helpers
 
@@ -141,6 +142,28 @@ Write PowerShell-flavored aliases into a custom profile file:
 
 ```bash
 usm inject-alias --shell powershell --file ~/Documents/PowerShell/Microsoft.PowerShell_profile.ps1
+```
+
+Open an SSH tunnel (local forward) and inspect it:
+
+```bash
+usm tunnel local 8080:db.internal:5432 user@bastion   # localhost:8080 -> db.internal:5432
+usm tunnel remote 9000:3000 user@server               # server:9000 -> localhost:3000
+usm tunnel socks 1080 user@gateway                    # SOCKS5 on localhost:1080
+usm tunnel ls
+usm tunnel stop local-8080-bastion                    # keeps the definition
+usm tunnel start local-8080-bastion                   # relaunch a stopped tunnel
+usm tunnel rm local-8080-bastion                      # delete the definition
+```
+
+Autostart a tunnel at login/boot via a systemd `--user` unit (Linux only).
+The unit also restarts the tunnel automatically on failure:
+
+```bash
+usm tunnel enable local-8080-bastion        # installs ~/.config/systemd/user/usm-tunnel-<id>.service
+usm tunnel disable local-8080-bastion       # removes the unit (keeps the definition)
+# To have user units start at boot before you log in (one-time per user):
+sudo loginctl enable-linger "$USER"
 ```
 
 ## How it Works
