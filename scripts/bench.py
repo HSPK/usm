@@ -17,6 +17,7 @@ import os
 import platform
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 from pathlib import Path
@@ -92,7 +93,18 @@ def bench_disk(size_mb: int = 256, sync_each: bool = True) -> list[tuple[str, st
         if sync_each:
             os.fsync(f.fileno())
     write_dt = time.perf_counter() - start
-    # drop OS cache before read (best-effort; we only re-open with O_DIRECT-ish)
+    # drop the page cache for this file so the read isn't just a RAM hit
+    cache_dropped = False
+    if hasattr(os, "posix_fadvise") and hasattr(os, "POSIX_FADV_DONTNEED"):
+        try:
+            fd = os.open(tmp, os.O_RDONLY)
+            try:
+                os.posix_fadvise(fd, 0, 0, os.POSIX_FADV_DONTNEED)
+                cache_dropped = True
+            finally:
+                os.close(fd)
+        except OSError:
+            pass
     # read
     start = time.perf_counter()
     with open(tmp, "rb", buffering=0) as f:
@@ -100,10 +112,13 @@ def bench_disk(size_mb: int = 256, sync_each: bool = True) -> list[tuple[str, st
             pass
     read_dt = time.perf_counter() - start
     tmp.unlink(missing_ok=True)
+    read_label = (
+        f"read  {size_mb} MiB" if cache_dropped else f"read  {size_mb} MiB (cached)"
+    )
     return [
         ("path", str(tmp.parent)),
         (f"write {size_mb} MiB", f"{size_bytes / write_dt / 1e6:7.1f} MB/s"),
-        (f"read  {size_mb} MiB", f"{size_bytes / read_dt / 1e6:7.1f} MB/s"),
+        (read_label, f"{size_bytes / read_dt / 1e6:7.1f} MB/s"),
     ]
 
 
@@ -113,9 +128,11 @@ def bench_disk(size_mb: int = 256, sync_each: bool = True) -> list[tuple[str, st
 def bench_net(samples: int = 3, host: str = "1.1.1.1") -> list[tuple[str, str]]:
     rows: list[tuple[str, str]] = []
     if shutil.which("ping"):
+        # Linux iputils -W is seconds; BSD/macOS -W is milliseconds.
+        wait_flag = ["-W", "2000"] if sys.platform == "darwin" else ["-W", "2"]
         try:
             out = subprocess.check_output(
-                ["ping", "-c", str(samples), "-W", "2", host],
+                ["ping", "-c", str(samples), *wait_flag, host],
                 text=True,
                 stderr=subprocess.STDOUT,
                 timeout=10,

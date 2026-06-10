@@ -46,7 +46,10 @@ def _load() -> dict:
 
 def _save(cfg: dict) -> None:
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    CONFIG_PATH.write_text(json.dumps(cfg, indent=2))
+    data = json.dumps(cfg, indent=2).encode()
+    fd = os.open(CONFIG_PATH, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "wb") as f:
+        f.write(data)
     try:
         os.chmod(CONFIG_PATH, 0o600)
     except OSError:
@@ -77,7 +80,8 @@ def _send_telegram(c: dict, title: str, message: str) -> tuple[bool, str]:
     chat_id = c.get("chat_id")
     if not token or not chat_id:
         return False, "telegram: missing token or chat_id"
-    text = f"*{_md(title)}*\n```\n{message[-3500:]}\n```"
+    body = message[-3500:].replace("\\", "\\\\").replace("`", "\\`")
+    text = f"*{_md(title)}*\n```\n{body}\n```"
     try:
         r = httpx.post(
             f"https://api.telegram.org/bot{token}/sendMessage",
@@ -261,18 +265,21 @@ def cmd_config():
     pass
 
 
-@cmd_config.command("show", help="Print the active config (tokens redacted).")
+@cmd_config.command("show", help="Print the active config (secrets redacted).")
 def cfg_show():
     cfg = _load()
     if not cfg:
         console.print("[dim]no config.[/dim]")
         return
+    safe_keys = {"server", "priority", "tags"}
     redacted = json.loads(json.dumps(cfg))
     for v in redacted.values():
-        if isinstance(v, dict):
-            for k in ("token", "url"):
-                if v.get(k):
-                    v[k] = v[k][:8] + "…" + v[k][-4:] if len(v[k]) > 16 else "***"
+        if not isinstance(v, dict):
+            continue
+        for k, value in list(v.items()):
+            if k in safe_keys or not isinstance(value, str):
+                continue
+            v[k] = value[:6] + "…" + value[-3:] if len(value) > 12 else "***"
     console.print_json(json.dumps(redacted))
 
 

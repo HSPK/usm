@@ -38,14 +38,26 @@ console = Console()
 # Crypto -----------------------------------------------------------------
 
 
+def _write_secure(path: Path, data: bytes) -> None:
+    """Atomically write *data* to *path* with mode 0o600 (no umask race)."""
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+    fd = os.open(path, flags, 0o600)
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+    except Exception:
+        os.close(fd) if not isinstance(fd, int) else None
+        raise
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
+
+
 def _ensure_key() -> bytes:
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     if not KEY_PATH.exists():
-        KEY_PATH.write_bytes(Fernet.generate_key())
-        try:
-            os.chmod(KEY_PATH, 0o600)
-        except OSError:
-            pass
+        _write_secure(KEY_PATH, Fernet.generate_key())
         console.print(
             f"[dim]Generated new encryption key at {KEY_PATH}. "
             f"Back it up if you care about not losing your secrets.[/dim]"
@@ -78,11 +90,7 @@ def _load() -> dict[str, dict[str, str]]:
 def _save(data: dict[str, dict[str, str]]) -> None:
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     f = Fernet(_ensure_key())
-    STORE_PATH.write_bytes(f.encrypt(json.dumps(data, indent=2).encode()))
-    try:
-        os.chmod(STORE_PATH, 0o600)
-    except OSError:
-        pass
+    _write_secure(STORE_PATH, f.encrypt(json.dumps(data, indent=2).encode()))
 
 
 def _split_kv(arg: str) -> tuple[str, str]:

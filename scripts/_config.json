@@ -91,8 +91,8 @@
         "psutil>=7.1.3",
         "rich>=13.0"
       ],
-      "version": "1.0.0",
-      "hash": "sha256:edc30dacfa016ca389ff20b5de260d47e32cf1b8e02ecdccafd846c95d157207"
+      "version": "1.0.1",
+      "hash": "sha256:d3b9df211243a95508bca94d4e22e69656f94f96fd582654d25c51963344b873"
     },
     "clip": {
       "description": "Cross-platform clipboard from stdin; OSC52 fallback for SSH sessions.",
@@ -120,8 +120,8 @@
       "requirements": [
         "click>=8.2.1"
       ],
-      "version": "1.0.0",
-      "hash": "sha256:25e905679972a315e179f0c56c9ded585ab40682a2edd88eaeb81ac03f89e5b3"
+      "version": "1.0.1",
+      "hash": "sha256:f0df59cffbd63bc6c46a6e86697b6050035bfa70cdde006a5f1e7a610827d369"
     },
     "notify": {
       "description": "Wrap a command and ping ntfy.sh / Telegram / webhook when it exits.",
@@ -131,8 +131,8 @@
         "httpx>=0.27.0",
         "rich>=13.0"
       ],
-      "version": "1.0.2",
-      "hash": "sha256:dab1e59138a349ef41ab321063dc6d47bc6e79bcde2dcd32d71e10249e81b66f"
+      "version": "1.0.3",
+      "hash": "sha256:34c3adb47d18fe4e49c31b1e84260002b3677a8ba22b5ae2ac6c38cf05b958c8"
     },
     "secret": {
       "description": "Encrypted local env store (Fernet); inject secrets into shells or processes.",
@@ -142,8 +142,8 @@
         "cryptography>=42.0.0",
         "rich>=13.0"
       ],
-      "version": "1.0.0",
-      "hash": "sha256:1bfa9c4ad3e82d112438dd4c970e901ce411e4abe6b09b0b17f46fe2259dfcbd"
+      "version": "1.0.1",
+      "hash": "sha256:e6231866663312b89866ca3ba9bf39fe5d2400479d91327dff01528499730a27"
     },
     "bench": {
       "description": "Quick machine benchmark \u2014 CPU / memory / disk / network / optional GPU.",
@@ -153,8 +153,8 @@
         "psutil>=7.1.3",
         "rich>=13.0"
       ],
-      "version": "1.0.0",
-      "hash": "sha256:78972b87a4f637ff34ff923271f91b5805b0dc02027307caa38951c961a7bdb7"
+      "version": "1.0.2",
+      "hash": "sha256:90b68dbf05deac3239bddb1cdac2e0cca654213e9026e4c92b39082257ebfc2e"
     },
     "share": {
       "description": "Serve a file/dir over HTTP, optionally exposed to a remote via ssh -R.",

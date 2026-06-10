@@ -31,19 +31,23 @@ def _listeners(
 ) -> list[tuple[psutil.Process | None, str, int, str]]:
     """Return (proc, laddr_ip, laddr_port, status) for matching LISTEN sockets."""
     rows: list[tuple[psutil.Process | None, str, int, str]] = []
+    # Pairs of (pid_or_None, conn). System-wide call gives us conn.pid; the
+    # per-process fallback yields the process we got the conn from.
+    pairs: list[tuple[int | None, "psutil._common.sconn"]] = []
     try:
-        conns = psutil.net_connections(kind="inet")
+        for c in psutil.net_connections(kind="inet"):
+            pairs.append((c.pid, c))
     except (psutil.AccessDenied, PermissionError):
         console.print(
             "[yellow]note:[/yellow] some sockets hidden — try with sudo for full visibility."
         )
-        conns = []
         for proc in psutil.process_iter(["pid"]):
             try:
-                conns.extend(proc.net_connections(kind="inet"))
+                for c in proc.net_connections(kind="inet"):
+                    pairs.append((proc.pid, c))
             except (psutil.NoSuchProcess, psutil.AccessDenied):
                 continue
-    for c in conns:
+    for owner_pid, c in pairs:
         if c.status != psutil.CONN_LISTEN:
             continue
         if not c.laddr:
@@ -51,9 +55,9 @@ def _listeners(
         if port is not None and c.laddr.port != port:
             continue
         proc = None
-        if c.pid:
+        if owner_pid:
             try:
-                proc = psutil.Process(c.pid)
+                proc = psutil.Process(owner_pid)
             except psutil.NoSuchProcess:
                 pass
         rows.append((proc, c.laddr.ip, c.laddr.port, c.status))
@@ -87,20 +91,33 @@ def _render(rows, title: str):
     console.print(table)
 
 
+class _PortGroup(click.Group):
+    """Allow `usm port 8080` to dispatch to the `show` subcommand."""
+
+    def resolve_command(self, ctx, args):
+        if args and args[0].isdigit():
+            show = self.get_command(ctx, "show")
+            assert show is not None
+            return "show", show, args
+        return super().resolve_command(ctx, args)
+
+
 @click.group(
+    cls=_PortGroup,
     invoke_without_command=True,
     context_settings={"help_option_names": ["-h", "--help"]},
     help="Inspect or free TCP/UDP ports.",
 )
-@click.argument("port", required=False, type=int)
 @click.pass_context
-def cli(ctx, port):
-    if ctx.invoked_subcommand is not None:
-        return
-    if port is None:
+def cli(ctx):
+    if ctx.invoked_subcommand is None:
         _render(_listeners(), title="All LISTEN sockets")
-    else:
-        _render(_listeners(port), title=f"Port {port}")
+
+
+@cli.command("show", help="Show LISTEN socket(s) on PORT.")
+@click.argument("port", type=int)
+def cmd_show(port):
+    _render(_listeners(port), title=f"Port {port}")
 
 
 @cli.command("ls", help="List every LISTEN socket.")

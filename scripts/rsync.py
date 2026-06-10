@@ -16,6 +16,7 @@ Examples:
 
 from __future__ import annotations
 
+import shlex
 import shutil
 import subprocess
 import sys
@@ -114,18 +115,12 @@ def cli(
             ssh += ["-i", ssh_key]
         if ssh_port:
             ssh += ["-p", str(ssh_port)]
-        argv += ["-e", " ".join(ssh)]
+        argv += ["-e", shlex.join(ssh)]
     argv += list(args)
     if print_cmd:
-        click.echo(" ".join(_q(a) for a in argv))
+        click.echo(shlex.join(argv))
         return
     sys.exit(subprocess.call(argv))
-
-
-def _q(s: str) -> str:
-    if not s or any(c in s for c in " \"'$\\"):
-        return "'" + s.replace("'", "'\\''") + "'"
-    return s
 
 
 if __name__ == "__main__":
