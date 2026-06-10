@@ -26,8 +26,8 @@
         "psutil>=7.1.3",
         "pyyaml>=6.0.3"
       ],
-      "version": "1.0.0",
-      "hash": "sha256:c029130d9f9315fca0c07959d93e14c40366321af4e8d14d024235b3a2762830"
+      "version": "1.0.1",
+      "hash": "sha256:59a0ef44c7301bf77449b4f0a958357f7550cf762443924fdbf082d12ba50d6b"
     },
     "check_py": {
       "description": "Check Python3 installation and version.",
@@ -80,8 +80,8 @@
         "click>=8.2.1",
         "rich>=13.0"
       ],
-      "version": "1.0.0",
-      "hash": "sha256:9fa76344845bd3d6e82c5821887e420e951fe10a0d07cf394222439425a46f49"
+      "version": "1.0.1",
+      "hash": "sha256:56634d7199d51e2cdad609ccf09bbf849b2e8290f8b1bcf8508af802af006b87"
     },
     "port": {
       "description": "Show what's listening on which port; free ports by killing the holder.",
@@ -100,8 +100,8 @@
       "requirements": [
         "click>=8.2.1"
       ],
-      "version": "1.0.0",
-      "hash": "sha256:ac2c34d43ebd5f218338436a09b8b555150ac28854e7f54c9cd0fabff30eb603"
+      "version": "1.0.1",
+      "hash": "sha256:deb5590297297b6fcfebb8c1175d283bc852aa9412643bb5492fe40ce73cdf02"
     },
     "wait": {
       "description": "wait-for-it: block until host:port / TCP / HTTP endpoints are reachable.",
@@ -131,8 +131,8 @@
         "httpx>=0.27.0",
         "rich>=13.0"
       ],
-      "version": "1.0.3",
-      "hash": "sha256:34c3adb47d18fe4e49c31b1e84260002b3677a8ba22b5ae2ac6c38cf05b958c8"
+      "version": "1.0.4",
+      "hash": "sha256:3938ab8be26b5383311d9a9baf238c136858871c56c50cff75e6386b73624427"
     },
     "secret": {
       "description": "Encrypted local env store (Fernet); inject secrets into shells or processes.",
@@ -142,8 +142,8 @@
         "cryptography>=42.0.0",
         "rich>=13.0"
       ],
-      "version": "1.0.1",
-      "hash": "sha256:e6231866663312b89866ca3ba9bf39fe5d2400479d91327dff01528499730a27"
+      "version": "1.0.2",
+      "hash": "sha256:32b80947b3ff066a9b41df3229039400d3a271421a47dd90a6bdf53f6739ceaf"
     },
     "bench": {
       "description": "Quick machine benchmark \u2014 CPU / memory / disk / network / optional GPU.",
@@ -153,8 +153,8 @@
         "psutil>=7.1.3",
         "rich>=13.0"
       ],
-      "version": "1.0.2",
-      "hash": "sha256:90b68dbf05deac3239bddb1cdac2e0cca654213e9026e4c92b39082257ebfc2e"
+      "version": "1.0.3",
+      "hash": "sha256:ddf8e8298210d756f0325ce0bcf160310b2cdbec7961cdb93c8ae467a0e002de"
     },
     "share": {
       "description": "Serve a file/dir over HTTP, optionally exposed to a remote via ssh -R.",

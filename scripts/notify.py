@@ -94,7 +94,8 @@ def _send_telegram(c: dict, title: str, message: str) -> tuple[bool, str]:
 
 
 def _md(s: str) -> str:
-    for ch in r"_*[]()~`>#+-=|{}.!":
+    s = s.replace("\\", "\\\\")
+    for ch in "_*[]()~`>#+-=|{}.!":
         s = s.replace(ch, "\\" + ch)
     return s
 

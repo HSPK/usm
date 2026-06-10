@@ -50,7 +50,14 @@ def _local_paste() -> bytes | None:
     if sys.platform == "darwin":
         candidates.append(["pbpaste"])
     elif sys.platform == "win32":
-        candidates.append(["powershell.exe", "-NoProfile", "-Command", "Get-Clipboard"])
+        candidates.append(
+            [
+                "powershell.exe",
+                "-NoProfile",
+                "-Command",
+                "[Console]::Out.Write((Get-Clipboard -Raw))",
+            ]
+        )
     else:
         if os.environ.get("WAYLAND_DISPLAY"):
             candidates.append(["wl-paste", "--no-newline"])

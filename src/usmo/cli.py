@@ -157,7 +157,13 @@ def _run_script(
         rich.print(f"Install uv first: {core.UV_INSTALL_HINT}")
         raise click.ClickException(str(exc)) from exc
     except subprocess.CalledProcessError as exc:
-        sys.exit(exc.returncode)
+        # Translate signal-death (negative returncode) to the shell convention
+        # 128+N (e.g. SIGINT -> 130, SIGTERM -> 143, SIGKILL -> 137) so callers
+        # can recognise cancellation via `$? -eq 130` etc.
+        rc = exc.returncode
+        if rc is not None and rc < 0:
+            rc = 128 - rc
+        sys.exit(rc if rc is not None else 1)
     except OSError as exc:
         rich.print(f"[bold red]An error occurred:[/bold red] {exc}")
         raise click.ClickException(str(exc)) from exc

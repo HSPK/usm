@@ -58,7 +58,8 @@ class UnknownCommand(UsmError):
 
 class DownloadError(UsmError):
     def __init__(self, filename: str, status: int) -> None:
-        super().__init__(f"Failed to download {filename} (HTTP {status}).")
+        detail = "network error" if status == 0 else f"HTTP {status}"
+        super().__init__(f"Failed to download {filename} ({detail}).")
         self.filename = filename
         self.status = status
 
@@ -130,7 +131,10 @@ def download_file(filename: str, *, on_progress: ProgressHook = _null_hook) -> P
     import requests
 
     on_progress(filename)
-    response = requests.get(f"{RESOURCE_BASE_URL}{filename}")
+    try:
+        response = requests.get(f"{RESOURCE_BASE_URL}{filename}", timeout=(5, 60))
+    except requests.RequestException as exc:
+        raise DownloadError(filename, 0) from exc
     if response.status_code != 200:
         raise DownloadError(filename, response.status_code)
     dest = CACHE_SCRIPT_DIR / filename

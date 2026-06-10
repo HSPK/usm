@@ -56,7 +56,12 @@ def bench_cpu(seconds: float = 3.0) -> list[tuple[str, str]]:
         ("physical cores", str(psutil.cpu_count(logical=False))),
         ("logical cores", str(psutil.cpu_count(logical=True))),
         ("single-thread float ops", f"{rate:6.2f} Mops/s"),
-        ("load 1m / 5m / 15m", " / ".join(f"{x:.2f}" for x in os.getloadavg())),
+        (
+            "load 1m / 5m / 15m",
+            " / ".join(f"{x:.2f}" for x in os.getloadavg())
+            if hasattr(os, "getloadavg")
+            else "n/a (windows)",
+        ),
     ]
 
 

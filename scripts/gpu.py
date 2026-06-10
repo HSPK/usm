@@ -16,7 +16,6 @@ import os
 import shutil
 import signal
 import subprocess
-import sys
 import time
 from dataclasses import dataclass
 
@@ -26,6 +25,7 @@ from rich.live import Live
 from rich.table import Table
 
 console = Console()
+err_console = Console(stderr=True)
 NVSMI = "nvidia-smi"
 GPU_QUERY = (
     "index,name,utilization.gpu,memory.used,memory.total,"
@@ -321,7 +321,7 @@ def cmd_kill(target, user_filter, force):
                 f"[green]✓[/green] {sig.name} → pid {v.pid} ({v.user}, {v.name})"
             )
         except OSError as e:
-            console.print(f"[red]✗[/red] pid {v.pid}: {e}", file=sys.stderr)
+            err_console.print(f"[red]✗[/red] pid {v.pid}: {e}")
 
 
 if __name__ == "__main__":

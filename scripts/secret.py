@@ -40,14 +40,10 @@ console = Console()
 
 def _write_secure(path: Path, data: bytes) -> None:
     """Atomically write *data* to *path* with mode 0o600 (no umask race)."""
-    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
-    fd = os.open(path, flags, 0o600)
-    try:
-        with os.fdopen(fd, "wb") as f:
-            f.write(data)
-    except Exception:
-        os.close(fd) if not isinstance(fd, int) else None
-        raise
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    # os.fdopen takes ownership of fd; the `with` block closes it.
+    with os.fdopen(fd, "wb") as f:
+        f.write(data)
     try:
         os.chmod(path, 0o600)
     except OSError:
