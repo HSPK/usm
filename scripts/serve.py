@@ -302,9 +302,9 @@ class MiniserveOpts:
     upload: bool = True
     auth: str | None = None
     qrcode: bool = False
-    hidden: bool = False
+    hidden: bool = True
     verbose: bool = False
-    enable_archive: bool = True  # tar.gz + zip download buttons
+    enable_archive: bool = True  # tar / tar.gz / zip download buttons
     delete: bool = False  # allow deletion via the web UI
 
     def args(self) -> list[str]:
@@ -325,7 +325,7 @@ class MiniserveOpts:
         if self.hidden:
             out.append("--hidden")
         if self.enable_archive:
-            out += ["--enable-tar-gz", "--enable-zip"]
+            out += ["--enable-tar", "--enable-tar-gz", "--enable-zip"]
         return out
 
 
@@ -463,6 +463,28 @@ class Source(Protocol):
     def open(self, port: int, bind: str, opts: MiniserveOpts) -> Session: ...
 
 
+def _feature_lines(opts: MiniserveOpts, base_url: str) -> list[str]:
+    lines: list[str] = []
+    if opts.enable_archive:
+        lines.append(
+            "  [dim]folder download:[/dim] "
+            f"[cyan]{base_url}?download=tar_gz[/cyan] "
+            "[dim](or zip / tar)[/dim]"
+        )
+    bits: list[str] = []
+    if opts.upload:
+        bits.append("uploads")
+    if opts.delete:
+        bits.append("delete")
+    if opts.hidden:
+        bits.append("dotfiles")
+    if opts.auth:
+        bits.append("basic-auth")
+    if bits:
+        lines.append("  [dim]enabled:[/dim] " + ", ".join(bits))
+    return lines
+
+
 @dataclass
 class LocalServe:
     path: Path
@@ -471,14 +493,21 @@ class LocalServe:
 
     def open(self, port: int, bind: str, opts: MiniserveOpts) -> Session:
         binary = str(ensure_local_miniserve(upgrade=self.upgrade))
-        path = str(self.path.resolve())
-        argv = _miniserve_argv(binary, path, port, bind, opts)
+        path = self.path.resolve()
+        argv = _miniserve_argv(binary, str(path), port, bind, opts)
         proc = _spawn(argv)
-        sess = Session(headline=path)
+        sess = Session(headline=str(path))
         sess.add_proc(proc)
-        sess.add_line(f"  local:  http://{bind}:{port}/")
-        if opts.upload:
-            sess.add_line("  [dim]uploads enabled[/dim]")
+        base = f"http://{bind}:{port}/"
+        sess.add_line(f"  local:  [cyan]{base}[/cyan]")
+        if path.is_file():
+            sess.add_line(
+                "  [yellow]single-file mode:[/yellow] miniserve is serving just this file; "
+                "no folder listing / no archive download. "
+                "Point at the parent directory to get the full UI."
+            )
+        else:
+            sess.lines.extend(_feature_lines(opts, base))
         _wait_for_or_die(proc, sess, "miniserve exited immediately")
         if self.tunnel:
             self._attach_push(sess, port)
@@ -493,7 +522,7 @@ class LocalServe:
         sess.add_proc(proc)
         host = ssh_target.split("@", 1)[-1]
         sess.add_line(
-            f"  remote: http://{host}:{rport}/  "
+            f"  remote: [cyan]http://{host}:{rport}/[/cyan]  "
             f"[dim](via ssh -R; reachable on {ssh_target}'s localhost)[/dim]"
         )
         _wait_for_or_die(proc, sess, "tunnel ssh exited immediately")
@@ -525,12 +554,14 @@ class RemoteServe:
             headline=f"{self.ssh_target}:{self.remote_path} [dim](remote)[/dim]"
         )
         sess.add_proc(proc)
+        base = f"http://{bind}:{port}/"
         sess.add_line(
-            f"  local:  http://{bind}:{port}/  "
+            f"  local:  [cyan]{base}[/cyan]  "
             f"[dim](ssh -L {port}->{rport}; miniserve on remote)[/dim]"
         )
+        sess.lines.extend(_feature_lines(opts, base))
         if opts.upload:
-            sess.add_line("  [dim]uploads enabled (writes land on the remote)[/dim]")
+            sess.add_line("  [dim]note: uploads write to the remote filesystem[/dim]")
         _wait_for_or_die(proc, sess, "ssh exited immediately; remote port may be taken")
         return sess
 
@@ -609,7 +640,12 @@ def run_until_done(sess: Session) -> None:
     is_flag=True,
     help="Print a QR code to the terminal for the URL.",
 )
-@click.option("-H", "--hidden", is_flag=True, help="Show hidden (dotfile) entries.")
+@click.option(
+    "--hidden/--no-hidden",
+    default=True,
+    show_default=True,
+    help="Show hidden (dotfile) entries in the listing.",
+)
 @click.option(
     "--no-archive",
     "archive",

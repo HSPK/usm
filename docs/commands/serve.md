@@ -39,9 +39,10 @@ usm serve ~/data --tunnel u@bastion       # push: serve locally, expose on basti
 | --- | --- | --- |
 | `--upload / --no-upload` | **upload** | Uploads (with mkdir + overwrite) are on; pass `--no-upload` for read-only. |
 | `--delete` | off | Deletion is destructive — opt-in only. |
+| `--hidden / --no-hidden` | **hidden** | Dotfiles are listed by default (it's almost always what you want when sharing your own files). |
 | `--bind` | `127.0.0.1` | LAN exposure is explicit (`--bind 0.0.0.0`). |
 | `--auth` | none | Set with `USER:PASS`; see miniserve docs for hashed form. |
-| archives | on | `--no-archive` disables on-the-fly tar.gz / zip download buttons. |
+| archives | on | Three download buttons (`.tar`, `.tar.gz`, `.zip`) at the top of every folder page; pass `--no-archive` to disable. |
 | `--upgrade` (`-U`) | — | Force re-download of the miniserve binary on this run. |
 
 ## Local vs. remote — picking the right command
