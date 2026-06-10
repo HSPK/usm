@@ -17,6 +17,7 @@ downloads the pinned version into ``~/.cache/usm/bin/miniserve`` (chmod
 from __future__ import annotations
 
 import contextlib
+import os
 import platform
 import random
 import re
@@ -131,15 +132,22 @@ def _download(url: str, dest: Path) -> None:
 
 
 def ensure_local_miniserve(*, upgrade: bool = False) -> Path:
-    """Return a usable miniserve path. Prefer usm-managed, then $PATH, else install."""
+    """Return a usable miniserve path.
+
+    Resolution order:
+      1. ``$USM_MINISERVE_BIN`` if it points at an executable (escape hatch).
+      2. The usm-managed pinned binary (``~/.cache/usm/bin/miniserve``).
+      3. Download the pinned release into the managed location.
+
+    The system ``$PATH`` is *not* consulted: a distro-packaged miniserve is
+    often too old to honour ``--enable-tar-gz`` / ``--enable-zip`` the way
+    we expect, which silently breaks the folder-download UI.
+    """
+    override = os.environ.get("USM_MINISERVE_BIN")
+    if override and os.access(override, os.X_OK):
+        return Path(override)
     if not upgrade and LOCAL_MINISERVE.exists():
         return LOCAL_MINISERVE
-    if not upgrade:
-        from shutil import which
-
-        sys_bin = which("miniserve")
-        if sys_bin:
-            return Path(sys_bin)
     target = Target.local()
     console.print(
         f"[dim]installing miniserve {MINISERVE_VERSION} ({target.asset_suffix}) "
@@ -202,11 +210,23 @@ def probe_remote(ssh_target: str, path: str) -> RemoteProbe:
 def ensure_remote_miniserve(
     ssh_target: str, probe: RemoteProbe, *, upgrade: bool = False
 ) -> str:
-    """Return remote path to a usable miniserve, installing it via ssh if needed."""
+    """Return remote path to a usable miniserve, installing it via ssh if needed.
+
+    Resolution order on the remote:
+      1. ``$USM_MINISERVE_BIN`` if set and executable (escape hatch).
+      2. The usm-managed pinned binary (``~/.cache/usm/bin/miniserve``).
+      3. Download the pinned release into the managed location.
+
+    The remote ``$PATH`` is *not* consulted (see ``ensure_local_miniserve``
+    for the rationale: old distro packages silently lose the
+    folder-download buttons).
+    """
     check = _ssh_run(
         ssh_target,
+        f'if [ -n "$USM_MINISERVE_BIN" ] && [ -x "$USM_MINISERVE_BIN" ]; then '
+        f'  echo "$USM_MINISERVE_BIN"; exit 0; '
+        f"fi; "
         f"[ -x {REMOTE_MINISERVE} ] && echo managed && exit 0; "
-        "command -v miniserve >/dev/null 2>&1 && command -v miniserve && exit 0; "
         "echo missing",
         timeout=15,
     )
@@ -215,7 +235,7 @@ def ensure_remote_miniserve(
         if out == "managed":
             return REMOTE_MINISERVE
         if out != "missing":
-            return out  # absolute path printed by `command -v`
+            return out  # absolute path from $USM_MINISERVE_BIN
     url = probe.target.asset_url
     console.print(
         f"[dim]installing miniserve {MINISERVE_VERSION} on {ssh_target} "
