@@ -667,11 +667,11 @@ def run_until_done(sess: Session) -> None:
     help="Show hidden (dotfile) entries in the listing.",
 )
 @click.option(
-    "--no-archive",
-    "archive",
-    flag_value=False,
+    "--archive/--no-archive",
     default=True,
-    help="Disable on-the-fly tar.gz / zip download of directories.",
+    show_default=True,
+    help="Render folder tar / tar.gz / zip download buttons at the top of "
+    "every directory page.",
 )
 @click.option("-v", "--verbose", is_flag=True, help="miniserve access logs.")
 @click.option(
