@@ -124,20 +124,20 @@ def _slug(value: str) -> str:
     return re.sub(r"[^a-zA-Z0-9]+", "-", value).strip("-").lower() or "host"
 
 
-def _short_target(ssh_target: str) -> str:
-    host = ssh_target.split("@", 1)[-1].split(":", 1)[0]
-    return _slug(host.split(".", 1)[0])[:24]
-
-
 def _make_id(kind: str, port: int, ssh_target: str, custom: str | None) -> str:
     if custom:
         return _slug(custom)
-    base = f"{kind}-{port}-{_short_target(ssh_target)}"
-    candidate, suffix = base, 2
-    while (STATE_DIR / f"{candidate}.json").exists():
-        candidate = f"{base}-{suffix}"
-        suffix += 1
-    return candidate
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    used = set()
+    for p in STATE_DIR.glob("*.json"):
+        try:
+            used.add(int(p.stem))
+        except ValueError:
+            continue
+    n = 0
+    while n in used:
+        n += 1
+    return str(n)
 
 
 def _parse_spec(spec: str, kind: str) -> dict:
@@ -349,7 +349,7 @@ def _delete(t: Tunnel) -> None:
             pass
 
 
-def _start(t: Tunnel) -> None:
+def _start(t: Tunnel, *, new: bool = False) -> None:
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     argv = _build_argv(t)
     log = open(t.log_path(), "ab", buffering=0)
@@ -380,9 +380,12 @@ def _start(t: Tunnel) -> None:
     time.sleep(1.5)
     if proc.poll() is not None:
         tail = _tail(t.log_path(), 12)
-        t.pid = None
-        t.started_at = None
-        t.save()
+        if new:
+            _delete(t)
+        else:
+            t.pid = None
+            t.started_at = None
+            t.save()
         console.print(
             f"[red]✗[/red] ssh exited immediately (code {proc.returncode}). Recent log:"
         )
@@ -464,9 +467,7 @@ def _make_tunnel(kind: str, spec: str, ssh_target: str, opts: dict) -> Tunnel:
 
 
 def _common_opts(f):
-    f = click.option(
-        "--name", help="Custom tunnel id (default: <kind>-<port>-<host>)."
-    )(f)
+    f = click.option("--name", help="Custom tunnel id (default: next free integer).")(f)
     f = click.option(
         "-i",
         "--identity",
@@ -510,7 +511,7 @@ SPEC forms:
 @click.argument("ssh_target")
 @_common_opts
 def cmd_local(spec, ssh_target, **opts):
-    _start(_make_tunnel("local", spec, ssh_target, opts))
+    _start(_make_tunnel("local", spec, ssh_target, opts), new=True)
 
 
 @cli.command(
@@ -530,7 +531,7 @@ SPEC forms:
 @click.argument("ssh_target")
 @_common_opts
 def cmd_remote(spec, ssh_target, **opts):
-    _start(_make_tunnel("remote", spec, ssh_target, opts))
+    _start(_make_tunnel("remote", spec, ssh_target, opts), new=True)
 
 
 @cli.command(
@@ -542,7 +543,7 @@ def cmd_remote(spec, ssh_target, **opts):
 @click.argument("ssh_target")
 @_common_opts
 def cmd_socks(spec, ssh_target, **opts):
-    _start(_make_tunnel("socks", spec, ssh_target, opts))
+    _start(_make_tunnel("socks", spec, ssh_target, opts), new=True)
 
 
 @cli.command("ls", short_help="List tunnels.")

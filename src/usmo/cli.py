@@ -15,6 +15,7 @@ from usmo.core import Script, Scripts
 
 # Presentation helpers ------------------------------------------------------
 
+
 def _on_download(filename: str) -> None:
     rich.print(f"[bold green]Downloading:[/bold green] {filename}")
 
@@ -30,9 +31,7 @@ def _print_overview(scripts: Scripts) -> None:
             else "[dim]not cached[/dim]"
         )
         uv_tag = f"  [cyan]+uv[/cyan]({len(s.requirements)} req)" if s.uses_uv else ""
-        rich.print(
-            f"  [bold]{name:20s}[/bold] {s.description:50s}  {status}{uv_tag}"
-        )
+        rich.print(f"  [bold]{name:20s}[/bold] {s.description:50s}  {status}{uv_tag}")
     rich.print("\n[bold underline]Built-in:[/bold underline]")
     for name, help_text in _BUILTIN_HELP:
         rich.print(f"  [bold]{name:20s}[/bold] {help_text}")
@@ -52,6 +51,7 @@ def _print_script_help(script: Script) -> None:
 
 
 # Built-in commands ---------------------------------------------------------
+
 
 def _cmd_list(scripts: Scripts) -> None:
     _print_overview(scripts)
@@ -136,6 +136,7 @@ def _maybe_auto_check(command: str | None, debug: bool) -> None:
 
 # Script dispatch -----------------------------------------------------------
 
+
 def _run_script(
     script: Script,
     args: tuple[str, ...],
@@ -155,12 +156,15 @@ def _run_script(
         )
         rich.print(f"Install uv first: {core.UV_INSTALL_HINT}")
         raise click.ClickException(str(exc)) from exc
-    except (subprocess.CalledProcessError, OSError) as exc:
+    except subprocess.CalledProcessError as exc:
+        sys.exit(exc.returncode)
+    except OSError as exc:
         rich.print(f"[bold red]An error occurred:[/bold red] {exc}")
         raise click.ClickException(str(exc)) from exc
 
 
 # Entry-point ---------------------------------------------------------------
+
 
 @click.command(
     context_settings=dict(
@@ -171,8 +175,12 @@ def _run_script(
 )
 @click.argument("command", type=str, required=False, default=None)
 @click.argument("args", nargs=-1, type=str)
-@click.option("-h", "--help", "show_help", is_flag=True, help="Show this message and exit.")
-@click.option("--upgrade", "-U", is_flag=True, help="Upgrade the script before running.")
+@click.option(
+    "-h", "--help", "show_help", is_flag=True, help="Show this message and exit."
+)
+@click.option(
+    "--upgrade", "-U", is_flag=True, help="Upgrade the script before running."
+)
 @click.option("--debug", is_flag=True, help="Enable debug mode.")
 def cli(
     command: str | None,

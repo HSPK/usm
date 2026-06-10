@@ -38,6 +38,7 @@ def _null_hook(_filename: str) -> None:
 
 # Errors --------------------------------------------------------------------
 
+
 class UsmError(Exception):
     """Base class for SDK errors."""
 
@@ -63,6 +64,7 @@ class DownloadError(UsmError):
 
 
 # Script model --------------------------------------------------------------
+
 
 @dataclass(frozen=True)
 class Script:
@@ -122,6 +124,7 @@ Scripts = dict[str, Script]
 
 # Remote fetch & cache ------------------------------------------------------
 
+
 def download_file(filename: str, *, on_progress: ProgressHook = _null_hook) -> Path:
     """Download a single file from the remote scripts directory."""
     import requests
@@ -170,6 +173,7 @@ def load_scripts(
 
 # Maintenance actions -------------------------------------------------------
 
+
 def clean_cache() -> Path | None:
     """Remove the script cache directory; return the path if it existed."""
     if not CACHE_SCRIPT_DIR.exists():
@@ -187,7 +191,7 @@ def iter_updates(
     previously cached and just re-downloaded.
     """
     download_file(CONFIG_FILENAME, on_progress=on_progress)
-    for name, script in load_scripts(force_download=True, on_progress=on_progress).items():
+    for name, script in load_scripts(on_progress=on_progress).items():
         if script.cached_path.exists():
             download_file(script.path, on_progress=on_progress)
             yield name, True
@@ -199,6 +203,7 @@ def resolve_version() -> str:
     """Return the installed usmo version, or a sentinel when unknown."""
     try:
         from usmo._version import __version__ as ver
+
         return ver
     except ImportError:
         pass
@@ -210,6 +215,7 @@ def resolve_version() -> str:
 
 # Auto-check ----------------------------------------------------------------
 
+
 @dataclass(frozen=True)
 class VersionDiff:
     """A script whose remote version differs from the local cached one."""
@@ -220,8 +226,10 @@ class VersionDiff:
 
 
 def _script_versions(raw_scripts: dict) -> dict[str, str | None]:
-    return {name: (entry.get("version") if isinstance(entry, dict) else None)
-            for name, entry in raw_scripts.items()}
+    return {
+        name: (entry.get("version") if isinstance(entry, dict) else None)
+        for name, entry in raw_scripts.items()
+    }
 
 
 def _load_local_script_versions() -> dict[str, str | None] | None:
@@ -312,6 +320,7 @@ def check_for_update(*, force: bool = False) -> list[VersionDiff] | None:
 
 
 # Manifest hashing & version bump (for pre-commit) --------------------------
+
 
 def compute_script_hash(path: Path) -> str:
     """Return ``sha256:<hex>`` for the bytes of *path*."""
@@ -426,6 +435,7 @@ def sync_manifest(
 
 
 # Script execution ----------------------------------------------------------
+
 
 def resolve_script_path(
     script: Script,
