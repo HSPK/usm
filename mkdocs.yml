@@ -76,6 +76,7 @@ nav:
       - wait — wait-for-it: commands/wait.md
       - bench — Machine benchmark: commands/bench.md
       - share — File share over HTTP: commands/share.md
+      - serve — Rich file server (uploads, range, zip): commands/serve.md
       - init — Machine bootstrap: commands/init.md
       - blobmount — Mount Azure Blob: commands/blobmount.md
       - cp — Copy with Azure support: commands/cp.md

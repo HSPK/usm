@@ -8,6 +8,7 @@ from typing import Callable
 
 import click
 import rich
+from rich import box
 from rich.console import Console
 from rich.table import Table
 
@@ -24,55 +25,65 @@ def _on_download(filename: str) -> None:
     rich.print(f"[bold green]Downloading:[/bold green] {filename}")
 
 
-def _print_overview(scripts: Scripts) -> None:
-    rich.print("[bold]Available commands:[/bold]")
-
+def _scripts_table(scripts: Scripts) -> Table:
     table = Table(
         title="Scripts",
         title_justify="left",
-        title_style="bold underline",
+        title_style="bold",
         show_header=True,
         header_style="dim",
-        box=None,
+        box=box.SIMPLE_HEAD,
         pad_edge=False,
         padding=(0, 2, 0, 0),
+        expand=False,
     )
-    table.add_column("name", style="bold", no_wrap=True)
+    table.add_column("name", style="bold cyan", no_wrap=True)
     table.add_column("version", style="dim", no_wrap=True)
-    table.add_column("description", overflow="fold")
+    table.add_column("description", overflow="fold", min_width=30, ratio=1)
+    table.add_column("uv", no_wrap=True, justify="center")
     table.add_column("status", no_wrap=True, justify="right")
-    table.add_column("uv", no_wrap=True)
 
     for name in sorted(scripts):
         s = scripts[name]
         status = (
-            "[green]cached[/green]"
+            "[green]●[/green] cached"
             if s.cached_path.exists()
-            else "[dim]not cached[/dim]"
+            else "[dim]○ missing[/dim]"
         )
         table.add_row(
             name,
             f"v{s.version}" if s.version else "v?",
             s.description,
+            "[cyan]uv[/cyan]" if s.uses_uv else "",
             status,
-            "[cyan]+uv[/cyan]" if s.uses_uv else "",
         )
-    console.print(table)
+    return table
 
-    builtin = Table(
+
+def _builtin_table() -> Table:
+    table = Table(
         title="Built-in",
         title_justify="left",
-        title_style="bold underline",
+        title_style="bold",
         show_header=False,
-        box=None,
+        box=box.SIMPLE_HEAD,
         pad_edge=False,
         padding=(0, 2, 0, 0),
+        expand=False,
     )
-    builtin.add_column("name", style="bold", no_wrap=True)
-    builtin.add_column("help", overflow="fold")
+    table.add_column("name", style="bold cyan", no_wrap=True)
+    table.add_column("help", overflow="fold", min_width=30, ratio=1)
     for name, help_text in _BUILTIN_HELP:
-        builtin.add_row(name, help_text)
-    console.print(builtin)
+        table.add_row(name, help_text)
+    return table
+
+
+def _print_overview(scripts: Scripts) -> None:
+    console.print(_scripts_table(scripts))
+    console.print(_builtin_table())
+    console.print(
+        "[dim]Run [bold]usm <name> --help[/bold] for command-specific help.[/dim]"
+    )
 
 
 def _print_script_help(script: Script) -> None:

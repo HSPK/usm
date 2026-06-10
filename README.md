@@ -87,6 +87,7 @@ changes required.
 | `usm wait TARGET...` | Block until host:port / TCP / HTTP endpoints are reachable (AND semantics). |
 | `usm bench [--quick\|--full]` | Quick machine benchmark — CPU / memory / disk / network / optional GPU. |
 | `usm share PATH [--tunnel SSH_TARGET[:PORT]]` | Serve a file/dir over HTTP; optionally exposed to a remote via `ssh -R`. |
+| `usm serve PATH` or `usm serve user@host:/path` | Rich file server (uploads, range, zip download); auto-installs `miniserve`. |
 
 ### Built-in helpers
 

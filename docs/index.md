@@ -57,6 +57,7 @@ you want from the [Commands](commands/index.md) section.
 | [`usm wait`](commands/wait.md) | wait-for-it (host:port, TCP, HTTP) |
 | [`usm bench`](commands/bench.md) | Quick machine benchmark (CPU / mem / disk / network / GPU) |
 | [`usm share`](commands/share.md) | Serve a file/dir over HTTP, optionally tunneled out |
+| [`usm serve`](commands/serve.md) | Full-featured file server (uploads, range, zip, auth) via miniserve |
 | [`usm init`](commands/init.md) | Bootstrap a fresh Ubuntu machine |
 | [`usm blobmount`](commands/blobmount.md) | Mount an Azure blob container locally |
 | [`usm cp`](commands/cp.md) | Copy across local + blobfuse mountpoints, delegating to azcopy |
