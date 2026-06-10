@@ -93,7 +93,7 @@ changes required.
 | Command | Description |
 | --- | --- |
 | `usm list` | List all available commands and their cache status. |
-| `usm update` | Re-download the config and all cached scripts. |
+| `usm update` | Re-download the config and all cached scripts (or just `usm update NAME...`). |
 | `usm clean` | Remove the script cache directory (`~/.cache/usm/scripts`). |
 | `usm version` | Show the installed `usm` version. |
 

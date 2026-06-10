@@ -49,6 +49,14 @@ update is to keep what you use fresh, not to bulk-fetch everything.
 usm update
 ```
 
+Pass one or more names to refresh just those scripts (forced download
+even if they were never cached):
+
+```bash
+usm update share
+usm update share cp
+```
+
 Output:
 
 ```text

@@ -8,9 +8,13 @@ from typing import Callable
 
 import click
 import rich
+from rich.console import Console
+from rich.table import Table
 
 from usmo import core
 from usmo.core import Script, Scripts
+
+console = Console()
 
 
 # Presentation helpers ------------------------------------------------------
@@ -21,8 +25,24 @@ def _on_download(filename: str) -> None:
 
 
 def _print_overview(scripts: Scripts) -> None:
-    rich.print("[bold]Available commands:[/bold]\n")
-    rich.print("[bold underline]Scripts:[/bold underline]")
+    rich.print("[bold]Available commands:[/bold]")
+
+    table = Table(
+        title="Scripts",
+        title_justify="left",
+        title_style="bold underline",
+        show_header=True,
+        header_style="dim",
+        box=None,
+        pad_edge=False,
+        padding=(0, 2, 0, 0),
+    )
+    table.add_column("name", style="bold", no_wrap=True)
+    table.add_column("version", style="dim", no_wrap=True)
+    table.add_column("description", overflow="fold")
+    table.add_column("status", no_wrap=True, justify="right")
+    table.add_column("uv", no_wrap=True)
+
     for name in sorted(scripts):
         s = scripts[name]
         status = (
@@ -30,15 +50,36 @@ def _print_overview(scripts: Scripts) -> None:
             if s.cached_path.exists()
             else "[dim]not cached[/dim]"
         )
-        uv_tag = f"  [cyan]+uv[/cyan]({len(s.requirements)} req)" if s.uses_uv else ""
-        rich.print(f"  [bold]{name:20s}[/bold] {s.description:50s}  {status}{uv_tag}")
-    rich.print("\n[bold underline]Built-in:[/bold underline]")
+        table.add_row(
+            name,
+            f"v{s.version}" if s.version else "v?",
+            s.description,
+            status,
+            "[cyan]+uv[/cyan]" if s.uses_uv else "",
+        )
+    console.print(table)
+
+    builtin = Table(
+        title="Built-in",
+        title_justify="left",
+        title_style="bold underline",
+        show_header=False,
+        box=None,
+        pad_edge=False,
+        padding=(0, 2, 0, 0),
+    )
+    builtin.add_column("name", style="bold", no_wrap=True)
+    builtin.add_column("help", overflow="fold")
     for name, help_text in _BUILTIN_HELP:
-        rich.print(f"  [bold]{name:20s}[/bold] {help_text}")
+        builtin.add_row(name, help_text)
+    console.print(builtin)
 
 
 def _print_script_help(script: Script) -> None:
-    rich.print(f"[bold]{script.name}[/bold]: {script.description}")
+    header = f"[bold]{script.name}[/bold]"
+    if script.version:
+        header += f" [dim]v{script.version}[/dim]"
+    rich.print(f"{header}: {script.description}")
     rich.print("Usage:")
     rich.print(f"  usm {script.name} [ARGS...]")
     if script.requirements:
@@ -57,8 +98,16 @@ def _cmd_list(scripts: Scripts) -> None:
     _print_overview(scripts)
 
 
-def _cmd_update() -> None:
-    for name, updated in core.iter_updates(on_progress=_on_download):
+def _cmd_update(names: tuple[str, ...] = ()) -> None:
+    try:
+        results = list(core.iter_updates(names=names or None, on_progress=_on_download))
+    except core.UnknownCommand as exc:
+        rich.print(f"[bold red]Error:[/bold red] Unknown command '{exc.name}'.")
+        rich.print(f"Available: {', '.join(exc.available)}")
+        raise click.ClickException(str(exc)) from exc
+    except core.DownloadError as exc:
+        raise click.ClickException(str(exc)) from exc
+    for name, updated in results:
         if updated:
             rich.print(f"  [green]✓[/green] {name}")
         else:
@@ -78,11 +127,9 @@ def _cmd_version() -> None:
     rich.print(f"[bold]usm[/bold] version {core.resolve_version()}")
 
 
-# Standalone built-ins skip the config load (and its potential download).
 _STANDALONE_BUILTINS: dict[str, Callable[[], None]] = {
     "version": _cmd_version,
     "clean": _cmd_clean,
-    "update": _cmd_update,
 }
 _SCRIPTED_BUILTINS: dict[str, Callable[[Scripts], None]] = {
     "list": _cmd_list,
@@ -90,7 +137,7 @@ _SCRIPTED_BUILTINS: dict[str, Callable[[Scripts], None]] = {
 
 _BUILTIN_HELP: list[tuple[str, str]] = [
     ("list", "List all available commands."),
-    ("update", "Re-download config and all cached scripts."),
+    ("update", "Re-download config and scripts (all, or just NAMES)."),
     ("clean", "Remove the script cache directory."),
     ("version", "Show usm version."),
 ]
@@ -207,6 +254,10 @@ def cli(
 
     if command is None:
         _print_overview(_load())
+        return
+
+    if command == "update":
+        _cmd_update(args)
         return
 
     if command in _STANDALONE_BUILTINS:

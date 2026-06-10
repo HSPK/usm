@@ -187,16 +187,31 @@ def clean_cache() -> Path | None:
 
 
 def iter_updates(
-    *, on_progress: ProgressHook = _null_hook
+    *,
+    names: Iterable[str] | None = None,
+    on_progress: ProgressHook = _null_hook,
 ) -> Iterator[tuple[str, bool]]:
-    """Refresh the config and re-download every cached script.
+    """Refresh the config and re-download cached scripts.
 
-    Yields ``(name, updated)`` per script; ``updated`` is True iff it was
-    previously cached and just re-downloaded.
+    Yields ``(name, updated)`` per script; ``updated`` is True iff the script
+    file was actually downloaded. When ``names`` is given, only those scripts
+    are considered (and unknown names raise :class:`UnknownCommand`); scripts
+    requested explicitly are downloaded even when not previously cached.
     """
     download_file(CONFIG_FILENAME, on_progress=on_progress)
-    for name, script in load_scripts(on_progress=on_progress).items():
-        if script.cached_path.exists():
+    scripts = load_scripts(on_progress=on_progress)
+    if names is None:
+        targets = list(scripts.items())
+        force_missing = False
+    else:
+        wanted = list(names)
+        unknown = [n for n in wanted if n not in scripts]
+        if unknown:
+            raise UnknownCommand(unknown[0], scripts.keys())
+        targets = [(n, scripts[n]) for n in wanted]
+        force_missing = True
+    for name, script in targets:
+        if script.cached_path.exists() or force_missing:
             download_file(script.path, on_progress=on_progress)
             yield name, True
         else:
