@@ -110,6 +110,73 @@ def _cmd_list(scripts: Scripts) -> None:
     _print_overview(scripts)
 
 
+def _change_row(c: core.CatalogChange) -> tuple[str, str, str]:
+    """(script, version, hash) cells for one catalog change."""
+    if c.status == "added":
+        return (
+            c.name,
+            f"[green]new {c.new_version}[/green]",
+            f"[green]{core.short_hash(c.new_hash)}[/green]",
+        )
+    if c.status == "removed":
+        return (
+            f"[dim]{c.name}[/dim]",
+            "[red]removed[/red]",
+            f"[dim]{core.short_hash(c.old_hash)}[/dim]",
+        )
+    return (
+        c.name,
+        f"{c.old_version} [dim]→[/dim] [cyan]{c.new_version}[/cyan]",
+        f"{core.short_hash(c.old_hash)} [dim]→[/dim] {core.short_hash(c.new_hash)}",
+    )
+
+
+def _changes_table(title: str) -> Table:
+    table = Table(
+        title=title,
+        title_justify="left",
+        title_style="bold",
+        header_style="dim",
+        box=box.SIMPLE_HEAD,
+        pad_edge=False,
+        padding=(0, 2, 0, 0),
+    )
+    table.add_column("script", style="bold cyan", no_wrap=True)
+    table.add_column("version")
+    table.add_column("hash")
+    return table
+
+
+def _print_catalog_changes(changes: list[core.CatalogChange], *, cold: bool) -> None:
+    if not changes:
+        rich.print("[green]✓[/green] Catalog is up to date.")
+        return
+    if cold:
+        rich.print(
+            f"[green]✓[/green] Fetched catalog ([bold]{len(changes)}[/bold] scripts)."
+        )
+        return
+    table = _changes_table(f"Catalog changes ({len(changes)})")
+    for c in changes:
+        table.add_row(*_change_row(c))
+    console.print(table)
+
+
+def _print_named_update(
+    names: tuple[str, ...], changes: list[core.CatalogChange]
+) -> None:
+    by_name = {c.name: c for c in changes}
+    meta = core.read_catalog_meta()
+    table = _changes_table("Updated")
+    for name in names:
+        if name in by_name:
+            table.add_row(*_change_row(by_name[name]))
+        else:
+            version, h = meta.get(name, (None, None))
+            table.add_row(name, version or "?", core.short_hash(h))
+    console.print(table)
+
+
 def _cmd_update(args: tuple[str, ...] = ()) -> None:
     flags = {a for a in args if a.startswith("-")}
     names = tuple(a for a in args if not a.startswith("-"))
@@ -118,32 +185,51 @@ def _cmd_update(args: tuple[str, ...] = ()) -> None:
         raise click.ClickException(f"unknown option(s): {', '.join(sorted(unknown))}")
     all_scripts = bool(flags & {"--all", "-a"})
 
-    if not names and not all_scripts:
+    had_cache = core.has_cached_config()
+    try:
+        changes = core.update_config(on_progress=_on_download)
+    except core.DownloadError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    if names:
         try:
-            core.update_config(on_progress=_on_download)
+            list(
+                core.iter_updates(
+                    names=names, refresh_config=False, on_progress=_on_download
+                )
+            )
+        except core.UnknownCommand as exc:
+            rich.print(f"[bold red]Error:[/bold red] Unknown command '{exc.name}'.")
+            rich.print(f"Available: {', '.join(exc.available)}")
+            raise click.ClickException(str(exc)) from exc
         except core.DownloadError as exc:
             raise click.ClickException(str(exc)) from exc
-        rich.print(
-            "[bold green]Catalog updated.[/bold green] "
-            "Use [bold]usm update --all[/bold] to refresh cached scripts, "
-            "or [bold]usm update NAME[/bold] for one."
-        )
+        _print_named_update(names, changes)
+        return
+
+    _print_catalog_changes(changes, cold=not had_cache)
+    if not all_scripts:
+        if changes and had_cache:
+            rich.print(
+                "[dim]Run [bold]usm update --all[/bold] to pull the new scripts.[/dim]"
+            )
         return
 
     try:
-        results = list(core.iter_updates(names=names or None, on_progress=_on_download))
-    except core.UnknownCommand as exc:
-        rich.print(f"[bold red]Error:[/bold red] Unknown command '{exc.name}'.")
-        rich.print(f"Available: {', '.join(exc.available)}")
-        raise click.ClickException(str(exc)) from exc
+        results = list(
+            core.iter_updates(
+                names=None, refresh_config=False, on_progress=_on_download
+            )
+        )
     except core.DownloadError as exc:
         raise click.ClickException(str(exc)) from exc
-    for name, updated in results:
-        if updated:
-            rich.print(f"  [green]✓[/green] {name}")
-        else:
-            rich.print(f"  [dim]–[/dim] {name} (not cached, skipped)")
-    rich.print("[bold green]Update complete.[/bold green]")
+    pulled = [n for n, updated in results if updated]
+    if pulled:
+        rich.print(
+            f"[green]✓[/green] Pulled [bold]{len(pulled)}[/bold] cached script(s)."
+        )
+    else:
+        rich.print("[dim]No cached scripts to pull.[/dim]")
 
 
 def _cmd_install(args: tuple[str, ...], *, debug: bool = False) -> None:

@@ -45,11 +45,23 @@ The `+uv(N req)` tag means the script declares `requirements` in
 
 `usm update` with no arguments refreshes **only** the catalog
 (`_config.json`) — cheap, and enough to learn which scripts have new
-versions. It does not touch cached script files.
+versions. It does not touch cached script files. It prints a table of
+what changed since your last refresh (version and short hash):
 
 ```bash
 usm update            # refresh _config.json only
 ```
+
+```text
+Catalog changes (2)
+  script   version         hash
+  bench    1.0.3 → 1.0.4   ddf8e82 → 1a2b3c4
+  clash    1.0.7 → 1.1.0   fe51647 → 9988776
+Run usm update --all to pull the new scripts.
+```
+
+(When nothing changed it prints `Catalog is up to date.`; on a cold cache,
+`Fetched catalog (N scripts).`)
 
 Pull script files explicitly:
 
@@ -60,14 +72,8 @@ usm update share cp   # ...or several
 ```
 
 `--all` only refreshes scripts you've already used; it won't bulk-fetch
-the entire catalog. Named scripts are always (re)downloaded.
-
-```text
-Downloading: _config.json
-Downloading: share.py
-  ✓ share
-Update complete.
-```
+the entire catalog. Named scripts are always (re)downloaded and shown with
+their resulting version and short hash.
 
 ## `usm install`
 

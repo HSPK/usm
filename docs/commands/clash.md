@@ -32,49 +32,87 @@ manager overrides (port/mode/tun)─┘        │
 
 | Command | What it does |
 | --- | --- |
-| `sub add SOURCE [--name N] [--interval H]` | Add a subscription URL or a local config file. |
-| `sub ls` | List profiles (active marker, type, last update, traffic, expiry). |
-| `sub update [NAME]` | Re-fetch remote profiles (one or all). |
-| `sub rm NAME` | Delete a profile. |
-| `use NAME` | Set the active profile (hot-applies if running). |
-| `up [NAME] [--tun] [--lan] [--system-proxy] [-p PORT]` | Start the core. If already running, hot-applies the given settings instead. |
+| `on` | Set this machine's system proxy to clash (auto-starts the core if needed). |
+| `off` | Clear the system proxy (the core keeps running). |
+| `up [NAME] [--tun] [--lan] [-p PORT]` | Start the core. If already running, hot-applies the given settings instead. |
 | `down` | Stop the core (and restore system proxy). |
 | `restart` | Restart the core. |
-| `status` | Running state, ports, mode, toggles, uptime, traffic. |
+| `status` | Running state, current subscription/node, ports, toggles, traffic. |
+| `use [NAME\|#]` | Switch the active subscription — **interactive menu** with no arg. |
+| `sub add\|ls\|update\|rm` | Add / list (numbered) / refresh / delete subscriptions. |
+| `select [GROUP] [NODE] [-t]` | Switch the active node — **interactive menu** with no arg. |
+| `node [GROUP]` | List groups & nodes with the current pick and last delay. |
 | `mode [rule\|global\|direct]` | Get or set the routing mode. |
-| `port [N]` | Get or set the local mixed HTTP+SOCKS port. |
-| `proxies [GROUP]` | List groups, members, current selection, last delay. |
-| `select GROUP NODE` | Pick a node in a group. |
 | `test [GROUP\|NODE] [--url U] [--timeout MS]` | Latency-test a group, a node, or every node (concurrent). |
 | `tun on\|off\|status` | Toggle TUN (transparent system-wide capture). |
-| `system-proxy on\|off\|status` | Set/clear the OS HTTP/SOCKS proxy. |
 | `lan on\|off\|status` | Toggle `allow-lan` (let other devices use this box). |
+| `port [N]` | Get or set the local mixed HTTP+SOCKS port. |
 | `logs [-f] [-n N] [--level L]` | Tail the log file, or stream live via the API. |
 | `conns [--close]` | Show (or close) active connections. |
 | `dashboard` | Print a web dashboard URL wired to the running core. |
 | `enable` / `disable` | Autostart at login via a systemd `--user` unit. |
 | `install [--upgrade]` | Pre-download the mihomo binary. |
+| `geodata [--mirror URL] [--force]` | Download/refresh the GeoIP & GeoSite databases. |
+
+The commands are grouped by purpose in `usm clash` (no args) and
+`usm clash --help`: **Run**, **Subscriptions**, **Proxy**, **Network**,
+**Observability**, and **Setup**.
 
 !!! tip "Settings apply live"
-    `mode`, `port`, `lan`, `tun`, `system-proxy`, and the active profile
+    `mode`, `port`, `lan`, `tun`, and the active subscription
     (`use`) all take effect **immediately** when the core is running (the
     config is regenerated and hot-reloaded over the API) and are remembered
     for the next start. You don't need to `restart` after changing a setting.
 
 !!! note "`up` is responsive"
-    On the first run mihomo downloads its GeoIP database, so startup can take
-    a few seconds. `up` shows a spinner and waits for the controller to come
-    up; if the process dies during startup it prints the tail of the log and
-    fails clearly instead of reporting a false success.
+    On the first run with a profile that has `GEOIP`/`GEOSITE` rules, the geo
+    databases are fetched (see below), so startup can take a few seconds. `up`
+    shows a spinner and waits for the controller to come up; if the process
+    dies during startup it prints the tail of the log and fails clearly instead
+    of reporting a false success.
+
+## GeoIP / GeoSite data
+
+Profiles that use `GEOIP,...` or `GEOSITE,...` rules need geo databases.
+`usm clash` fetches them **itself** — with its own timeout, a progress
+spinner, and mirror support — into `~/.cache/usm/clash/` (`GeoIP.dat` ≈19 MB,
+`GeoSite.dat` ≈4 MB), so the mihomo core never has to download them and a
+blocked GitHub fails fast with guidance instead of hanging.
+
+- Source: **MetaCubeX/meta-rules-dat** GitHub releases
+  (`https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest/`).
+- The fetch happens lazily on `up`/`enable` only when the active profile has
+  geo rules, and once fetched the files are reused.
+
+```bash
+usm clash geodata            # download/refresh now
+usm clash geodata --force    # re-download even if present
+```
+
+!!! warning "GitHub blocked? Use a mirror"
+    If the download fails (common behind the GFW), point `USM_CLASH_GEO_BASE`
+    at a mirror of that release path and retry:
+
+    ```bash
+    export USM_CLASH_GEO_BASE="https://ghproxy.net/https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest"
+    usm clash geodata --force
+    # or one-off:  usm clash geodata --mirror <base-url> --force
+    ```
+
+    The same base is written into the config's `geox-url`, so any fallback the
+    core does also honours it.
 
 ## Subscriptions & profiles
 
 ```bash
 usm clash sub add https://provider.example/sub?token=… --name work
 usm clash sub add ./my-clash.yaml --name local      # a local Clash config file
-usm clash sub ls
-usm clash sub update work        # re-fetch
-usm clash use work               # switch active profile
+usm clash sub ls                 # numbered list
+
+# switch the active subscription — any of:
+usm clash use                    # interactive menu
+usm clash use 2                  # by number (from `sub ls`)
+usm clash use work               # by name (substring is fine)
 ```
 
 Subscriptions are fetched with a Clash User-Agent, so providers return a
@@ -88,24 +126,25 @@ expiry) is parsed and shown in `sub ls`.
     Raw base64 node-list links (the generic "v2ray" format) are not supported —
     ask your provider for the Clash link (almost all offer one).
 
-Remote profiles auto-refresh on `up`/`restart` once older than `--interval`
-hours (default 12; `0` disables).
+Remote subscriptions auto-refresh on `up`/`restart` once older than
+`--interval` hours (default 12; `0` disables).
 
 ## Running & status
 
 ```bash
-usm clash up                 # start with the active profile
-usm clash up work --lan      # switch profile + allow LAN in one go
+usm clash up                 # start with the active subscription
+usm clash up work --lan      # switch subscription + allow LAN in one go
 usm clash status
 usm clash down
 ```
 
-`status` shows the running state, mixed port, controller, mode, and the
-TUN / LAN / system-proxy toggles, plus live traffic totals when running:
+`status` shows the running state, the current subscription and node, mixed
+port, mode, and the TUN / LAN / system-proxy toggles, plus live traffic:
 
 ```
 status        ● running  (pid 12345)
-profile       work
+subscription  work
+node          HK-01  (PROXY)
 mode          rule
 mixed port    127.0.0.1:7890
 controller    127.0.0.1:9090
@@ -126,13 +165,27 @@ usm clash port            # show the current port
 usm clash port 7891       # switch (hot-applied; apps then use :7891)
 ```
 
-## Mode, node selection, latency tests
+## Switching the node, mode, latency tests
+
+Switching node is interactive — no need to remember group or node names:
+
+```bash
+usm clash select                 # menu: pick a group (if several), then a node
+usm clash select -t              # ...latency-testing the group first
+usm clash select hk-02           # jump straight to a node by (partial) name
+usm clash select PROXY           # open the node menu for one group
+usm clash select PROXY hk-01     # fully explicit
+```
+
+When a profile has **many** proxy-groups, `select` first shows your switchable
+groups (the built-in `GLOBAL` group is hidden unless you're in `global` mode),
+then the nodes within the one you pick — each with its last-seen latency and a
+marker on the current choice.
 
 ```bash
 usm clash mode global            # rule | global | direct (instant via API)
-usm clash proxies                # all groups, members, current pick, last delay
-usm clash proxies PROXY          # just one group
-usm clash select PROXY hk-01     # choose a node
+usm clash node                   # all groups, members, current pick, last delay
+usm clash node PROXY             # just one group
 usm clash test PROXY             # latency-test every node in the group
 usm clash test hk-01             # test a single node
 usm clash test                   # test all real nodes (concurrent)
@@ -157,15 +210,18 @@ already define one.
 
 ## System proxy & LAN
 
+`on` / `off` are the everyday switch — `on` points your OS proxy at clash
+(starting the core first if needed), `off` clears it (the core keeps running):
+
 ```bash
-usm clash system-proxy on     # set the OS HTTP/HTTPS/SOCKS proxy to the core
-usm clash system-proxy off    # restore the previous setting
+usm clash on                  # auto-start + set the OS HTTP/HTTPS/SOCKS proxy
+usm clash off                 # restore the previous OS proxy setting
 usm clash lan on              # bind 0.0.0.0 so other LAN devices can use it
 ```
 
-`system-proxy` integrates with GNOME (`gsettings`), macOS (`networksetup`), and
-Windows (registry). On any system it also writes shell exports to
-`~/.cache/usm/clash/proxy.env` for terminal apps:
+The system-proxy integration covers GNOME (`gsettings`), macOS
+(`networksetup`), and Windows (registry). On any system it also writes shell
+exports to `~/.cache/usm/clash/proxy.env` for terminal apps:
 
 ```bash
 source ~/.cache/usm/clash/proxy.env     # http_proxy/https_proxy/all_proxy
@@ -214,7 +270,7 @@ sudo loginctl enable-linger "$USER"
 ```
 
 (System-proxy is a desktop-session setting and is not managed by the systemd
-unit; toggle it interactively with `usm clash system-proxy on`.)
+unit; toggle it interactively with `usm clash on` / `off`.)
 
 ## `usm clash` vs `usm proxy`
 

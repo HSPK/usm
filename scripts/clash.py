@@ -9,18 +9,16 @@ auto-installed to ``~/.cache/usm/bin/mihomo`` (no sudo, no system packages).
 Quick start
 -----------
   usm clash sub add https://example.com/sub --name work   # add a subscription
-  usm clash up                                             # start the core
+  usm clash on                                             # start + set system proxy
   usm clash status                                         # what's running
-  usm clash proxies                                        # groups + nodes
-  usm clash test PROXY                                     # latency-test a group
-  usm clash select PROXY my-node                           # pick a node
+  usm clash select                                         # pick a node (interactive)
+  usm clash use                                            # switch subscription (interactive)
+  usm clash node                                           # list groups + nodes
   usm clash mode global                                    # rule | global | direct
-  usm clash system-proxy on                                # set OS proxy
-  usm clash logs -f                                        # stream live logs
-  usm clash down                                           # stop
+  usm clash off                                            # clear system proxy
 
-Most settings (mode, lan, tun, port, system-proxy, the active profile) can be
-changed while the core is running — the change is hot-applied immediately and
+Most settings (mode, lan, tun, port, the active subscription) can be changed
+while the core is running — the change is hot-applied immediately and
 remembered for next time.
 
 TUN (transparent, system-wide) needs CAP_NET_ADMIN; ``usm clash tun on``
@@ -90,6 +88,19 @@ NON_NODE_TYPES = (
 CLASH_UA = f"clash.meta/usm mihomo/{MIHOMO_VERSION}"
 DASHBOARD_BASE = "https://d.metacubex.one"
 READY_TIMEOUT = 45  # seconds to wait for the controller (first run fetches GeoIP)
+CONFIG_TEST_TIMEOUT = 120  # safety cap on `mihomo -t`
+
+# GeoIP / GeoSite data: usm fetches these itself (with a timeout + mirror) so a
+# blocked GitHub never hangs the core. Override the source with $USM_CLASH_GEO_BASE.
+GEO_DEFAULT_BASE = (
+    "https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest"
+)
+GEO_ENV = "USM_CLASH_GEO_BASE"
+# rule type -> (release asset name, local filename mihomo looks for in its data dir)
+GEO_RULE_FILES = {
+    "GEOIP": ("geoip.dat", "GeoIP.dat"),
+    "GEOSITE": ("geosite.dat", "GeoSite.dat"),
+}
 
 try:
     _SIGKILL = signal.SIGKILL
@@ -241,6 +252,83 @@ class MihomoBinary:
         return "cap_net_admin" in out.lower()
 
 
+# GeoIP / GeoSite data ------------------------------------------------------
+
+
+class GeoData:
+    """Fetches GeoIP/GeoSite databases so mihomo never has to.
+
+    mihomo only needs these when a profile has GEOIP/GEOSITE rules, and it
+    looks for ``GeoIP.dat`` / ``GeoSite.dat`` in its data dir. We download them
+    ourselves (own timeout + progress + mirror) so a blocked GitHub fails fast
+    with guidance instead of hanging the core.
+    """
+
+    @staticmethod
+    def base() -> str:
+        return os.environ.get(GEO_ENV, GEO_DEFAULT_BASE).rstrip("/")
+
+    @staticmethod
+    def geox_url(base: Optional[str] = None) -> dict:
+        b = (base or GeoData.base()).rstrip("/")
+        return {
+            "geoip": f"{b}/geoip.dat",
+            "geosite": f"{b}/geosite.dat",
+            "mmdb": f"{b}/country.mmdb",
+            "asn": f"{b}/GeoLite2-ASN.mmdb",
+        }
+
+    @staticmethod
+    def needed(rules: list) -> list[tuple[str, str]]:
+        types = {
+            r.split(",", 1)[0].strip().upper() for r in rules if isinstance(r, str)
+        }
+        return [GEO_RULE_FILES[t] for t in GEO_RULE_FILES if t in types]
+
+    @staticmethod
+    def _download(url: str, dest: Path) -> None:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        tmp = dest.with_suffix(dest.suffix + ".part")
+        try:
+            with requests.get(url, stream=True, timeout=(10, 60)) as r:
+                if r.status_code != 200:
+                    raise click.ClickException(
+                        GeoData._fail_msg(url, f"HTTP {r.status_code}")
+                    )
+                with open(tmp, "wb") as f:
+                    for chunk in r.iter_content(1 << 16):
+                        f.write(chunk)
+        except requests.RequestException as e:
+            tmp.unlink(missing_ok=True)
+            raise click.ClickException(GeoData._fail_msg(url, str(e))) from e
+        tmp.replace(dest)
+
+    @staticmethod
+    def _fail_msg(url: str, why: str) -> str:
+        return (
+            f"failed to download geo data ({why}): {url}\n"
+            f"  GitHub may be blocked. Point {GEO_ENV} at a mirror and retry, e.g.\n"
+            f'    export {GEO_ENV}="https://ghproxy.net/{GEO_DEFAULT_BASE}"\n'
+            "  then run 'usm clash geodata --force'. "
+            "(Or remove GEOIP/GEOSITE rules from the profile.)"
+        )
+
+    @classmethod
+    def ensure(cls, rules: list, *, base: Optional[str] = None) -> None:
+        b = (base or cls.base()).rstrip("/")
+        missing = [
+            (asset, local)
+            for asset, local in cls.needed(rules)
+            if not (ROOT / local).exists()
+        ]
+        if not missing:
+            return
+        labels = ", ".join(local for _, local in missing)
+        with _status(f"downloading geo data ({labels}; first run, ~23 MB) …"):
+            for asset, local in missing:
+                cls._download(f"{b}/{asset}", ROOT / local)
+
+
 # State ---------------------------------------------------------------------
 
 
@@ -313,7 +401,7 @@ class ProfileRepo:
     def meta(self, name: str) -> dict:
         if not self.exists(name):
             raise click.ClickException(
-                f"No profile '{name}'. Add one with 'usm clash sub add <url>'."
+                f"No subscription '{name}'. Add one with 'usm clash sub add <url>'."
             )
         return json.loads(self._meta(name).read_text())
 
@@ -405,7 +493,7 @@ class ProfileRepo:
 
     def remove(self, name: str) -> None:
         if not self.exists(name):
-            raise click.ClickException(f"No profile '{name}'.")
+            raise click.ClickException(f"No subscription '{name}'.")
         self._yaml(name).unlink(missing_ok=True)
         self._meta(name).unlink(missing_ok=True)
 
@@ -456,16 +544,18 @@ class ConfigComposer:
     def compose(self, state: State) -> dict:
         if not state.active:
             raise click.ClickException(
-                "No active profile. Add one with 'usm clash sub add <url>' "
+                "No active subscription. Add one with 'usm clash sub add <url>' "
                 "then 'usm clash use <name>'."
             )
         path = self.profiles.config_path(state.active)
         if not path.exists():
-            raise click.ClickException(f"profile file missing for '{state.active}'.")
+            raise click.ClickException(
+                f"subscription file missing for '{state.active}'."
+            )
         base = yaml.safe_load(path.read_text())
         if not isinstance(base, dict):
             raise click.ClickException(
-                f"profile '{state.active}' is not a valid Clash config."
+                f"subscription '{state.active}' is not a valid Clash config."
             )
         for key in ("port", "socks-port", "redir-port", "tproxy-port", "mixed-port"):
             base.pop(key, None)
@@ -478,6 +568,12 @@ class ConfigComposer:
         base["external-controller"] = state.controller
         base["secret"] = state.secret
         base["profile"] = {**(base.get("profile") or {}), "store-selected": True}
+        # We manage the geo databases ourselves (see GeoData); pin the source so
+        # any fallback download mihomo does still honours the mirror, and don't
+        # let it auto-update on a timer.
+        base["geodata-mode"] = True
+        base["geo-auto-update"] = False
+        base["geox-url"] = GeoData.geox_url()
         if state.tun:
             base["tun"] = {
                 "enable": True,
@@ -502,12 +598,19 @@ class ConfigComposer:
 
     def validate(self) -> None:
         mihomo = MihomoBinary.ensure()
-        with _status("validating config (first run may fetch GeoIP data) …"):
-            p = subprocess.run(
-                [str(mihomo), "-t", "-d", str(ROOT), "-f", str(self.runtime)],
-                text=True,
-                capture_output=True,
-            )
+        with _status("validating config …"):
+            try:
+                p = subprocess.run(
+                    [str(mihomo), "-t", "-d", str(ROOT), "-f", str(self.runtime)],
+                    text=True,
+                    capture_output=True,
+                    timeout=CONFIG_TEST_TIMEOUT,
+                )
+            except subprocess.TimeoutExpired as e:
+                raise click.ClickException(
+                    "config validation timed out — mihomo may be stuck fetching "
+                    "geo data. Run 'usm clash geodata' (optionally with a mirror)."
+                ) from e
         if p.returncode != 0:
             lines = [
                 ln
@@ -1014,7 +1117,8 @@ class ClashManager:
         """Persist state; if the core is running, regenerate config and reload."""
         self.save()
         if self.is_running():
-            self.composer.write(self.state)
+            cfg = self.composer.write(self.state)
+            GeoData.ensure(cfg.get("rules") or [])
             self.composer.validate()
             self.api().reload()
 
@@ -1029,7 +1133,8 @@ class ClashManager:
                 )
             except click.ClickException:
                 pass
-        self.composer.write(self.state)
+        cfg = self.composer.write(self.state)
+        GeoData.ensure(cfg.get("rules") or [])
         self.composer.validate()
         # Persist settings *before* launching so the systemd `run` child reads
         # fresh state; save again after start to record the standalone pid.
@@ -1097,7 +1202,7 @@ class ClashManager:
     # -- settings (each persists + hot-applies if running) --
     def use_profile(self, name: str) -> None:
         if not self.profiles.exists(name):
-            raise click.ClickException(f"No profile '{name}'.")
+            raise click.ClickException(f"No subscription '{name}'.")
         self.state.active = name
         self.apply()
 
@@ -1167,7 +1272,8 @@ class ClashManager:
         _kill_pid(self.state.pid)
         self.state.pid = None
         self.save()
-        self.composer.write(self.state)
+        cfg = self.composer.write(self.state)
+        GeoData.ensure(cfg.get("rules") or [])
         self.composer.validate()
         SYSTEMD_USER_DIR.mkdir(parents=True, exist_ok=True)
         Systemd.unit_path().write_text(Systemd.render_unit(usm_bin))
@@ -1187,13 +1293,101 @@ class ClashManager:
 
 # CLI -----------------------------------------------------------------------
 
+# Logical grouping for the help / overview (keeps a 20-command CLI readable).
+COMMAND_SECTIONS: list[tuple[str, tuple[str, ...]]] = [
+    ("Run", ("on", "off", "up", "down", "restart", "status")),
+    ("Subscriptions", ("use", "sub")),
+    ("Proxy", ("select", "node", "mode", "test")),
+    ("Network", ("tun", "lan", "port")),
+    ("Observability", ("logs", "conns", "dashboard")),
+    ("Setup", ("enable", "disable", "install", "geodata")),
+]
+
+
+class GroupedGroup(click.Group):
+    """A click group that renders its commands in labelled sections."""
+
+    def format_commands(self, ctx: click.Context, formatter) -> None:
+        listed: set[str] = set()
+        for title, names in COMMAND_SECTIONS:
+            rows = []
+            for name in names:
+                cmd = self.get_command(ctx, name)
+                if cmd is None or cmd.hidden:
+                    continue
+                listed.add(name)
+                rows.append((name, cmd.get_short_help_str(78)))
+            if rows:
+                with formatter.section(title):
+                    formatter.write_dl(rows)
+        extra = [
+            (n, c)
+            for n in sorted(self.list_commands(ctx))
+            if n not in listed
+            and (c := self.get_command(ctx, n)) is not None
+            and not c.hidden
+        ]
+        if extra:
+            with formatter.section("Other"):
+                formatter.write_dl([(n, c.get_short_help_str(78)) for n, c in extra])
+
+
+def _print_overview(ctx: click.Context) -> None:
+    console.print(
+        "[bold cyan]usm clash[/bold cyan] — ClashX-style manager for the "
+        "[bold]mihomo[/bold] core"
+    )
+    mgr = ClashManager()
+    prof = mgr.state.active or "[dim]none[/dim]"
+    running = mgr.is_running()
+    core = "[green]● running[/green]" if running else "[dim]○ stopped[/dim]"
+    extra = ""
+    if running:
+        try:
+            proxies = mgr.api().proxies()
+            g = _primary_selector(proxies, mgr.state.mode)
+            if g:
+                extra = f"    [dim]node:[/dim] {proxies[g].get('now')}"
+        except click.ClickException:
+            pass
+    console.print(
+        f"[dim]subscription:[/dim] {prof}    [dim]core:[/dim] {core}{extra}\n"
+    )
+    for title, names in COMMAND_SECTIONS:
+        table = Table(
+            show_header=False,
+            box=None,
+            pad_edge=False,
+            padding=(0, 2, 0, 0),
+        )
+        table.add_column(style="bold green", no_wrap=True)
+        table.add_column(overflow="fold")
+        rows = 0
+        for name in names:
+            cmd = cli.get_command(ctx, name)
+            if cmd is None or cmd.hidden:
+                continue
+            table.add_row(name, cmd.get_short_help_str(80))
+            rows += 1
+        if rows:
+            console.print(f"[dim]{title}[/dim]")
+            console.print(table)
+            console.print()
+    console.print(
+        "[dim]Run [bold]usm clash <command> -h[/bold] for command help.[/dim]"
+    )
+
 
 @click.group(
+    cls=GroupedGroup,
+    invoke_without_command=True,
     help=__doc__.splitlines()[0],
     context_settings={"help_option_names": ["-h", "--help"]},
 )
-def cli() -> None:
-    pass
+@click.pass_context
+def cli(ctx: click.Context) -> None:
+    if ctx.invoked_subcommand is None:
+        _print_overview(ctx)
 
 
 def _bind(state: State) -> str:
@@ -1209,17 +1403,105 @@ def _print_endpoint(mgr: ClashManager) -> None:
     console.print(f"  [dim]point apps at[/dim] http://127.0.0.1:{s.port}")
 
 
+# Interactive selection helpers ---------------------------------------------
+
+
+def _selectors(proxies: dict) -> list[str]:
+    """All Selector-type groups (includes the built-in GLOBAL)."""
+    return [k for k, v in proxies.items() if v.get("type") == "Selector"]
+
+
+def _user_groups(proxies: dict, mode: str) -> list[str]:
+    """Groups a user actually switches in: the built-in GLOBAL only matters in
+    global mode; otherwise the profile's own Selector groups."""
+    sels = _selectors(proxies)
+    if mode == "global":
+        return ["GLOBAL"] if "GLOBAL" in sels else sels
+    return [s for s in sels if s != "GLOBAL"]
+
+
+def _primary_selector(proxies: dict, mode: str = "rule") -> Optional[str]:
+    groups = _user_groups(proxies, mode)
+    if not groups:
+        return None
+    for kw in ("proxy", "节点", "select"):
+        for s in groups:
+            if kw in s.lower():
+                return s
+    return groups[0]
+
+
+def _node_delay(proxies: dict, name: str) -> Optional[int]:
+    hist = (proxies.get(name, {}) or {}).get("history") or []
+    return hist[-1].get("delay") if hist and hist[-1].get("delay") else None
+
+
+def _pick(title: str, options: list[tuple[str, object]], *, current=None):
+    """Show a numbered menu and return the chosen value (or None if cancelled)."""
+    if not options:
+        return None
+    table = Table(show_header=False, box=None, pad_edge=False, padding=(0, 2, 0, 0))
+    table.add_column(justify="right", style="bold green", no_wrap=True)
+    table.add_column(overflow="fold")
+    for i, (label, value) in enumerate(options, 1):
+        dot = " [green]●[/green]" if current is not None and value == current else ""
+        table.add_row(str(i), f"{label}{dot}")
+    console.print(table)
+    n = len(options)
+    try:
+        sel = click.prompt(
+            f"{title} (1-{n}, 0 to cancel)",
+            type=click.IntRange(0, n),
+            default=0,
+            show_default=False,
+        )
+    except click.Abort:
+        return None
+    return None if not sel else options[sel - 1][1]
+
+
+def _resolve_one(query: str, candidates: list[str], kind: str) -> str:
+    """Match *query* to exactly one candidate (exact, else unique substring)."""
+    ci = query.lower()
+    for c in candidates:
+        if c.lower() == ci:
+            return c
+    subs = [c for c in candidates if ci in c.lower()]
+    if len(subs) == 1:
+        return subs[0]
+    if len(subs) > 1:
+        raise click.ClickException(f"ambiguous {kind} '{query}': {', '.join(subs)}")
+    raise click.ClickException(f"no {kind} matching '{query}'.")
+
+
+def _pick_node(api, proxies: dict, group: str, do_test: bool) -> Optional[str]:
+    members = proxies.get(group, {}).get("all", []) or []
+    if not members:
+        console.print(f"[dim]{group} has no members.[/dim]")
+        return None
+    delays: dict = {}
+    if do_test:
+        with _status(f"testing {group} …"):
+            delays = api.group_delay(group, DEFAULT_TEST_URL, 5000)
+    options = []
+    for m in members:
+        d = delays.get(m) if do_test else _node_delay(proxies, m)
+        tag = f"  [dim]{d}ms[/dim]" if d else ("  [red]✗[/red]" if do_test else "")
+        options.append((f"{m}{tag}", m))
+    return _pick(f"node in {group}", options, current=proxies[group].get("now"))
+
+
 # ---- subscriptions ----
 
 
-@cli.group("sub", short_help="Manage subscriptions / profiles.")
+@cli.group("sub", short_help="Add / list / update / remove subscriptions.")
 def sub() -> None:
     pass
 
 
 @sub.command("add", short_help="Add a subscription URL or local config file.")
 @click.argument("source")
-@click.option("--name", help="Profile name (default: derived from the URL/file).")
+@click.option("--name", help="Subscription name (default: derived from the URL/file).")
 @click.option(
     "--interval",
     type=int,
@@ -1231,33 +1513,45 @@ def sub() -> None:
     "--use/--no-use",
     default=True,
     show_default=True,
-    help="Make this the active profile.",
+    help="Make this the active subscription.",
 )
 def cmd_sub_add(source, name, interval, use):
     mgr = ClashManager()
     saved = mgr.profiles.add(source, name, interval)
-    console.print(f"[green]✓[/green] saved profile [bold]{saved}[/bold].")
+    console.print(f"[green]✓[/green] saved subscription [bold]{saved}[/bold].")
     if use:
         mgr.state.active = saved
         if mgr.is_running():
             mgr.apply()
-            console.print(f"  active profile → [bold]{saved}[/bold] (applied live)")
+            console.print(
+                f"  active subscription → [bold]{saved}[/bold] (applied live)"
+            )
         else:
             mgr.save()
-            console.print(f"  active profile → [bold]{saved}[/bold]")
+            console.print(f"  active subscription → [bold]{saved}[/bold]")
 
 
-@sub.command("ls", short_help="List profiles.")
+@sub.command("ls", short_help="List subscriptions (numbered).")
 def cmd_sub_ls():
     mgr = ClashManager()
     profiles = mgr.profiles.list()
     if not profiles:
-        console.print("[dim]No profiles. Add one with 'usm clash sub add <url>'.[/dim]")
+        console.print(
+            "[dim]No subscriptions. Add one with 'usm clash sub add <url>'.[/dim]"
+        )
         return
     table = Table(show_header=True, header_style="bold")
-    for col in ("", "Name", "Type", "Updated", "Traffic (used / total)", "Expires"):
+    for col in (
+        "#",
+        "",
+        "Name",
+        "Type",
+        "Updated",
+        "Traffic (used / total)",
+        "Expires",
+    ):
         table.add_column(col)
-    for meta in profiles:
+    for i, meta in enumerate(profiles, 1):
         active = "[green]●[/green]" if meta["name"] == mgr.state.active else ""
         updated = datetime.fromtimestamp(meta.get("updated_at", 0)).strftime(
             "%Y-%m-%d %H:%M"
@@ -1270,12 +1564,19 @@ def cmd_sub_ls():
             traffic = f"{fmt_bytes(used)} / {fmt_bytes(total)}"
         expire = fmt_epoch(ui["expire"]) if ui.get("expire") else "-"
         table.add_row(
-            active, meta["name"], meta.get("type", "?"), updated, traffic, expire
+            str(i),
+            active,
+            meta["name"],
+            meta.get("type", "?"),
+            updated,
+            traffic,
+            expire,
         )
     console.print(table)
+    console.print("[dim]switch with[/dim] usm clash use <#|name>")
 
 
-@sub.command("update", short_help="Refresh remote profiles (NAME or all).")
+@sub.command("update", short_help="Refresh remote subscriptions (NAME or all).")
 @click.argument("name", required=False)
 def cmd_sub_update(name):
     mgr = ClashManager()
@@ -1283,7 +1584,7 @@ def cmd_sub_update(name):
     if name:
         targets = [m for m in targets if m["name"] == name]
         if not targets:
-            raise click.ClickException(f"No profile '{name}'.")
+            raise click.ClickException(f"No subscription '{name}'.")
     refreshed = 0
     for meta in targets:
         if meta.get("type") != "remote":
@@ -1304,7 +1605,7 @@ def cmd_sub_update(name):
         console.print("[dim]applied the refreshed config to the running core.[/dim]")
 
 
-@sub.command("rm", short_help="Delete a profile.")
+@sub.command("rm", short_help="Delete a subscription.")
 @click.argument("name")
 def cmd_sub_rm(name):
     mgr = ClashManager()
@@ -1312,15 +1613,31 @@ def cmd_sub_rm(name):
     if mgr.state.active == name:
         mgr.state.active = None
         mgr.save()
-    console.print(f"[green]✓[/green] removed profile {name}")
+    console.print(f"[green]✓[/green] removed subscription {name}")
 
 
-@cli.command("use", short_help="Set the active profile.")
-@click.argument("name")
-def cmd_use(name):
+@cli.command("use", short_help="Switch the active subscription (interactive).")
+@click.argument("target", required=False)
+def cmd_use(target):
     mgr = ClashManager()
+    names = [m["name"] for m in mgr.profiles.list()]
+    if not names:
+        raise click.ClickException(
+            "no subscriptions yet. Add one with 'usm clash sub add <url>'."
+        )
+    if target is None:
+        name = _pick("subscription", [(p, p) for p in names], current=mgr.state.active)
+        if not name:
+            return
+    elif target.isdigit():
+        i = int(target)
+        if not (1 <= i <= len(names)):
+            raise click.ClickException(f"index out of range (1-{len(names)}).")
+        name = names[i - 1]
+    else:
+        name = _resolve_one(target, names, "subscription")
     mgr.use_profile(name)
-    console.print(f"[green]✓[/green] active profile → [bold]{name}[/bold]")
+    console.print(f"[green]✓[/green] subscription → [bold]{name}[/bold]")
     if mgr.is_running():
         console.print("  [dim]applied to the running core.[/dim]")
 
@@ -1373,7 +1690,7 @@ def cmd_up(name, tun, lan, system_proxy, port):
 
     if name:
         if not mgr.profiles.exists(name):
-            raise click.ClickException(f"No profile '{name}'.")
+            raise click.ClickException(f"No subscription '{name}'.")
         mgr.state.active = name
     if port:
         mgr.state.port = port
@@ -1389,7 +1706,7 @@ def cmd_up(name, tun, lan, system_proxy, port):
         return
     console.print(
         f"[green]✓[/green] clash up (pid {mgr.running_pid()}) — "
-        f"profile [bold]{mgr.state.active}[/bold]"
+        f"sub [bold]{mgr.state.active}[/bold]"
     )
     _print_endpoint(mgr)
     if mgr.state.system_proxy:
@@ -1424,7 +1741,15 @@ def cmd_status():
     table.add_column()
     dot = "[green]● running[/green]" if rep.running else "[dim]○ stopped[/dim]"
     table.add_row("status", dot + (f"  (pid {rep.pid})" if rep.pid else ""))
-    table.add_row("profile", s.active or "[dim]none[/dim]")
+    table.add_row("subscription", s.active or "[dim]none[/dim]")
+    if rep.running:
+        try:
+            proxies = mgr.api().proxies()
+            g = _primary_selector(proxies, s.mode)
+            if g:
+                table.add_row("node", f"{proxies[g].get('now')}  [dim]({g})[/dim]")
+        except click.ClickException:
+            pass
     table.add_row("mode", s.mode)
     table.add_row("mixed port", f"{_bind(s)}:{s.port}")
     table.add_row("controller", s.controller)
@@ -1471,9 +1796,9 @@ def cmd_port(port):
         console.print(f"  [dim]apps now use[/dim] http://127.0.0.1:{port}")
 
 
-@cli.command("proxies", short_help="List proxy groups, members, and selection.")
+@cli.command("node", short_help="List groups & nodes (with current pick).")
 @click.argument("group", required=False)
-def cmd_proxies(group):
+def cmd_node(group):
     mgr = ClashManager()
     api = mgr.require_running()
     proxies = api.proxies()
@@ -1485,7 +1810,7 @@ def cmd_proxies(group):
             )
         groups = {group: groups[group]}
     if not groups:
-        console.print("[dim]No selectable groups in this profile.[/dim]")
+        console.print("[dim]This subscription has no groups.[/dim]")
         return
     for gname, g in groups.items():
         console.print(f"[bold cyan]{gname}[/bold cyan] [dim]({g.get('type')})[/dim]")
@@ -1500,14 +1825,83 @@ def cmd_proxies(group):
             console.print(f"  {mark} {member}{delay}")
 
 
-@cli.command("select", short_help="Select a node in a group.")
-@click.argument("group")
-@click.argument("node")
-def cmd_select(group, node):
+@cli.command("select", short_help="Switch the active node (interactive).")
+@click.argument("group", required=False)
+@click.argument("node", required=False)
+@click.option(
+    "-t",
+    "--test",
+    "do_test",
+    is_flag=True,
+    help="Latency-test the group before choosing.",
+)
+def cmd_select(group, node, do_test):
     mgr = ClashManager()
     api = mgr.require_running()
-    api.select(group, node)
-    console.print(f"[green]✓[/green] {group} → [bold]{node}[/bold]")
+    proxies = api.proxies()
+    all_selectors = _selectors(proxies)
+    groups = _user_groups(proxies, mgr.state.mode)
+    if not groups:
+        raise click.ClickException("this subscription has no selectable groups.")
+
+    def _apply(g: str, n: str) -> None:
+        api.select(g, n)
+        console.print(f"[green]✓[/green] {g} → [bold]{n}[/bold]")
+
+    # group + node: direct (substring-friendly; explicit GLOBAL allowed)
+    if group and node:
+        g = _resolve_one(group, all_selectors, "group")
+        _apply(g, _resolve_one(node, proxies[g].get("all", []), "node"))
+        return
+
+    # single arg: a group to drill into, else a node to find
+    if group:
+        exact = [s for s in groups if s.lower() == group.lower()]
+        subs = [s for s in groups if group.lower() in s.lower()]
+        g = exact[0] if exact else (subs[0] if len(subs) == 1 else None)
+        if g:
+            n = _pick_node(api, proxies, g, do_test)
+            if n:
+                _apply(g, n)
+            return
+        hits = [
+            (s, m)
+            for s in groups
+            for m in proxies[s].get("all", [])
+            if group.lower() in m.lower()
+        ]
+        if not hits:
+            raise click.ClickException(f"no group or node matching '{group}'.")
+        if len(hits) == 1:
+            _apply(*hits[0])
+            return
+        chosen = _pick(
+            f"node matching '{group}'",
+            [(f"{m}   [dim]in {s}[/dim]", (s, m)) for s, m in hits],
+        )
+        if chosen:
+            _apply(*chosen)
+        return
+
+    # no args: pick group (if several), then node
+    g = groups[0]
+    if len(groups) > 1:
+        g = _pick(
+            "group",
+            [
+                (
+                    f"{s}  [dim]→ {proxies[s].get('now')} "
+                    f"({len(proxies[s].get('all', []))} nodes)[/dim]",
+                    s,
+                )
+                for s in groups
+            ],
+        )
+        if not g:
+            return
+    n = _pick_node(api, proxies, g, do_test)
+    if n:
+        _apply(g, n)
 
 
 @cli.command("test", short_help="Latency-test a group, a node, or all nodes.")
@@ -1578,20 +1972,33 @@ def cmd_tun(action):
         console.print("  [dim]all system traffic is now captured by the core.[/dim]")
 
 
-@cli.command("system-proxy", short_help="Set/clear the OS HTTP/SOCKS proxy.")
-@click.argument("action", type=click.Choice(["on", "off", "status"]))
-def cmd_system_proxy(action):
+@cli.command("on", short_help="Set this machine's system proxy to clash (auto-starts).")
+def cmd_on():
     mgr = ClashManager()
-    if action == "status":
-        cur = "on" if mgr.state.system_proxy else "off"
-        console.print(f"system-proxy: [bold]{cur}[/bold]")
-        return
-    notes = mgr.set_system_proxy(action == "on")
-    console.print(f"[green]✓[/green] system-proxy → [bold]{action}[/bold]")
-    for note in notes:
+    if not mgr.is_running():
+        mgr.up()
+        if not mgr.is_running():
+            return
+        console.print(
+            f"[green]✓[/green] clash up (pid {mgr.running_pid()}) — "
+            f"sub [bold]{mgr.state.active}[/bold]"
+        )
+    for note in mgr.set_system_proxy(True):
         console.print(f"  [dim]{note}[/dim]")
-    if action == "on":
-        console.print(f"  [dim]for the current shell:[/dim] source {PROXY_ENV_PATH}")
+    console.print(
+        f"[green]✓[/green] system proxy → [bold]on[/bold] (127.0.0.1:{mgr.state.port})"
+    )
+    console.print(f"  [dim]for the current shell:[/dim] source {PROXY_ENV_PATH}")
+
+
+@cli.command(
+    "off", short_help="Clear this machine's system proxy (core keeps running)."
+)
+def cmd_off():
+    mgr = ClashManager()
+    for note in mgr.set_system_proxy(False):
+        console.print(f"  [dim]{note}[/dim]")
+    console.print("[green]✓[/green] system proxy → [bold]off[/bold]")
 
 
 @cli.command("lan", short_help="Toggle LAN access (allow-lan).")
@@ -1721,7 +2128,8 @@ def cmd_disable():
 @cli.command("run", hidden=True, short_help="(internal) run mihomo in the foreground.")
 def cmd_run():
     mgr = ClashManager()
-    mgr.composer.write(mgr.state)
+    cfg = mgr.composer.write(mgr.state)
+    GeoData.ensure(cfg.get("rules") or [])
     mihomo = MihomoBinary.ensure()
     mgr.state.pid = os.getpid()
     mgr.state.started_at = time.time()
@@ -1739,6 +2147,23 @@ def cmd_run():
 def cmd_install(upgrade):
     path = MihomoBinary.ensure(upgrade=upgrade)
     console.print(f"[green]✓[/green] mihomo {MIHOMO_VERSION} at {path}")
+
+
+@cli.command("geodata", short_help="Download/refresh GeoIP & GeoSite data.")
+@click.option("--mirror", help=f"Base URL to fetch from (overrides ${GEO_ENV}).")
+@click.option("--force", is_flag=True, help="Re-download even if present.")
+def cmd_geodata(mirror, force):
+    base = (mirror or GeoData.base()).rstrip("/")
+    ROOT.mkdir(parents=True, exist_ok=True)
+    console.print(f"[dim]source: {base}[/dim]")
+    for asset, local in GEO_RULE_FILES.values():
+        dest = ROOT / local
+        if dest.exists() and not force:
+            console.print(f"  [dim]–[/dim] {local} (present; --force to refresh)")
+            continue
+        with _status(f"downloading {local} …"):
+            GeoData._download(f"{base}/{asset}", dest)
+        console.print(f"  [green]✓[/green] {local} ({fmt_bytes(dest.stat().st_size)})")
 
 
 def main() -> None:

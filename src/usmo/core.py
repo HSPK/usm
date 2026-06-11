@@ -199,16 +199,19 @@ def clean_cache() -> Path | None:
 def iter_updates(
     *,
     names: Iterable[str] | None = None,
+    refresh_config: bool = True,
     on_progress: ProgressHook = _null_hook,
 ) -> Iterator[tuple[str, bool]]:
-    """Refresh the config and re-download cached scripts.
+    """Re-download cached scripts (refreshing the config first by default).
 
     Yields ``(name, updated)`` per script; ``updated`` is True iff the script
     file was actually downloaded. When ``names`` is given, only those scripts
     are considered (and unknown names raise :class:`UnknownCommand`); scripts
-    requested explicitly are downloaded even when not previously cached.
+    requested explicitly are downloaded even when not previously cached. Pass
+    ``refresh_config=False`` when the caller already refreshed the manifest.
     """
-    download_file(CONFIG_FILENAME, on_progress=on_progress)
+    if refresh_config:
+        download_file(CONFIG_FILENAME, on_progress=on_progress)
     scripts = load_scripts(on_progress=on_progress)
     if names is None:
         targets = list(scripts.items())
@@ -228,9 +231,71 @@ def iter_updates(
             yield name, False
 
 
-def update_config(*, on_progress: ProgressHook = _null_hook) -> Path:
-    """Re-download only the ``_config.json`` manifest (not the scripts)."""
-    return download_file(CONFIG_FILENAME, on_progress=on_progress)
+@dataclass(frozen=True)
+class CatalogChange:
+    """A script whose version/hash differs between the old and new manifest."""
+
+    name: str
+    old_version: str | None
+    new_version: str | None
+    old_hash: str | None
+    new_hash: str | None
+
+    @property
+    def status(self) -> str:
+        if self.old_version is None and self.old_hash is None:
+            return "added"
+        if self.new_version is None and self.new_hash is None:
+            return "removed"
+        return "changed"
+
+
+def has_cached_config() -> bool:
+    return (CACHE_SCRIPT_DIR / CONFIG_FILENAME).exists()
+
+
+def read_catalog_meta(
+    path: Path | None = None,
+) -> dict[str, tuple[str | None, str | None]]:
+    """Return ``{name: (version, hash)}`` from a manifest (default: cached)."""
+    path = path or (CACHE_SCRIPT_DIR / CONFIG_FILENAME)
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return {}
+    out: dict[str, tuple[str | None, str | None]] = {}
+    for name, entry in data.get("scripts", {}).items():
+        if isinstance(entry, dict):
+            out[name] = (entry.get("version"), entry.get("hash"))
+    return out
+
+
+def short_hash(value: str | None) -> str:
+    """Short form of a ``sha256:<hex>`` digest (7 hex chars)."""
+    if not value:
+        return "-"
+    digest = value[len(HASH_PREFIX) :] if value.startswith(HASH_PREFIX) else value
+    return digest[:7]
+
+
+def update_config(*, on_progress: ProgressHook = _null_hook) -> list[CatalogChange]:
+    """Re-download the ``_config.json`` manifest; return per-script changes.
+
+    Compares the previously-cached manifest with the freshly-downloaded one and
+    returns the version/hash differences (added / removed / changed scripts).
+    """
+    old = read_catalog_meta()
+    download_file(CONFIG_FILENAME, on_progress=on_progress)
+    new = read_catalog_meta()
+    changes: list[CatalogChange] = []
+    for name in sorted(set(old) | set(new)):
+        ov, oh = old.get(name, (None, None))
+        nv, nh = new.get(name, (None, None))
+        if (ov, oh) != (nv, nh):
+            changes.append(CatalogChange(name, ov, nv, oh, nh))
+    return changes
 
 
 # Alias shims (~/.local/bin) ------------------------------------------------

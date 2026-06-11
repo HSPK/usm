@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 
 import pytest
@@ -94,3 +95,68 @@ class TestUpdateConfig:
         monkeypatch.setattr(core, "download_file", fake_download)
         core.update_config()
         assert calls == [core.CONFIG_FILENAME]
+
+
+class TestCatalogDiff:
+    @pytest.mark.parametrize(
+        "value,expected",
+        [
+            ("sha256:abcdef1234567890", "abcdef1"),
+            ("plainhash12345", "plainha"),
+            (None, "-"),
+            ("", "-"),
+        ],
+    )
+    def test_short_hash(self, value, expected):
+        assert core.short_hash(value) == expected
+
+    def test_read_catalog_meta_missing(self, tmp_cache):
+        assert core.read_catalog_meta() == {}
+        assert core.has_cached_config() is False
+
+    def test_update_config_reports_changes(self, tmp_cache, monkeypatch):
+        core.CACHE_SCRIPT_DIR.mkdir(parents=True)
+        cfg = core.CACHE_SCRIPT_DIR / core.CONFIG_FILENAME
+        cfg.write_text(
+            json.dumps(
+                {
+                    "scripts": {
+                        "a": {
+                            "path": "a.sh",
+                            "version": "1.0.0",
+                            "hash": "sha256:aaa1",
+                        },
+                        "b": {
+                            "path": "b.sh",
+                            "version": "1.0.0",
+                            "hash": "sha256:bbb1",
+                        },
+                        "gone": {
+                            "path": "g.sh",
+                            "version": "1.0.0",
+                            "hash": "sha256:g",
+                        },
+                    }
+                }
+            )
+        )
+        assert core.has_cached_config() is True
+        new = {
+            "scripts": {
+                "a": {"path": "a.sh", "version": "1.0.0", "hash": "sha256:aaa1"},
+                "b": {"path": "b.sh", "version": "1.1.0", "hash": "sha256:bbb2"},
+                "c": {"path": "c.sh", "version": "1.0.0", "hash": "sha256:ccc1"},
+            }
+        }
+
+        def fake_download(filename, *, on_progress=core._null_hook):
+            cfg.write_text(json.dumps(new))
+            return cfg
+
+        monkeypatch.setattr(core, "download_file", fake_download)
+        by = {c.name: c for c in core.update_config()}
+        assert set(by) == {"b", "c", "gone"}
+        assert by["b"].status == "changed"
+        assert by["b"].old_version == "1.0.0" and by["b"].new_version == "1.1.0"
+        assert by["c"].status == "added"
+        assert by["gone"].status == "removed"
