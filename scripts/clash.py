@@ -10,16 +10,16 @@ Quick start
 -----------
   usm clash sub add https://example.com/sub --name work   # add a subscription
   usm clash on                                             # start + set system proxy
-  usm clash status                                         # what's running
-  usm clash select                                         # pick a node (interactive)
-  usm clash use                                            # switch subscription (interactive)
-  usm clash node                                           # list groups + nodes
+  usm clash                                                # status dashboard
+  usm clash node                                           # pick a node (interactive)
+  usm clash sub use                                        # switch subscription (interactive)
+  usm clash node -l                                        # list groups + nodes
   usm clash mode global                                    # rule | global | direct
   usm clash off                                            # clear system proxy
 
-Most settings (mode, lan, tun, port, the active subscription) can be changed
-while the core is running — the change is hot-applied immediately and
-remembered for next time.
+Most settings (mode, lan, tun, the active subscription) can be changed while
+the core is running — the change is hot-applied immediately and remembered for
+next time.
 
 TUN (transparent, system-wide) needs CAP_NET_ADMIN; ``usm clash tun on``
 prints the one-time ``setcap`` command when it's missing.
@@ -86,7 +86,6 @@ NON_NODE_TYPES = (
     "Compatible",
 )
 CLASH_UA = f"clash.meta/usm mihomo/{MIHOMO_VERSION}"
-DASHBOARD_BASE = "https://d.metacubex.one"
 READY_TIMEOUT = 45  # seconds to wait for the controller (first run fetches GeoIP)
 CONFIG_TEST_TIMEOUT = 120  # safety cap on `mihomo -t`
 
@@ -101,6 +100,15 @@ GEO_RULE_FILES = {
     "GEOIP": ("geoip.dat", "GeoIP.dat"),
     "GEOSITE": ("geosite.dat", "GeoSite.dat"),
 }
+
+# Web dashboard (metacubexd) served locally by mihomo via `external-ui`.
+UI_VERSION = "v1.251.3"
+UI_DEFAULT_URL = (
+    f"https://github.com/MetaCubeX/metacubexd/releases/download/{UI_VERSION}/"
+    "compressed-dist.tgz"
+)
+UI_ENV = "USM_CLASH_UI_URL"
+UI_DIR_NAME = "ui"  # relative to the data dir (ROOT); mihomo serves it at /ui/
 
 try:
     _SIGKILL = signal.SIGKILL
@@ -309,8 +317,8 @@ class GeoData:
             f"failed to download geo data ({why}): {url}\n"
             f"  GitHub may be blocked. Point {GEO_ENV} at a mirror and retry, e.g.\n"
             f'    export {GEO_ENV}="https://ghproxy.net/{GEO_DEFAULT_BASE}"\n'
-            "  then run 'usm clash geodata --force'. "
-            "(Or remove GEOIP/GEOSITE rules from the profile.)"
+            "  then run 'usm clash setup --force'. "
+            "(Or remove GEOIP/GEOSITE rules from the subscription.)"
         )
 
     @classmethod
@@ -327,6 +335,56 @@ class GeoData:
         with _status(f"downloading geo data ({labels}; first run, ~23 MB) …"):
             for asset, local in missing:
                 cls._download(f"{b}/{asset}", ROOT / local)
+
+
+class WebUI:
+    """Downloads the metacubexd dashboard so mihomo can serve it locally."""
+
+    @staticmethod
+    def dir() -> Path:
+        return ROOT / UI_DIR_NAME
+
+    @classmethod
+    def installed(cls) -> bool:
+        d = cls.dir()
+        return d.is_dir() and any(d.iterdir())
+
+    @staticmethod
+    def url() -> str:
+        return os.environ.get(UI_ENV, UI_DEFAULT_URL)
+
+    @classmethod
+    def ensure(cls, *, force: bool = False) -> Path:
+        d = cls.dir()
+        if cls.installed() and not force:
+            return d
+        url = cls.url()
+        with _status("downloading web dashboard (metacubexd) …"):
+            try:
+                payload = requests.get(url, timeout=(10, 60)).content
+            except requests.RequestException as e:
+                raise click.ClickException(cls._fail_msg(url, str(e))) from e
+            shutil.rmtree(d, ignore_errors=True)
+            d.mkdir(parents=True, exist_ok=True)
+            try:
+                import io
+                import tarfile
+
+                with tarfile.open(fileobj=io.BytesIO(payload), mode="r:gz") as tar:
+                    tar.extractall(d)
+            except (tarfile.TarError, OSError, EOFError) as e:
+                raise click.ClickException(
+                    cls._fail_msg(url, f"extract failed: {e}")
+                ) from e
+        return d
+
+    @staticmethod
+    def _fail_msg(url: str, why: str) -> str:
+        return (
+            f"failed to download the web dashboard ({why}): {url}\n"
+            f"  GitHub may be blocked. Point {UI_ENV} at a mirror tgz, e.g.\n"
+            f'    export {UI_ENV}="https://ghproxy.net/{UI_DEFAULT_URL}"'
+        )
 
 
 # State ---------------------------------------------------------------------
@@ -574,6 +632,9 @@ class ConfigComposer:
         base["geodata-mode"] = True
         base["geo-auto-update"] = False
         base["geox-url"] = GeoData.geox_url()
+        # Serve the web dashboard locally (mihomo → /ui/) when it's installed.
+        if WebUI.installed():
+            base["external-ui"] = UI_DIR_NAME
         if state.tun:
             base["tun"] = {
                 "enable": True,
@@ -1074,6 +1135,8 @@ class StatusReport:
     enabled: bool
     state: State
     traffic: Optional[dict] = None
+    node: Optional[str] = None
+    group: Optional[str] = None
 
 
 class ClashManager:
@@ -1186,17 +1249,25 @@ class ClashManager:
         pid = self.running_pid()
         running = pid is not None
         traffic = None
+        node = group = None
         if running:
+            api = self.api()
             try:
-                traffic = self.api().connections()
+                traffic = api.connections()
+                proxies = api.proxies()
+                g = _primary_selector(proxies, self.state.mode)
+                if g:
+                    node, group = proxies[g].get("now"), g
             except click.ClickException:
-                traffic = None
+                pass
         return StatusReport(
             running=running,
             pid=pid,
             enabled=self.supervisor.enabled,
             state=self.state,
             traffic=traffic,
+            node=node,
+            group=group,
         )
 
     # -- settings (each persists + hot-applies if running) --
@@ -1296,11 +1367,11 @@ class ClashManager:
 # Logical grouping for the help / overview (keeps a 20-command CLI readable).
 COMMAND_SECTIONS: list[tuple[str, tuple[str, ...]]] = [
     ("Run", ("on", "off", "up", "down", "restart", "status")),
-    ("Subscriptions", ("use", "sub")),
-    ("Proxy", ("select", "node", "mode", "test")),
-    ("Network", ("tun", "lan", "port")),
-    ("Observability", ("logs", "conns", "dashboard")),
-    ("Setup", ("enable", "disable", "install", "geodata")),
+    ("Subscriptions", ("sub",)),
+    ("Proxy", ("node", "mode", "test")),
+    ("Network", ("tun", "lan")),
+    ("Observability", ("logs", "conns", "dash")),
+    ("Setup", ("enable", "disable", "setup")),
 ]
 
 
@@ -1332,50 +1403,44 @@ class GroupedGroup(click.Group):
                 formatter.write_dl([(n, c.get_short_help_str(78)) for n, c in extra])
 
 
-def _print_overview(ctx: click.Context) -> None:
-    console.print(
-        "[bold cyan]usm clash[/bold cyan] — ClashX-style manager for the "
-        "[bold]mihomo[/bold] core"
+def _bind(state: State) -> str:
+    return "0.0.0.0" if state.allow_lan else "127.0.0.1"
+
+
+def _on_off(value: bool) -> str:
+    return "[green]on[/green]" if value else "[dim]off[/dim]"
+
+
+def _render_status(rep: StatusReport) -> None:
+    s = rep.state
+    table = Table(show_header=False, box=None, pad_edge=False, padding=(0, 2, 0, 1))
+    table.add_column(justify="right", style="dim", no_wrap=True)
+    table.add_column(overflow="fold")
+    dot = "[green]● running[/green]" if rep.running else "[dim]○ stopped[/dim]"
+    table.add_row("status", dot + (f"  [dim](pid {rep.pid})[/dim]" if rep.pid else ""))
+    table.add_row("subscription", s.active or "[dim]none[/dim]")
+    if rep.node:
+        suffix = f"  [dim]({rep.group})[/dim]" if rep.group else ""
+        table.add_row("node", f"[bold]{rep.node}[/bold]{suffix}")
+    table.add_row("mode", s.mode)
+    table.add_row("proxy port", f"{_bind(s)}:{s.port}")
+    table.add_row("system proxy", _on_off(s.system_proxy))
+    table.add_row("tun", _on_off(s.tun))
+    table.add_row("allow-lan", _on_off(s.allow_lan))
+    table.add_row(
+        "autostart", "[cyan]enabled[/cyan]" if rep.enabled else "[dim]off[/dim]"
     )
-    mgr = ClashManager()
-    prof = mgr.state.active or "[dim]none[/dim]"
-    running = mgr.is_running()
-    core = "[green]● running[/green]" if running else "[dim]○ stopped[/dim]"
-    extra = ""
-    if running:
-        try:
-            proxies = mgr.api().proxies()
-            g = _primary_selector(proxies, mgr.state.mode)
-            if g:
-                extra = f"    [dim]node:[/dim] {proxies[g].get('now')}"
-        except click.ClickException:
-            pass
-    console.print(
-        f"[dim]subscription:[/dim] {prof}    [dim]core:[/dim] {core}{extra}\n"
-    )
-    for title, names in COMMAND_SECTIONS:
-        table = Table(
-            show_header=False,
-            box=None,
-            pad_edge=False,
-            padding=(0, 2, 0, 0),
+    if rep.running and s.started_at and not rep.enabled:
+        table.add_row("uptime", fmt_uptime(time.time() - s.started_at))
+    if rep.traffic is not None:
+        t = rep.traffic
+        table.add_row(
+            "traffic",
+            f"↓ {fmt_bytes(t.get('downloadTotal', 0))}  "
+            f"↑ {fmt_bytes(t.get('uploadTotal', 0))}  "
+            f"[dim]· {len(t.get('connections') or [])} conns[/dim]",
         )
-        table.add_column(style="bold green", no_wrap=True)
-        table.add_column(overflow="fold")
-        rows = 0
-        for name in names:
-            cmd = cli.get_command(ctx, name)
-            if cmd is None or cmd.hidden:
-                continue
-            table.add_row(name, cmd.get_short_help_str(80))
-            rows += 1
-        if rows:
-            console.print(f"[dim]{title}[/dim]")
-            console.print(table)
-            console.print()
-    console.print(
-        "[dim]Run [bold]usm clash <command> -h[/bold] for command help.[/dim]"
-    )
+    console.print(table)
 
 
 @click.group(
@@ -1387,11 +1452,8 @@ def _print_overview(ctx: click.Context) -> None:
 @click.pass_context
 def cli(ctx: click.Context) -> None:
     if ctx.invoked_subcommand is None:
-        _print_overview(ctx)
-
-
-def _bind(state: State) -> str:
-    return "0.0.0.0" if state.allow_lan else "127.0.0.1"
+        _render_status(ClashManager().status())
+        console.print("\n[dim]Run [bold]usm clash -h[/bold] for all commands.[/dim]")
 
 
 def _print_endpoint(mgr: ClashManager) -> None:
@@ -1406,6 +1468,9 @@ def _print_endpoint(mgr: ClashManager) -> None:
 # Interactive selection helpers ---------------------------------------------
 
 
+# Node selection ------------------------------------------------------------
+
+
 def _selectors(proxies: dict) -> list[str]:
     """All Selector-type groups (includes the built-in GLOBAL)."""
     return [k for k, v in proxies.items() if v.get("type") == "Selector"]
@@ -1413,7 +1478,7 @@ def _selectors(proxies: dict) -> list[str]:
 
 def _user_groups(proxies: dict, mode: str) -> list[str]:
     """Groups a user actually switches in: the built-in GLOBAL only matters in
-    global mode; otherwise the profile's own Selector groups."""
+    global mode; otherwise the subscription's own Selector groups."""
     sels = _selectors(proxies)
     if mode == "global":
         return ["GLOBAL"] if "GLOBAL" in sels else sels
@@ -1436,11 +1501,59 @@ def _node_delay(proxies: dict, name: str) -> Optional[int]:
     return hist[-1].get("delay") if hist and hist[-1].get("delay") else None
 
 
+class NodeSwitcher:
+    """Domain logic for inspecting and switching proxy-group selections.
+
+    Holds a single snapshot of ``/proxies`` and exposes the switchable groups,
+    their members/latency, and the select action. Presentation (menus, tables)
+    lives in the CLI layer.
+    """
+
+    def __init__(self, api: "ClashAPI", mode: str) -> None:
+        self.api = api
+        self.mode = mode
+        self.proxies = api.proxies()
+
+    @property
+    def selectors(self) -> list[str]:
+        return _selectors(self.proxies)
+
+    @property
+    def groups(self) -> list[str]:
+        return _user_groups(self.proxies, self.mode)
+
+    def members(self, group: str) -> list[str]:
+        return self.proxies.get(group, {}).get("all", []) or []
+
+    def current(self, group: str) -> Optional[str]:
+        return self.proxies.get(group, {}).get("now")
+
+    def delay(self, name: str) -> Optional[int]:
+        return _node_delay(self.proxies, name)
+
+    def group_delays(self, group: str) -> dict:
+        return self.api.group_delay(group, DEFAULT_TEST_URL, 5000)
+
+    def find_nodes(self, query: str) -> list[tuple[str, str]]:
+        q = query.lower()
+        return [(g, m) for g in self.groups for m in self.members(g) if q in m.lower()]
+
+    def resolve_group(self, query: str) -> Optional[str]:
+        exact = [g for g in self.groups if g.lower() == query.lower()]
+        if exact:
+            return exact[0]
+        subs = [g for g in self.groups if query.lower() in g.lower()]
+        return subs[0] if len(subs) == 1 else None
+
+    def apply(self, group: str, node: str) -> None:
+        self.api.select(group, node)
+
+
 def _pick(title: str, options: list[tuple[str, object]], *, current=None):
     """Show a numbered menu and return the chosen value (or None if cancelled)."""
     if not options:
         return None
-    table = Table(show_header=False, box=None, pad_edge=False, padding=(0, 2, 0, 0))
+    table = Table(show_header=False, box=None, pad_edge=False, padding=(0, 2, 0, 1))
     table.add_column(justify="right", style="bold green", no_wrap=True)
     table.add_column(overflow="fold")
     for i, (label, value) in enumerate(options, 1):
@@ -1474,21 +1587,21 @@ def _resolve_one(query: str, candidates: list[str], kind: str) -> str:
     raise click.ClickException(f"no {kind} matching '{query}'.")
 
 
-def _pick_node(api, proxies: dict, group: str, do_test: bool) -> Optional[str]:
-    members = proxies.get(group, {}).get("all", []) or []
+def _pick_node(sw: NodeSwitcher, group: str, do_test: bool) -> Optional[str]:
+    members = sw.members(group)
     if not members:
         console.print(f"[dim]{group} has no members.[/dim]")
         return None
     delays: dict = {}
     if do_test:
         with _status(f"testing {group} …"):
-            delays = api.group_delay(group, DEFAULT_TEST_URL, 5000)
+            delays = sw.group_delays(group)
     options = []
     for m in members:
-        d = delays.get(m) if do_test else _node_delay(proxies, m)
+        d = delays.get(m) if do_test else sw.delay(m)
         tag = f"  [dim]{d}ms[/dim]" if d else ("  [red]✗[/red]" if do_test else "")
         options.append((f"{m}{tag}", m))
-    return _pick(f"node in {group}", options, current=proxies[group].get("now"))
+    return _pick(f"node in {group}", options, current=sw.current(group))
 
 
 # ---- subscriptions ----
@@ -1573,7 +1686,7 @@ def cmd_sub_ls():
             expire,
         )
     console.print(table)
-    console.print("[dim]switch with[/dim] usm clash use <#|name>")
+    console.print("[dim]switch with[/dim] usm clash sub use <#|name>")
 
 
 @sub.command("update", short_help="Refresh remote subscriptions (NAME or all).")
@@ -1616,9 +1729,9 @@ def cmd_sub_rm(name):
     console.print(f"[green]✓[/green] removed subscription {name}")
 
 
-@cli.command("use", short_help="Switch the active subscription (interactive).")
+@sub.command("use", short_help="Switch the active subscription (interactive).")
 @click.argument("target", required=False)
-def cmd_use(target):
+def cmd_sub_use(target):
     mgr = ClashManager()
     names = [m["name"] for m in mgr.profiles.list()]
     if not names:
@@ -1733,40 +1846,7 @@ def cmd_restart():
 
 @cli.command("status", short_help="Show what's running.")
 def cmd_status():
-    mgr = ClashManager()
-    rep = mgr.status()
-    s = rep.state
-    table = Table(show_header=False, box=None, pad_edge=False)
-    table.add_column(style="bold")
-    table.add_column()
-    dot = "[green]● running[/green]" if rep.running else "[dim]○ stopped[/dim]"
-    table.add_row("status", dot + (f"  (pid {rep.pid})" if rep.pid else ""))
-    table.add_row("subscription", s.active or "[dim]none[/dim]")
-    if rep.running:
-        try:
-            proxies = mgr.api().proxies()
-            g = _primary_selector(proxies, s.mode)
-            if g:
-                table.add_row("node", f"{proxies[g].get('now')}  [dim]({g})[/dim]")
-        except click.ClickException:
-            pass
-    table.add_row("mode", s.mode)
-    table.add_row("mixed port", f"{_bind(s)}:{s.port}")
-    table.add_row("controller", s.controller)
-    table.add_row("tun", "[green]on[/green]" if s.tun else "off")
-    table.add_row("allow-lan", "[green]on[/green]" if s.allow_lan else "off")
-    table.add_row("system-proxy", "[green]on[/green]" if s.system_proxy else "off")
-    table.add_row("autostart", "[cyan]enabled[/cyan]" if rep.enabled else "off")
-    if rep.running and s.started_at and not rep.enabled:
-        table.add_row("uptime", fmt_uptime(time.time() - s.started_at))
-    console.print(table)
-    if rep.traffic is not None:
-        t = rep.traffic
-        console.print(
-            f"[dim]traffic: ↓ {fmt_bytes(t.get('downloadTotal', 0))}  "
-            f"↑ {fmt_bytes(t.get('uploadTotal', 0))}  "
-            f"| active conns: {len(t.get('connections') or [])}[/dim]"
-        )
+    _render_status(ClashManager().status())
 
 
 # ---- runtime control ----
@@ -1783,24 +1863,7 @@ def cmd_mode(mode):
     console.print(f"[green]✓[/green] mode → [bold]{mode}[/bold]")
 
 
-@cli.command("port", short_help="Get or set the local mixed HTTP+SOCKS port.")
-@click.argument("port", required=False, type=int)
-def cmd_port(port):
-    mgr = ClashManager()
-    if not port:
-        console.print(f"port: [bold]{mgr.state.port}[/bold]")
-        return
-    mgr.set_port(port)
-    console.print(f"[green]✓[/green] port → [bold]{port}[/bold]")
-    if mgr.is_running():
-        console.print(f"  [dim]apps now use[/dim] http://127.0.0.1:{port}")
-
-
-@cli.command("node", short_help="List groups & nodes (with current pick).")
-@click.argument("group", required=False)
-def cmd_node(group):
-    mgr = ClashManager()
-    api = mgr.require_running()
+def _render_node_list(api, group: Optional[str]) -> None:
     proxies = api.proxies()
     groups = {k: v for k, v in proxies.items() if v.get("type") in GROUP_TYPES}
     if group:
@@ -1809,99 +1872,106 @@ def cmd_node(group):
                 f"No proxy group '{group}'. Groups: {', '.join(groups) or '(none)'}"
             )
         groups = {group: groups[group]}
+    else:
+        groups = {k: v for k, v in groups.items() if k != "GLOBAL"}
     if not groups:
         console.print("[dim]This subscription has no groups.[/dim]")
         return
     for gname, g in groups.items():
-        console.print(f"[bold cyan]{gname}[/bold cyan] [dim]({g.get('type')})[/dim]")
+        now = g.get("now")
+        console.print(
+            f"[bold cyan]{gname}[/bold cyan] [dim]({g.get('type')})[/dim]"
+            + (f"  [dim]→[/dim] [bold]{now}[/bold]" if now else "")
+        )
+        inner = Table(show_header=False, box=None, pad_edge=False, padding=(0, 2, 0, 0))
+        inner.add_column(no_wrap=True)
+        inner.add_column(justify="right", style="dim")
         for member in g.get("all", []):
-            mark = "[green]→[/green]" if member == g.get("now") else " "
-            hist = (proxies.get(member, {}) or {}).get("history") or []
-            delay = (
-                f"  [dim]{hist[-1]['delay']}ms[/dim]"
-                if hist and hist[-1].get("delay")
-                else ""
-            )
-            console.print(f"  {mark} {member}{delay}")
+            mark = "[green]●[/green]" if member == now else "[dim]·[/dim]"
+            d = _node_delay(proxies, member)
+            inner.add_row(f"   {mark} {member}", f"{d}ms" if d else "")
+        console.print(inner)
 
 
-@cli.command("select", short_help="Switch the active node (interactive).")
+@cli.command(
+    "node",
+    short_help="Switch the active node (interactive); -l lists, NAME switches.",
+)
 @click.argument("group", required=False)
 @click.argument("node", required=False)
 @click.option(
-    "-t",
-    "--test",
-    "do_test",
-    is_flag=True,
-    help="Latency-test the group before choosing.",
+    "-l", "--list", "list_only", is_flag=True, help="List groups & nodes; don't switch."
 )
-def cmd_select(group, node, do_test):
+@click.option(
+    "-t", "--test", "do_test", is_flag=True, help="Latency-test before choosing."
+)
+def cmd_node(group, node, list_only, do_test):
     mgr = ClashManager()
     api = mgr.require_running()
-    proxies = api.proxies()
-    all_selectors = _selectors(proxies)
-    groups = _user_groups(proxies, mgr.state.mode)
-    if not groups:
+    if list_only:
+        _render_node_list(api, group)
+        return
+
+    sw = NodeSwitcher(api, mgr.state.mode)
+    if not sw.groups:
         raise click.ClickException("this subscription has no selectable groups.")
 
     def _apply(g: str, n: str) -> None:
-        api.select(g, n)
+        sw.apply(g, n)
         console.print(f"[green]✓[/green] {g} → [bold]{n}[/bold]")
 
-    # group + node: direct (substring-friendly; explicit GLOBAL allowed)
+    # explicit group + node (substring-friendly; explicit GLOBAL allowed)
     if group and node:
-        g = _resolve_one(group, all_selectors, "group")
-        _apply(g, _resolve_one(node, proxies[g].get("all", []), "node"))
+        g = _resolve_one(group, sw.selectors, "group")
+        _apply(g, _resolve_one(node, sw.members(g), "node"))
         return
 
     # single arg: a group to drill into, else a node to find
     if group:
-        exact = [s for s in groups if s.lower() == group.lower()]
-        subs = [s for s in groups if group.lower() in s.lower()]
-        g = exact[0] if exact else (subs[0] if len(subs) == 1 else None)
+        g = sw.resolve_group(group)
         if g:
-            n = _pick_node(api, proxies, g, do_test)
-            if n:
-                _apply(g, n)
+            chosen = _pick_node(sw, g, do_test)
+            if chosen:
+                _apply(g, chosen)
             return
-        hits = [
-            (s, m)
-            for s in groups
-            for m in proxies[s].get("all", [])
-            if group.lower() in m.lower()
-        ]
+        hits = sw.find_nodes(group)
         if not hits:
             raise click.ClickException(f"no group or node matching '{group}'.")
         if len(hits) == 1:
             _apply(*hits[0])
             return
+        # Same node name across groups: prefer the primary group if it has it.
+        primary = _primary_selector(sw.proxies, sw.mode)
+        primary_hits = [(g, m) for g, m in hits if g == primary]
+        if primary_hits and len({m for _, m in hits}) == 1:
+            _apply(*primary_hits[0])
+            return
         chosen = _pick(
             f"node matching '{group}'",
-            [(f"{m}   [dim]in {s}[/dim]", (s, m)) for s, m in hits],
+            [(f"{m}   [dim]in {g}[/dim]", (g, m)) for g, m in hits],
         )
         if chosen:
             _apply(*chosen)
         return
 
     # no args: pick group (if several), then node
-    g = groups[0]
-    if len(groups) > 1:
+    g = sw.groups[0]
+    if len(sw.groups) > 1:
         g = _pick(
             "group",
             [
                 (
-                    f"{s}  [dim]→ {proxies[s].get('now')} "
-                    f"({len(proxies[s].get('all', []))} nodes)[/dim]",
+                    f"{s}  [dim]→ {sw.current(s)} ({len(sw.members(s))} nodes)[/dim]",
                     s,
                 )
-                for s in groups
+                for s in sw.groups
             ],
         )
         if not g:
             return
-    n = _pick_node(api, proxies, g, do_test)
-    if n:
-        _apply(g, n)
+    chosen = _pick_node(sw, g, do_test)
+    if chosen:
+        _apply(g, chosen)
 
 
 @cli.command("test", short_help="Latency-test a group, a node, or all nodes.")
@@ -2034,6 +2104,7 @@ def cmd_logs(follow, lines, level):
     mgr = ClashManager()
     if follow:
         api = mgr.require_running()
+        console.print("[dim]following logs (Ctrl-C to stop) …[/dim]")
         try:
             for entry in api.stream("/logs", {"level": level}):
                 lvl = entry.get("type", "info")
@@ -2043,6 +2114,8 @@ def cmd_logs(follow, lines, level):
                 console.print(f"[{color}]{lvl:>7}[/{color}] {entry.get('payload', '')}")
         except KeyboardInterrupt:
             pass
+        except click.ClickException as exc:
+            console.print(f"[red]logs stream ended:[/red] {exc}")
         return
     if not LOG_PATH.exists():
         console.print("[dim]No logs yet.[/dim]")
@@ -2051,27 +2124,21 @@ def cmd_logs(follow, lines, level):
         click.echo(line)
 
 
-@cli.command("conns", short_help="Show active connections.")
-@click.option("--close", is_flag=True, help="Close all active connections.")
-def cmd_conns(close):
-    mgr = ClashManager()
-    api = mgr.require_running()
-    if close:
-        api.close_connections()
-        console.print("[green]✓[/green] closed all connections.")
-        return
-    data = api.connections()
+def _conns_renderable(data: dict):
+    from rich.console import Group
+
     conns = data.get("connections") or []
-    console.print(
+    header = (
         f"[dim]↓ {fmt_bytes(data.get('downloadTotal', 0))}  "
         f"↑ {fmt_bytes(data.get('uploadTotal', 0))}  |  {len(conns)} active[/dim]"
     )
     if not conns:
-        return
-    table = Table(show_header=True, header_style="bold")
+        return header
+    table = Table(show_header=True, header_style="bold", expand=True)
     for col in ("Host", "Chain", "Rule", "↑", "↓"):
         table.add_column(col, justify="right" if col in ("↑", "↓") else "left")
-    for c in conns[:40]:
+    ordered = sorted(conns, key=lambda c: c.get("download", 0), reverse=True)
+    for c in ordered[:40]:
         meta = c.get("metadata", {})
         host = meta.get("host") or meta.get("destinationIP", "")
         table.add_row(
@@ -2081,23 +2148,63 @@ def cmd_conns(close):
             fmt_bytes(c.get("upload", 0)),
             fmt_bytes(c.get("download", 0)),
         )
-    console.print(table)
+    return Group(header, table)
 
 
-@cli.command("dashboard", short_help="Print a web dashboard URL for the running core.")
-def cmd_dashboard():
+@cli.command("conns", short_help="Show active connections (-w to watch live).")
+@click.option("-w", "--watch", is_flag=True, help="Refresh live until Ctrl-C.")
+@click.option("--close", is_flag=True, help="Close all active connections.")
+def cmd_conns(watch, close):
     mgr = ClashManager()
-    s = mgr.state
-    host, _, port = s.controller.rpartition(":")
+    api = mgr.require_running()
+    if close:
+        api.close_connections()
+        console.print("[green]✓[/green] closed all connections.")
+        return
+    if watch:
+        from rich.live import Live
+
+        try:
+            with Live(console=console, refresh_per_second=4, screen=True) as live:
+                while True:
+                    live.update(_conns_renderable(api.connections()))
+                    time.sleep(1.5)
+        except KeyboardInterrupt:
+            pass
+        except click.ClickException as exc:
+            console.print(f"[red]{exc}[/red]")
+        return
+    console.print(_conns_renderable(api.connections()))
+
+
+@cli.command("dash", short_help="Open the local web dashboard (metacubexd).")
+@click.option(
+    "--no-open", is_flag=True, help="Just print the URL; don't open a browser."
+)
+def cmd_dash(no_open):
+    mgr = ClashManager()
+    mgr.require_running()
+    newly = not WebUI.installed()
+    WebUI.ensure()
+    if newly:
+        # The core started before the UI existed; reload so it serves /ui/.
+        mgr.apply()
+    host, _, port = mgr.state.controller.rpartition(":")
     if host in ("", "0.0.0.0", "::", "*"):
         host = "127.0.0.1"
     q = urllib.parse.urlencode(
-        {"hostname": host, "port": port, "secret": s.secret, "http": "true"}
+        {"hostname": host, "port": port, "secret": mgr.state.secret}
     )
-    console.print("Open the metacubexd dashboard (the core has CORS enabled):")
-    console.print(f"  [bold]{DASHBOARD_BASE}/#/setup?{q}[/bold]")
-    if not mgr.is_running():
-        console.print("[dim](start the core first with 'usm clash up')[/dim]")
+    url = f"http://{host}:{port}/ui/#/setup?{q}"
+    console.print(f"[green]✓[/green] dashboard: [bold]{url}[/bold]")
+    if not no_open:
+        import webbrowser
+
+        try:
+            if webbrowser.open(url):
+                console.print("[dim]opened in your browser.[/dim]")
+        except Exception:
+            pass
 
 
 # ---- autostart ----
@@ -2142,28 +2249,33 @@ def cmd_run():
         raise click.ClickException(f"{mihomo} not found.") from exc
 
 
-@cli.command("install", short_help="Pre-download the mihomo binary.")
-@click.option("--upgrade", is_flag=True, help="Re-download even if present.")
-def cmd_install(upgrade):
-    path = MihomoBinary.ensure(upgrade=upgrade)
-    console.print(f"[green]✓[/green] mihomo {MIHOMO_VERSION} at {path}")
-
-
-@cli.command("geodata", short_help="Download/refresh GeoIP & GeoSite data.")
-@click.option("--mirror", help=f"Base URL to fetch from (overrides ${GEO_ENV}).")
-@click.option("--force", is_flag=True, help="Re-download even if present.")
-def cmd_geodata(mirror, force):
-    base = (mirror or GeoData.base()).rstrip("/")
+@cli.command(
+    "setup",
+    short_help="Download the mihomo binary + GeoIP/GeoSite data + web dashboard.",
+)
+@click.option("--force", is_flag=True, help="Re-download everything, even if present.")
+@click.option("--geo-mirror", help=f"Geo data base URL (overrides ${GEO_ENV}).")
+def cmd_setup(force, geo_mirror):
     ROOT.mkdir(parents=True, exist_ok=True)
-    console.print(f"[dim]source: {base}[/dim]")
+    path = MihomoBinary.ensure(upgrade=force)
+    console.print(f"[green]✓[/green] mihomo {MIHOMO_VERSION} [dim]({path})[/dim]")
+
+    base = (geo_mirror or GeoData.base()).rstrip("/")
     for asset, local in GEO_RULE_FILES.values():
         dest = ROOT / local
         if dest.exists() and not force:
-            console.print(f"  [dim]–[/dim] {local} (present; --force to refresh)")
+            console.print(f"[green]✓[/green] {local} [dim](present)[/dim]")
             continue
         with _status(f"downloading {local} …"):
             GeoData._download(f"{base}/{asset}", dest)
-        console.print(f"  [green]✓[/green] {local} ({fmt_bytes(dest.stat().st_size)})")
+        console.print(f"[green]✓[/green] {local} ({fmt_bytes(dest.stat().st_size)})")
+
+    if WebUI.installed() and not force:
+        console.print("[green]✓[/green] web dashboard [dim](present)[/dim]")
+    else:
+        WebUI.ensure(force=force)
+        console.print("[green]✓[/green] web dashboard (metacubexd)")
+    console.print("[bold green]Setup complete.[/bold green]")
 
 
 def main() -> None:
