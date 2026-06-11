@@ -46,7 +46,7 @@ manager overrides (port/mode/tun)─┘        │
 | `tun on\|off\|status` | Toggle TUN (transparent system-wide capture). |
 | `lan on\|off\|status` | Toggle `allow-lan` (let other devices use this box). |
 | `port [N]` | Get or set the local mixed HTTP+SOCKS port. |
-| `logs [-f] [-n N] [--level L]` | Tail the log file, or stream live via the API. |
+| `logs [-f\|-w] [-n N] [--level L]` | Tail the log file, or stream live via the API. |
 | `conns [-w] [--close]` | Show active connections; `-w` watches live. |
 | `dash [--no-open]` | Open the local web dashboard (metacubexd, served by mihomo). |
 | `enable` / `disable` | Autostart at login via a systemd `--user` unit. |
@@ -227,7 +227,7 @@ source ~/.cache/usm/clash/proxy.env     # http_proxy/https_proxy/all_proxy
 
 ```bash
 usm clash logs -n 100         # tail the log file
-usm clash logs -f             # stream live logs via the API (Ctrl-C to stop)
+usm clash logs -f             # stream live logs via the API (-w also works)
 usm clash conns               # active connections (host, chain, rule, up/down)
 usm clash conns -w            # watch them live (full-screen; Ctrl-C to stop)
 usm clash conns --close       # drop all connections
@@ -239,6 +239,12 @@ usm clash dash                # open the local web dashboard (metacubexd)
 hosted site. The first `dash` (or `setup`) downloads the dashboard (~1 MB) into
 `~/.cache/usm/clash/ui`; `dash` then opens the URL (with host/port/secret
 pre-filled) in your browser, or just prints it with `--no-open`.
+
+!!! note "First `dash` restarts the core"
+    mihomo only mounts the `external-ui` server at startup, so if the core was
+    already running before the dashboard was installed, `dash` restarts it once
+    to start serving `/ui/`. After that the dashboard stays available (it's
+    served by the core itself), and `usm clash status` shows its URL.
 
 ## State & files
 

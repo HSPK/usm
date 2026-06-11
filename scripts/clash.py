@@ -711,6 +711,26 @@ class ClashAPI:
         except requests.RequestException:
             return False
 
+    def ui_ok(self) -> bool:
+        """True if the core is currently serving the web dashboard at /ui/."""
+        try:
+            r = requests.get(self.base + "/ui/", headers=self.headers, timeout=3)
+            return r.status_code == 200
+        except requests.RequestException:
+            return False
+
+    def ui_url(self) -> str:
+        """Pre-filled metacubexd setup URL served by the core."""
+        host, _, port = self.base[len("http://") :].partition(":")
+        q = urllib.parse.urlencode(
+            {
+                "hostname": host,
+                "port": port,
+                "secret": self.headers.get("Authorization", "")[len("Bearer ") :],
+            }
+        )
+        return f"{self.base}/ui/#/setup?{q}"
+
     def wait_ready(self, timeout: float = READY_TIMEOUT) -> bool:
         deadline = time.time() + timeout
         while time.time() < deadline:
@@ -1137,6 +1157,7 @@ class StatusReport:
     traffic: Optional[dict] = None
     node: Optional[str] = None
     group: Optional[str] = None
+    dashboard: Optional[str] = None
 
 
 class ClashManager:
@@ -1249,7 +1270,7 @@ class ClashManager:
         pid = self.running_pid()
         running = pid is not None
         traffic = None
-        node = group = None
+        node = group = dashboard = None
         if running:
             api = self.api()
             try:
@@ -1258,6 +1279,8 @@ class ClashManager:
                 g = _primary_selector(proxies, self.state.mode)
                 if g:
                     node, group = proxies[g].get("now"), g
+                if WebUI.installed() and api.ui_ok():
+                    dashboard = f"{api.base}/ui/"
             except click.ClickException:
                 pass
         return StatusReport(
@@ -1268,6 +1291,7 @@ class ClashManager:
             traffic=traffic,
             node=node,
             group=group,
+            dashboard=dashboard,
         )
 
     # -- settings (each persists + hot-applies if running) --
@@ -1432,6 +1456,8 @@ def _render_status(rep: StatusReport) -> None:
     )
     if rep.running and s.started_at and not rep.enabled:
         table.add_row("uptime", fmt_uptime(time.time() - s.started_at))
+    if rep.dashboard:
+        table.add_row("dashboard", rep.dashboard)
     if rep.traffic is not None:
         t = rep.traffic
         table.add_row(
@@ -2091,8 +2117,16 @@ def cmd_lan(action):
 # ---- observability ----
 
 
-@cli.command("logs", short_help="Show recent logs, or stream live with -f.")
-@click.option("-f", "--follow", is_flag=True, help="Stream live logs via the API.")
+@cli.command("logs", short_help="Show recent logs, or stream live with -f/-w.")
+@click.option(
+    "-f",
+    "--follow",
+    "-w",
+    "--watch",
+    "follow",
+    is_flag=True,
+    help="Stream live logs via the API.",
+)
 @click.option("-n", "--lines", type=int, default=50, show_default=True)
 @click.option(
     "--level",
@@ -2183,19 +2217,21 @@ def cmd_conns(watch, close):
 )
 def cmd_dash(no_open):
     mgr = ClashManager()
-    mgr.require_running()
-    newly = not WebUI.installed()
+    api = mgr.require_running()
     WebUI.ensure()
-    if newly:
-        # The core started before the UI existed; reload so it serves /ui/.
-        mgr.apply()
-    host, _, port = mgr.state.controller.rpartition(":")
-    if host in ("", "0.0.0.0", "::", "*"):
-        host = "127.0.0.1"
-    q = urllib.parse.urlencode(
-        {"hostname": host, "port": port, "secret": mgr.state.secret}
-    )
-    url = f"http://{host}:{port}/ui/#/setup?{q}"
+    # mihomo only mounts external-ui at startup, so a hot reload won't expose
+    # /ui/. If it isn't being served yet, restart the core (the regenerated
+    # config now includes external-ui because the UI is installed).
+    if not api.ui_ok():
+        with _status("enabling dashboard (restarting core) …"):
+            mgr.restart()
+            api = mgr.api()
+            api.wait_ready()
+        if not api.ui_ok():
+            raise click.ClickException(
+                "the core is running but isn't serving /ui/. Check 'usm clash logs'."
+            )
+    url = api.ui_url()
     console.print(f"[green]✓[/green] dashboard: [bold]{url}[/bold]")
     if not no_open:
         import webbrowser
