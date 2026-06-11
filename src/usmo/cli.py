@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import shutil
 import subprocess
 import sys
 from typing import Callable
@@ -109,7 +110,26 @@ def _cmd_list(scripts: Scripts) -> None:
     _print_overview(scripts)
 
 
-def _cmd_update(names: tuple[str, ...] = ()) -> None:
+def _cmd_update(args: tuple[str, ...] = ()) -> None:
+    flags = {a for a in args if a.startswith("-")}
+    names = tuple(a for a in args if not a.startswith("-"))
+    unknown = flags - {"--all", "-a"}
+    if unknown:
+        raise click.ClickException(f"unknown option(s): {', '.join(sorted(unknown))}")
+    all_scripts = bool(flags & {"--all", "-a"})
+
+    if not names and not all_scripts:
+        try:
+            core.update_config(on_progress=_on_download)
+        except core.DownloadError as exc:
+            raise click.ClickException(str(exc)) from exc
+        rich.print(
+            "[bold green]Catalog updated.[/bold green] "
+            "Use [bold]usm update --all[/bold] to refresh cached scripts, "
+            "or [bold]usm update NAME[/bold] for one."
+        )
+        return
+
     try:
         results = list(core.iter_updates(names=names or None, on_progress=_on_download))
     except core.UnknownCommand as exc:
@@ -124,6 +144,61 @@ def _cmd_update(names: tuple[str, ...] = ()) -> None:
         else:
             rich.print(f"  [dim]–[/dim] {name} (not cached, skipped)")
     rich.print("[bold green]Update complete.[/bold green]")
+
+
+def _cmd_install(args: tuple[str, ...], *, debug: bool = False) -> None:
+    names = [a for a in args if not a.startswith("-")]
+    if len(names) != 2:
+        raise click.ClickException("usage: usm install <script> <alias>")
+    script, alias = names
+    try:
+        scripts = core.load_scripts(debug=debug, on_progress=_on_download)
+    except core.DownloadError as exc:
+        raise click.ClickException(str(exc)) from exc
+    if script not in scripts:
+        rich.print(f"[bold red]Error:[/bold red] Unknown script '{script}'.")
+        rich.print(f"Available: {', '.join(sorted(scripts))}")
+        raise click.ClickException(f"Unknown script '{script}'.")
+
+    path, status = core.alias_status(alias)
+    if status == "foreign":
+        rich.print(f"[yellow]{path} already exists and is not a usm alias.[/yellow]")
+        if not click.confirm("Overwrite it?", default=False):
+            raise click.ClickException("aborted.")
+
+    usm_bin = shutil.which("usm") or sys.argv[0]
+    core.install_alias(script, alias, usm_bin=usm_bin)
+    verb = "Updated" if status == "ours" else "Installed"
+    rich.print(
+        f"[bold green]{verb}:[/bold green] [bold]{alias}[/bold] → usm {script}  "
+        f"[dim]({path})[/dim]"
+    )
+    if not core.local_bin_in_path():
+        rich.print(
+            f"[yellow]note:[/yellow] {core.LOCAL_BIN_DIR} is not on your PATH. "
+            "Add it so the alias is found:"
+        )
+        rich.print(
+            '  [bold]export PATH="$HOME/.local/bin:$PATH"[/bold] '
+            "[dim](append to ~/.bashrc or ~/.zshrc, then restart the shell)[/dim]"
+        )
+
+
+def _cmd_uninstall(args: tuple[str, ...]) -> None:
+    names = [a for a in args if not a.startswith("-")]
+    if len(names) != 1:
+        raise click.ClickException("usage: usm uninstall <alias>")
+    alias = names[0]
+    try:
+        removed = core.uninstall_alias(alias)
+    except core.ForeignAlias as exc:
+        raise click.ClickException(
+            f"{exc.path} is not a usm-managed alias; not removing it."
+        ) from exc
+    if removed is None:
+        rich.print(f"[dim]No usm alias '{alias}' in {core.LOCAL_BIN_DIR}.[/dim]")
+    else:
+        rich.print(f"[bold green]Removed:[/bold green] {alias} [dim]({removed})[/dim]")
 
 
 def _cmd_clean() -> None:
@@ -147,9 +222,11 @@ _SCRIPTED_BUILTINS: dict[str, Callable[[Scripts], None]] = {
 }
 
 _BUILTIN_HELP: list[tuple[str, str]] = [
-    ("list", "List all available commands."),
-    ("update", "Re-download config and scripts (all, or just NAMES)."),
-    ("clean", "Remove the script cache directory."),
+    ("list", "List all commands."),
+    ("update", "Refresh the catalog; --all or NAME pulls scripts."),
+    ("install", "Install a script as an alias in ~/.local/bin."),
+    ("uninstall", "Remove an installed alias."),
+    ("clean", "Remove the script cache."),
     ("version", "Show usm version."),
 ]
 
@@ -158,7 +235,7 @@ _BUILTIN_HELP: list[tuple[str, str]] = [
 
 # Commands that should never trigger an auto-check (cheap built-ins or the
 # update flow itself).
-_AUTO_CHECK_SKIP_COMMANDS = {"update", "clean", "version"}
+_AUTO_CHECK_SKIP_COMMANDS = {"update", "clean", "version", "install", "uninstall"}
 
 
 def _maybe_auto_check(command: str | None, debug: bool) -> None:
@@ -179,15 +256,15 @@ def _maybe_auto_check(command: str | None, debug: bool) -> None:
         remote = d.remote_version or "[dim]removed[/dim]"
         rich.print(f"  [bold]{d.name}[/bold]: {local} → [cyan]{remote}[/cyan]")
     if not sys.stdin.isatty():
-        rich.print("[dim]      Run 'usm update' to refresh.[/dim]")
+        rich.print("[dim]      Run 'usm update --all' to refresh.[/dim]")
         return
     try:
-        proceed = click.confirm("Run 'usm update' now?", default=False)
+        proceed = click.confirm("Pull the updated scripts now?", default=False)
     except click.Abort:
         return
     if proceed:
         try:
-            _cmd_update()
+            _cmd_update(("--all",))
         except Exception as exc:
             rich.print(f"[yellow]Update failed:[/yellow] {exc}")
 
@@ -269,6 +346,14 @@ def cli(
 
     if command == "update":
         _cmd_update(args)
+        return
+
+    if command == "install":
+        _cmd_install(args, debug=debug)
+        return
+
+    if command == "uninstall":
+        _cmd_uninstall(args)
         return
 
     if command in _STANDALONE_BUILTINS:

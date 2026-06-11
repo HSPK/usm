@@ -25,6 +25,8 @@ LAST_CHECK_FILE = CACHE_DIR / ".last_check"
 CONFIG_FILENAME = "_config.json"
 RESOURCE_BASE_URL = "https://raw.githubusercontent.com/hspk/usm/main/scripts/"
 UV_INSTALL_HINT = "https://docs.astral.sh/uv/#installation"
+LOCAL_BIN_DIR = Path.home() / ".local" / "bin"
+ALIAS_SHIM_MARKER = "usm-managed alias shim"
 AUTO_CHECK_ENV = "USM_AUTO_CHECK_INTERVAL"
 DEFAULT_AUTO_CHECK_INTERVAL = 86400  # 24h, in seconds. 0 disables.
 HASH_PREFIX = "sha256:"
@@ -62,6 +64,14 @@ class DownloadError(UsmError):
         super().__init__(f"Failed to download {filename} ({detail}).")
         self.filename = filename
         self.status = status
+
+
+class ForeignAlias(UsmError):
+    """An alias target exists but was not installed by usm."""
+
+    def __init__(self, path: Path) -> None:
+        super().__init__(f"{path} exists and is not a usm-managed alias.")
+        self.path = path
 
 
 # Script model --------------------------------------------------------------
@@ -216,6 +226,86 @@ def iter_updates(
             yield name, True
         else:
             yield name, False
+
+
+def update_config(*, on_progress: ProgressHook = _null_hook) -> Path:
+    """Re-download only the ``_config.json`` manifest (not the scripts)."""
+    return download_file(CONFIG_FILENAME, on_progress=on_progress)
+
+
+# Alias shims (~/.local/bin) ------------------------------------------------
+
+
+def local_bin_in_path() -> bool:
+    """True if ``~/.local/bin`` is on ``$PATH``."""
+    target = os.path.normcase(os.path.normpath(LOCAL_BIN_DIR))
+    for entry in os.environ.get("PATH", "").split(os.pathsep):
+        if not entry:
+            continue
+        if os.path.normcase(os.path.normpath(os.path.expanduser(entry))) == target:
+            return True
+    return False
+
+
+def alias_path(alias: str) -> Path:
+    """Path of the shim file for *alias* (``.cmd`` suffix on Windows)."""
+    name = alias
+    if os.name == "nt" and not name.lower().endswith(".cmd"):
+        name += ".cmd"
+    return LOCAL_BIN_DIR / name
+
+
+def alias_status(alias: str) -> tuple[Path, str]:
+    """Return ``(path, status)`` where status is absent/ours/foreign."""
+    path = alias_path(alias)
+    if not path.exists():
+        return path, "absent"
+    try:
+        owned = ALIAS_SHIM_MARKER in path.read_text(errors="ignore")
+    except OSError:
+        owned = False
+    return path, ("ours" if owned else "foreign")
+
+
+def install_alias(script: str, alias: str, *, usm_bin: str) -> Path:
+    """Write an executable shim *alias* that runs ``usm <script>``.
+
+    Overwrites whatever is at the target; the caller is responsible for
+    resolving conflicts (see :func:`alias_status`).
+    """
+    LOCAL_BIN_DIR.mkdir(parents=True, exist_ok=True)
+    path = alias_path(alias)
+    if os.name == "nt":
+        body = (
+            "@echo off\r\n"
+            f"rem {ALIAS_SHIM_MARKER}: {script}\r\n"
+            f'"{usm_bin}" {script} %*\r\n'
+        )
+    else:
+        body = (
+            "#!/usr/bin/env bash\n"
+            f"# {ALIAS_SHIM_MARKER}: {script}\n"
+            f'exec "{usm_bin}" {script} "$@"\n'
+        )
+    path.write_text(body)
+    if os.name != "nt":
+        path.chmod(0o755)
+    return path
+
+
+def uninstall_alias(alias: str) -> Path | None:
+    """Remove an alias shim we installed.
+
+    Returns the removed path, or ``None`` if it didn't exist. Raises
+    :class:`ForeignAlias` if the target exists but wasn't installed by usm.
+    """
+    path, status = alias_status(alias)
+    if status == "absent":
+        return None
+    if status == "foreign":
+        raise ForeignAlias(path)
+    path.unlink()
+    return path
 
 
 def resolve_version() -> str:

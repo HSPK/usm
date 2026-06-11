@@ -62,121 +62,52 @@ usm <command> [args...]
 
 ## Commands
 
-### Scripts
+`usm` bundles machine-setup scripts, networking/proxy tools, file servers, and a
+few built-in helpers. Scripts live in [`scripts/_config.json`](scripts/_config.json)
+and download on first use — add new ones by editing that file, no Python changes
+required.
 
-Scripts are defined in [`scripts/_config.json`](scripts/_config.json) and
-downloaded on first use. Add new commands by editing that file — no Python
-changes required.
+See everything (with one-line descriptions and cache status) from the CLI:
 
-| Command | Description |
-| --- | --- |
-| `usm init` | Bootstrap a fresh Ubuntu machine with common packages, shell aliases, `uv` tools, tmux plugins, and Neovim config. |
-| `usm blobmount <mount_dir> <account> <container>` | Install `blobfuse2` if needed, generate a SAS token from your Azure CLI login, and mount a blob container locally. |
-| `usm cu122` | Install NVIDIA driver 535, CUDA 12.2, and Vulkan-related packages on Ubuntu. |
-| `usm cp [--use-sas-token] <source>... <destination>` | Copy between local paths and blobfuse2 mountpoints, delegating to `azcopy` when Azure storage is involved. |
-| `usm check_py` | Print the active Python and pip locations and versions. |
-| `usm sysinfo` | Print system, GPU, CUDA, MPI, and distributed-ML environment summary. |
-| `usm inject-alias [--shell bash\|zsh\|powershell] [--file PATH]` | Insert or update the managed `usm` alias block in your shell rc file. |
-| `usm tunnel <local\|remote\|socks\|ls\|stop\|start\|restart\|rm\|enable\|disable\|show\|logs>` | Start and manage SSH tunnels with persistent state; `enable`/`disable` install/remove a systemd `--user` unit for boot-time autostart. |
-| `usm proxy <server\|client\|ls\|url\|stop\|start\|restart\|rm\|enable\|disable\|show\|logs\|install>` | Turn a box into an HTTP/SOCKS (+Shadowsocks) proxy (`server`), or run a Clash client that routes rule-matched traffic through a remote proxy (`client`). Auto-installs `mihomo`; `enable`/`disable` manage a systemd `--user` unit. |
-| `usm clash <sub\|use\|up\|down\|restart\|status\|mode\|proxies\|select\|test\|tun\|system-proxy\|lan\|logs\|conns\|dashboard\|enable\|disable\|install>` | ClashX-style CLI manager for the mihomo core: subscription/profile management, rule/global/direct mode, node selection, latency tests, TUN, system proxy, LAN sharing, live logs, and connection inspection. |
-| `usm gpu [free\|watch\|kill]` | GPU inventory, free-picker (`CUDA_VISIBLE_DEVICES=$(usm gpu free 2)`), live watch, kill CUDA processes. |
-| `usm port [PORT\|ls\|kill PORT]` | Show what's listening on a port; free a port by killing the holder. |
-| `usm notify [config\|test] [-- CMD ARGS]` | Wrap a command and ping ntfy.sh / Telegram / generic webhook when it exits. |
-| `usm secret <set\|get\|ls\|rm\|export\|run>` | Encrypted local env store (Fernet). Inject secrets into shells or processes. |
-| `usm rsync [OPTIONS] SRC... DST` | rsync wrapper with sensible defaults + auto-excludes (`.git/`, `__pycache__/`, `.venv/`, ...). |
-| `usm clip [paste]` | Cross-platform clipboard from stdin; OSC52 fallback for SSH sessions. |
-| `usm wait TARGET...` | Block until host:port / TCP / HTTP endpoints are reachable (AND semantics). |
-| `usm bench [--quick\|--full]` | Quick machine benchmark — CPU / memory / disk / network / optional GPU. |
-| `usm share PATH [--tunnel SSH_TARGET[:PORT]]` | Serve a file/dir over HTTP; optionally exposed to a remote via `ssh -R`. |
-| `usm serve PATH` or `usm serve user@host:/path` | Rich file server (uploads, range, zip download); auto-installs `miniserve`. |
+```bash
+usm list                 # all commands
+usm <command> --help     # help for one command
+```
 
-### Built-in helpers
+Full reference: <https://hspk.github.io/usm/commands/>.
 
-| Command | Description |
-| --- | --- |
-| `usm list` | List all available commands and their cache status. |
-| `usm update` | Re-download the config and all cached scripts (or just `usm update NAME...`). |
-| `usm clean` | Remove the script cache directory (`~/.cache/usm/scripts`). |
-| `usm version` | Show the installed `usm` version. |
+### Aliases
+
+Install any script as a short command on your `PATH`:
+
+```bash
+usm install clash cx     # `cx ...` now runs `usm clash ...`
+usm uninstall cx
+```
+
+Shims are written to `~/.local/bin`; usm warns if that directory isn't on your
+`PATH`.
+
+### Updating
+
+```bash
+usm update               # refresh the catalog (_config.json) only
+usm update --all         # re-download every cached script
+usm update tunnel        # refresh a single script
+```
 
 ## Examples
 
-Initialize a new machine:
-
 ```bash
-usm init
+usm init                                        # bootstrap a machine
+usm blobmount /mnt/data myaccount mycontainer   # mount an Azure blob container
+usm cp /mnt/data/project ./backup               # azcopy-backed when Azure is involved
+usm --upgrade check_py                          # force-refresh a script before running
+usm --debug check_py                            # run from local ./scripts (no download)
 ```
 
-Mount a blob container:
-
-```bash
-usm blobmount /mnt/data myaccount mycontainer
-```
-
-Copy from a blobfuse mount to a local directory:
-
-```bash
-usm cp /mnt/data/project ./project-backup
-```
-
-Refresh the cached script before running it:
-
-```bash
-usm --upgrade check_py
-```
-
-Run against the local `scripts/` directory instead of downloading from GitHub:
-
-```bash
-usm --debug check_py
-```
-
-Inject aliases into your zsh profile:
-
-```bash
-usm inject-alias --shell zsh
-```
-
-Inject aliases into your PowerShell profile:
-
-```bash
-usm inject-alias --shell powershell
-```
-
-Write the managed alias block into a specific file:
-
-```bash
-usm inject-alias --file ~/.config/usm/test-shell.rc
-```
-
-Write PowerShell-flavored aliases into a custom profile file:
-
-```bash
-usm inject-alias --shell powershell --file ~/Documents/PowerShell/Microsoft.PowerShell_profile.ps1
-```
-
-Open an SSH tunnel (local forward) and inspect it:
-
-```bash
-usm tunnel local 8080:db.internal:5432 user@bastion   # localhost:8080 -> db.internal:5432
-usm tunnel remote 9000:3000 user@server               # server:9000 -> localhost:3000
-usm tunnel socks 1080 user@gateway                    # SOCKS5 on localhost:1080
-usm tunnel ls
-usm tunnel stop local-8080-bastion                    # keeps the definition
-usm tunnel start local-8080-bastion                   # relaunch a stopped tunnel
-usm tunnel rm local-8080-bastion                      # delete the definition
-```
-
-Autostart a tunnel at login/boot via a systemd `--user` unit (Linux only).
-The unit also restarts the tunnel automatically on failure:
-
-```bash
-usm tunnel enable local-8080-bastion        # installs ~/.config/systemd/user/usm-tunnel-<id>.service
-usm tunnel disable local-8080-bastion       # removes the unit (keeps the definition)
-# To have user units start at boot before you log in (one-time per user):
-sudo loginctl enable-linger "$USER"
-```
+See `usm <command> --help` or the [docs](https://hspk.github.io/usm/commands/) for
+per-command usage.
 
 ## How it Works
 

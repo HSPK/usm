@@ -37,14 +37,15 @@ manager overrides (port/mode/tun)─┘        │
 | `sub update [NAME]` | Re-fetch remote profiles (one or all). |
 | `sub rm NAME` | Delete a profile. |
 | `use NAME` | Set the active profile (hot-applies if running). |
-| `up [NAME] [--tun] [--lan] [--system-proxy] [-p PORT]` | Start the core. |
+| `up [NAME] [--tun] [--lan] [--system-proxy] [-p PORT]` | Start the core. If already running, hot-applies the given settings instead. |
 | `down` | Stop the core (and restore system proxy). |
 | `restart` | Restart the core. |
 | `status` | Running state, ports, mode, toggles, uptime, traffic. |
 | `mode [rule\|global\|direct]` | Get or set the routing mode. |
+| `port [N]` | Get or set the local mixed HTTP+SOCKS port. |
 | `proxies [GROUP]` | List groups, members, current selection, last delay. |
 | `select GROUP NODE` | Pick a node in a group. |
-| `test [GROUP\|NODE] [--url U] [--timeout MS]` | Latency-test a group, a node, or every node. |
+| `test [GROUP\|NODE] [--url U] [--timeout MS]` | Latency-test a group, a node, or every node (concurrent). |
 | `tun on\|off\|status` | Toggle TUN (transparent system-wide capture). |
 | `system-proxy on\|off\|status` | Set/clear the OS HTTP/SOCKS proxy. |
 | `lan on\|off\|status` | Toggle `allow-lan` (let other devices use this box). |
@@ -53,6 +54,18 @@ manager overrides (port/mode/tun)─┘        │
 | `dashboard` | Print a web dashboard URL wired to the running core. |
 | `enable` / `disable` | Autostart at login via a systemd `--user` unit. |
 | `install [--upgrade]` | Pre-download the mihomo binary. |
+
+!!! tip "Settings apply live"
+    `mode`, `port`, `lan`, `tun`, `system-proxy`, and the active profile
+    (`use`) all take effect **immediately** when the core is running (the
+    config is regenerated and hot-reloaded over the API) and are remembered
+    for the next start. You don't need to `restart` after changing a setting.
+
+!!! note "`up` is responsive"
+    On the first run mihomo downloads its GeoIP database, so startup can take
+    a few seconds. `up` shows a spinner and waits for the controller to come
+    up; if the process dies during startup it prints the tail of the log and
+    fails clearly instead of reporting a false success.
 
 ## Subscriptions & profiles
 
@@ -105,7 +118,13 @@ traffic: ↓ 1.2GiB  ↑ 88.4MiB  | active conns: 7
 ```
 
 Your apps connect to the **mixed port** (`127.0.0.1:7890` by default), which
-speaks **HTTP and SOCKS5 on the same port**.
+speaks **HTTP and SOCKS5 on the same port**. Change it any time — live if the
+core is running:
+
+```bash
+usm clash port            # show the current port
+usm clash port 7891       # switch (hot-applied; apps then use :7891)
+```
 
 ## Mode, node selection, latency tests
 
@@ -116,7 +135,7 @@ usm clash proxies PROXY          # just one group
 usm clash select PROXY hk-01     # choose a node
 usm clash test PROXY             # latency-test every node in the group
 usm clash test hk-01             # test a single node
-usm clash test                   # test all nodes
+usm clash test                   # test all real nodes (concurrent)
 ```
 
 Node selections persist across restarts (`profile.store-selected`).

@@ -1,8 +1,8 @@
 # Built-in helpers
 
 Commands implemented directly in `usmo.cli` — they don't pull anything
-from `scripts/` and never spawn a subprocess (with one exception:
-`update` re-downloads scripts).
+from `scripts/` and never spawn a subprocess (exceptions: `update` and
+`install` read/refresh the catalog).
 
 ## `usm list`
 
@@ -30,9 +30,11 @@ Scripts:
   tunnel                Manage SSH tunnels (local/remote/SOCKS) with ...   cached      +uv(2 req)
 
 Built-in:
-  list                  List all available commands.
-  update                Re-download config and all cached scripts.
-  clean                 Remove the script cache directory.
+  list                  List all commands.
+  update                Refresh the catalog; --all or NAME pulls scripts.
+  install               Install a script as an alias in ~/.local/bin.
+  uninstall             Remove an installed alias.
+  clean                 Remove the script cache.
   version               Show usm version.
 ```
 
@@ -41,32 +43,56 @@ The `+uv(N req)` tag means the script declares `requirements` in
 
 ## `usm update`
 
-Re-download `_config.json` plus every script that's currently cached.
-Scripts that have never been cached are *not* downloaded — the goal of
-update is to keep what you use fresh, not to bulk-fetch everything.
+`usm update` with no arguments refreshes **only** the catalog
+(`_config.json`) — cheap, and enough to learn which scripts have new
+versions. It does not touch cached script files.
 
 ```bash
-usm update
+usm update            # refresh _config.json only
 ```
 
-Pass one or more names to refresh just those scripts (forced download
-even if they were never cached):
+Pull script files explicitly:
 
 ```bash
-usm update share
-usm update share cp
+usm update --all      # re-download every currently-cached script
+usm update share      # refresh one script (downloaded even if never cached)
+usm update share cp   # ...or several
 ```
 
-Output:
+`--all` only refreshes scripts you've already used; it won't bulk-fetch
+the entire catalog. Named scripts are always (re)downloaded.
 
 ```text
 Downloading: _config.json
-Downloading: init.sh
-  ✓ init
-  – blobmount (not cached, skipped)
-  ...
+Downloading: share.py
+  ✓ share
 Update complete.
 ```
+
+## `usm install`
+
+Install a script as a short standalone command (a tiny shim in
+`~/.local/bin` that execs `usm <script>`):
+
+```bash
+usm install clash cx     # `cx ...` now runs `usm clash ...`
+cx status
+```
+
+- If the alias name already exists and **isn't** a usm shim, you're
+  prompted before it's overwritten (never clobbered silently).
+- If `~/.local/bin` isn't on your `PATH`, usm prints the line to add.
+
+## `usm uninstall`
+
+Remove an alias previously created by `usm install`:
+
+```bash
+usm uninstall cx
+```
+
+Files in `~/.local/bin` that usm didn't create are refused (it only
+removes its own shims).
 
 ## `usm clean`
 
@@ -107,7 +133,7 @@ Resolved from (in order):
 Independently of the commands above, any `usm <something>` invocation
 may briefly fetch the upstream `_config.json` to check whether any of
 your cached scripts have a newer version. If yes, it prints a banner
-and (in an interactive TTY) prompts you to run `usm update`.
+and (in an interactive TTY) prompts you to pull them (`usm update --all`).
 
 Controlled by `USM_AUTO_CHECK_INTERVAL` (seconds). The default is
 `86400` (24h). `USM_AUTO_CHECK_INTERVAL=0` disables it entirely.
