@@ -14,6 +14,8 @@ Every subcommand of `usm` falls into one of two buckets:
 | Command | Page |
 | --- | --- |
 | `tunnel` | [SSH tunnel manager](tunnel.md) |
+| `proxy` | [HTTP/SOCKS/Clash proxy (mihomo)](proxy.md) |
+| `clash` | [ClashX-style mihomo manager](clash.md) |
 | `gpu` | [GPU picker/watch](gpu.md) |
 | `port` | [Port discovery/kill](port.md) |
 | `notify` | [Long-task pings](notify.md) |

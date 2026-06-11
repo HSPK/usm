@@ -78,6 +78,8 @@ changes required.
 | `usm sysinfo` | Print system, GPU, CUDA, MPI, and distributed-ML environment summary. |
 | `usm inject-alias [--shell bash\|zsh\|powershell] [--file PATH]` | Insert or update the managed `usm` alias block in your shell rc file. |
 | `usm tunnel <local\|remote\|socks\|ls\|stop\|start\|restart\|rm\|enable\|disable\|show\|logs>` | Start and manage SSH tunnels with persistent state; `enable`/`disable` install/remove a systemd `--user` unit for boot-time autostart. |
+| `usm proxy <server\|client\|ls\|url\|stop\|start\|restart\|rm\|enable\|disable\|show\|logs\|install>` | Turn a box into an HTTP/SOCKS (+Shadowsocks) proxy (`server`), or run a Clash client that routes rule-matched traffic through a remote proxy (`client`). Auto-installs `mihomo`; `enable`/`disable` manage a systemd `--user` unit. |
+| `usm clash <sub\|use\|up\|down\|restart\|status\|mode\|proxies\|select\|test\|tun\|system-proxy\|lan\|logs\|conns\|dashboard\|enable\|disable\|install>` | ClashX-style CLI manager for the mihomo core: subscription/profile management, rule/global/direct mode, node selection, latency tests, TUN, system proxy, LAN sharing, live logs, and connection inspection. |
 | `usm gpu [free\|watch\|kill]` | GPU inventory, free-picker (`CUDA_VISIBLE_DEVICES=$(usm gpu free 2)`), live watch, kill CUDA processes. |
 | `usm port [PORT\|ls\|kill PORT]` | Show what's listening on a port; free a port by killing the holder. |
 | `usm notify [config\|test] [-- CMD ARGS]` | Wrap a command and ping ntfy.sh / Telegram / generic webhook when it exits. |

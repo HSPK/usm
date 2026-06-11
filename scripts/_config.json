@@ -175,6 +175,29 @@
       ],
       "version": "1.0.5",
       "hash": "sha256:70321a5c70f82028df09fe8cdab2ab8b6da9e00dfcc968ee688beebd80e47e52"
+    },
+    "proxy": {
+      "description": "Turn a box into an HTTP/SOCKS (+Shadowsocks) proxy, or a Clash client routing rule-matched traffic through one (mihomo).",
+      "path": "proxy.py",
+      "requirements": [
+        "click>=8.2.1",
+        "pyyaml>=6.0.3",
+        "rich>=13.0"
+      ],
+      "version": "1.0.1",
+      "hash": "sha256:c25c6135837d711225a4fa60159e4d44b7f3724f362fe57da8893a0c4db1bd14"
+    },
+    "clash": {
+      "description": "ClashX-style CLI manager for the mihomo core: subscriptions, TUN, rule/global/direct mode, node selection, system proxy, LAN, live logs, latency tests.",
+      "path": "clash.py",
+      "requirements": [
+        "click>=8.2.1",
+        "pyyaml>=6.0.3",
+        "requests>=2.32.4",
+        "rich>=13.0"
+      ],
+      "version": "1.0.2",
+      "hash": "sha256:a8871d90263a5c6454e35c91c224ad26dcf0860255b529606b5a4a453bffebe6"
     }
   }
 }
