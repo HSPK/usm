@@ -32,13 +32,13 @@ manager overrides (port/mode/tun)─┘        │
 
 | Command | What it does |
 | --- | --- |
+| *(no args)* / `status` | Status dashboard: state, mihomo version, subscription, node, mode, toggles, traffic, dashboard URL. |
 | `on` | Set this machine's system proxy to clash (auto-starts the core if needed). |
 | `off` | Clear the system proxy (the core keeps running). |
-| `up [NAME] [--tun] [--lan] [-p PORT]` | Start the core. If already running, hot-applies the given settings instead. |
-| `down` | Stop the core (and restore system proxy). |
-| `restart` | Restart the core. |
-| `status` | Running state, current subscription/node, ports, toggles, traffic. |
-| `use [NAME\|#]` | Switch the active subscription — **interactive menu** with no arg. |
+| `core up [NAME] [--tun] [--lan] [-p PORT]` | Start the core. If already running, hot-applies the given settings instead. |
+| `core down` | Stop the core (and restore system proxy). |
+| `core restart` | Restart the core. |
+| `sub use [NAME\|#]` | Switch the active subscription — **interactive menu** with no arg. |
 | `sub add\|ls\|update\|rm` | Add / list (numbered) / refresh / delete subscriptions. |
 | `node [GROUP] [NODE] [-l] [-t]` | Switch the active node (interactive with no arg); `-l` lists, `NAME` switches directly. |
 | `mode [rule\|global\|direct]` | Get or set the routing mode. |
@@ -125,39 +125,41 @@ expiry) is parsed and shown in `sub ls`.
     Raw base64 node-list links (the generic "v2ray" format) are not supported —
     ask your provider for the Clash link (almost all offer one).
 
-Remote subscriptions auto-refresh on `up`/`restart` once older than
+Remote subscriptions auto-refresh on `core up` / `core restart` once older than
 `--interval` hours (default 12; `0` disables).
 
 ## Running & status
 
 ```bash
-usm clash up                 # start with the active subscription
-usm clash up work --lan      # switch subscription + allow LAN in one go
-usm clash                    # status dashboard (same as `usm clash status`)
-usm clash down
+usm clash core up                 # start with the active subscription
+usm clash core up work --lan      # switch subscription + allow LAN in one go
+usm clash                         # status dashboard (the default action)
+usm clash core down
 ```
 
-`status` shows the running state, the current subscription and node, mixed
-port, mode, and the TUN / LAN / system-proxy toggles, plus live traffic:
+`usm clash` with no arguments (the default) prints the status dashboard — the
+running state, mihomo version, current subscription and node, mode, the
+TUN / LAN / system-proxy toggles, the local dashboard URL, and live traffic:
 
 ```
 status        ● running  (pid 12345)
+mihomo        v1.19.27
 subscription  work
 node          HK-01  (PROXY)
 mode          rule
-mixed port    127.0.0.1:7890
-controller    127.0.0.1:9090
+proxy port    127.0.0.1:7890
+system proxy  on
 tun           off
 allow-lan     on
-system-proxy  off
 autostart     off
 uptime        3m12s
-traffic: ↓ 1.2GiB  ↑ 88.4MiB  | active conns: 7
+dashboard     http://127.0.0.1:9090/ui/#/setup?...
+traffic       ↓ 1.2GiB  ↑ 88.4MiB  · 7 conns
 ```
 
 Your apps connect to the **mixed port** (`127.0.0.1:7890` by default), which
 speaks **HTTP and SOCKS5 on the same port**. Pick a different port at start
-with `usm clash up -p 7891`.
+with `usm clash core up -p 7891`.
 
 ## Switching the node, mode, latency tests
 
@@ -244,7 +246,7 @@ pre-filled) in your browser, or just prints it with `--no-open`.
     mihomo only mounts the `external-ui` server at startup, so if the core was
     already running before the dashboard was installed, `dash` restarts it once
     to start serving `/ui/`. After that the dashboard stays available (it's
-    served by the core itself), and `usm clash status` shows its URL.
+    served by the core itself), and `usm clash` (status) shows its URL.
 
 ## State & files
 

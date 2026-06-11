@@ -196,8 +196,8 @@
         "requests>=2.32.4",
         "rich>=13.0"
       ],
-      "version": "1.0.15",
-      "hash": "sha256:b8b572ed0dd3b1e4b02834bc7f852143c575dd172e819d88a082b8edad29ef7e"
+      "version": "1.0.16",
+      "hash": "sha256:ab98519d239c1610f8542617066b5fafdd35d76b59f107cfff9f7bf6c60e162a"
     }
   }
 }

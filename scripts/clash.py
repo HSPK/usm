@@ -13,9 +13,9 @@ Quick start
   usm clash                                                # status dashboard
   usm clash node                                           # pick a node (interactive)
   usm clash sub use                                        # switch subscription (interactive)
-  usm clash node -l                                        # list groups + nodes
   usm clash mode global                                    # rule | global | direct
   usm clash off                                            # clear system proxy
+  usm clash core down                                      # stop the core
 
 Most settings (mode, lan, tun, the active subscription) can be changed while
 the core is running — the change is hot-applied immediately and remembered for
@@ -719,6 +719,16 @@ class ClashAPI:
         except requests.RequestException:
             return False
 
+    def version(self) -> Optional[str]:
+        """Running mihomo version (e.g. ``v1.19.27``), or None."""
+        try:
+            r = requests.get(self.base + "/version", headers=self.headers, timeout=2)
+            if r.status_code == 200:
+                return r.json().get("version")
+        except (requests.RequestException, ValueError):
+            pass
+        return None
+
     def ui_url(self) -> str:
         """Pre-filled metacubexd setup URL served by the core."""
         host, _, port = self.base[len("http://") :].partition(":")
@@ -1158,6 +1168,7 @@ class StatusReport:
     node: Optional[str] = None
     group: Optional[str] = None
     dashboard: Optional[str] = None
+    version: Optional[str] = None
 
 
 class ClashManager:
@@ -1271,6 +1282,7 @@ class ClashManager:
         running = pid is not None
         traffic = None
         node = group = dashboard = None
+        version = f"v{MIHOMO_VERSION}"
         if running:
             api = self.api()
             try:
@@ -1279,8 +1291,9 @@ class ClashManager:
                 g = _primary_selector(proxies, self.state.mode)
                 if g:
                     node, group = proxies[g].get("now"), g
+                version = api.version() or version
                 if WebUI.installed() and api.ui_ok():
-                    dashboard = f"{api.base}/ui/"
+                    dashboard = api.ui_url()
             except click.ClickException:
                 pass
         return StatusReport(
@@ -1292,6 +1305,7 @@ class ClashManager:
             node=node,
             group=group,
             dashboard=dashboard,
+            version=version,
         )
 
     # -- settings (each persists + hot-applies if running) --
@@ -1390,7 +1404,7 @@ class ClashManager:
 
 # Logical grouping for the help / overview (keeps a 20-command CLI readable).
 COMMAND_SECTIONS: list[tuple[str, tuple[str, ...]]] = [
-    ("Run", ("on", "off", "up", "down", "restart", "status")),
+    ("Run", ("on", "off", "core")),
     ("Subscriptions", ("sub",)),
     ("Proxy", ("node", "mode", "test")),
     ("Network", ("tun", "lan")),
@@ -1442,6 +1456,8 @@ def _render_status(rep: StatusReport) -> None:
     table.add_column(overflow="fold")
     dot = "[green]● running[/green]" if rep.running else "[dim]○ stopped[/dim]"
     table.add_row("status", dot + (f"  [dim](pid {rep.pid})[/dim]" if rep.pid else ""))
+    if rep.version:
+        table.add_row("mihomo", rep.version)
     table.add_row("subscription", s.active or "[dim]none[/dim]")
     if rep.node:
         suffix = f"  [dim]({rep.group})[/dim]" if rep.group else ""
@@ -1784,7 +1800,12 @@ def cmd_sub_use(target):
 # ---- lifecycle ----
 
 
-@cli.command("up", short_help="Start the core (or apply settings if already running).")
+@cli.group("core", short_help="Start / stop / restart the mihomo core.")
+def core() -> None:
+    pass
+
+
+@core.command("up", short_help="Start the core (or apply settings if already running).")
 @click.argument("name", required=False)
 @click.option("--tun/--no-tun", default=None, help="Enable/disable TUN.")
 @click.option("--lan/--no-lan", default=None, help="Allow LAN connections.")
@@ -1853,14 +1874,14 @@ def cmd_up(name, tun, lan, system_proxy, port):
             console.print(f"  [dim]{note}[/dim]")
 
 
-@cli.command("down", short_help="Stop the core.")
+@core.command("down", short_help="Stop the core.")
 def cmd_down():
     mgr = ClashManager()
     was = mgr.down()
     console.print(f"[green]✓[/green] {'stopped' if was else 'already stopped'}.")
 
 
-@cli.command("restart", short_help="Restart the core.")
+@core.command("restart", short_help="Restart the core.")
 def cmd_restart():
     mgr = ClashManager()
     mgr.restart()
@@ -1868,11 +1889,6 @@ def cmd_restart():
         console.print(f"[green]✓[/green] restarted (pid {mgr.running_pid()}).")
         if mgr.state.system_proxy and not mgr.supervisor.enabled:
             mgr._reapply_system_proxy()
-
-
-@cli.command("status", short_help="Show what's running.")
-def cmd_status():
-    _render_status(ClashManager().status())
 
 
 # ---- runtime control ----
