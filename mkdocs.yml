@@ -66,6 +66,8 @@ nav:
   - Installation: installation.md
   - Commands:
       - Overview: commands/index.md
+      - session — Login sessions: commands/session.md
+      - net — Network inspect/diagnose: commands/net.md
       - tunnel — SSH tunnels: commands/tunnel.md
       - proxy — HTTP/SOCKS/Clash proxy: commands/proxy.md
       - clash — ClashX-style manager: commands/clash.md

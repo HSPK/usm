@@ -198,6 +198,29 @@
       ],
       "version": "1.0.16",
       "hash": "sha256:ab98519d239c1610f8542617066b5fafdd35d76b59f107cfff9f7bf6c60e162a"
+    },
+    "session": {
+      "description": "Inspect and manage logged-in user sessions.",
+      "path": "session.py",
+      "requirements": [
+        "click>=8.2.1",
+        "psutil>=7.1.3",
+        "rich>=13.0"
+      ],
+      "version": "1.0.0",
+      "hash": "sha256:4b5b95dbd89ff06db2beb220c5c0ac6eb22ca68738a33e9c23458697b42a416f"
+    },
+    "net": {
+      "description": "Inspect, diagnose, and monitor host networking.",
+      "path": "net.py",
+      "requirements": [
+        "click>=8.2.1",
+        "httpx>=0.27.0",
+        "psutil>=7.1.3",
+        "rich>=13.0"
+      ],
+      "version": "1.0.0",
+      "hash": "sha256:c2cdd74c92c0d6dcef0eac63b76ac7b02608ce0f0346aa96aac1f501a5e6f5d4"
     }
   }
 }
