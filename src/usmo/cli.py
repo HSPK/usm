@@ -290,9 +290,9 @@ def _cmd_uninstall(args: tuple[str, ...]) -> None:
 def _cmd_clean() -> None:
     removed = core.clean_cache()
     if removed:
-        rich.print(f"[bold green]Removed:[/bold green] {removed}")
+        rich.print("[bold green]Removed[/bold green] cached scripts and environments.")
     else:
-        rich.print("[dim]Cache directory does not exist – nothing to clean.[/dim]")
+        rich.print("[dim]Nothing to clean – no cached scripts or environments.[/dim]")
 
 
 def _cmd_version() -> None:
@@ -358,6 +358,13 @@ def _maybe_auto_check(command: str | None, debug: bool) -> None:
 # Script dispatch -----------------------------------------------------------
 
 
+def _on_env_build(name: str) -> None:
+    rich.print(
+        f"[bold yellow]usm:[/bold yellow] preparing environment for "
+        f"[bold]{name}[/bold] (one-time; needs network)…"
+    )
+
+
 def _run_script(
     script: Script,
     args: tuple[str, ...],
@@ -367,7 +374,12 @@ def _run_script(
 ) -> None:
     try:
         core.run_script(
-            script, args, debug=debug, upgrade=upgrade, on_progress=_on_download
+            script,
+            args,
+            debug=debug,
+            upgrade=upgrade,
+            on_progress=_on_download,
+            on_setup=_on_env_build,
         )
     except core.MissingUv as exc:
         rich.print(
@@ -376,6 +388,19 @@ def _run_script(
             "not found on PATH."
         )
         rich.print(f"Install uv first: {core.UV_INSTALL_HINT}")
+        raise click.ClickException(str(exc)) from exc
+    except core.EnvBuildError as exc:
+        rich.print(
+            f"[bold red]Error:[/bold red] couldn't prepare the environment for "
+            f"[bold]{exc.name}[/bold]."
+        )
+        if exc.detail:
+            rich.print(f"[dim]{exc.detail}[/dim]")
+        rich.print(
+            "If PyPI is blocked, set a mirror and retry, e.g.\n"
+            "  [bold]export UV_DEFAULT_INDEX=https://pypi.tuna.tsinghua.edu.cn/simple[/bold]\n"
+            f"then run [bold]usm -U {exc.name}[/bold] to rebuild the environment."
+        )
         raise click.ClickException(str(exc)) from exc
     except subprocess.CalledProcessError as exc:
         # Translate signal-death (negative returncode) to the shell convention

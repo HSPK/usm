@@ -55,7 +55,7 @@ pre-commit run --all-files
    }
    ```
    Only `path` is required; `description` shows up in `usm list`;
-   `requirements` triggers `uv run --with ...`.
+   `requirements` are installed once into a persistent per-script venv.
 3. Commit. The pre-commit hook fills in `version` and `hash`.
 4. Test it: `usm --debug myscript`.
 5. Add a docs page under `docs/commands/myscript.md` and link it from

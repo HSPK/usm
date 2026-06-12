@@ -19,7 +19,8 @@ The package installs as `usmo`, but the executable is `usm`.
 - **On-demand script download** with per-script versioning and SHA-256 pinning;
   cached under `~/.cache/usm/scripts`.
 - **uv-managed isolation** for Python scripts — every script declares its own
-  requirements, resolved per-invocation, never polluting your Python env.
+  requirements, installed once into a persistent per-script venv, never
+  polluting your Python env.
 - **`--debug` mode** runs scripts from a local checkout, so iterating on a
   script feels like editing any other repo file.
 - **Auto-update probe** notifies you when a cached script has a newer version
@@ -76,7 +77,8 @@ Scripts are declared in
 and downloaded from `raw.githubusercontent.com/HSPK/usm/main/scripts/`. The
 CLI looks the command up, fetches + caches the file (if missing), then runs
 it: shell scripts under `bash`, Python scripts under the current interpreter,
-and Python scripts with declared `requirements` under
-`uv run --with <req> ...` for hermetic, per-invocation dependency resolution.
+and Python scripts with declared `requirements` in a persistent per-script
+venv (`~/.cache/usm/envs/<name>`) that is built once and reused offline
+thereafter.
 
 See [Architecture](architecture.md) for the full picture.

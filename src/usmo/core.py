@@ -21,6 +21,7 @@ from typing import Callable, Iterable, Iterator
 
 CACHE_DIR = Path.home() / ".cache" / "usm"
 CACHE_SCRIPT_DIR = CACHE_DIR / "scripts"
+CACHE_ENV_DIR = CACHE_DIR / "envs"
 LAST_CHECK_FILE = CACHE_DIR / ".last_check"
 CONFIG_FILENAME = "_config.json"
 RESOURCE_BASE_URL = "https://raw.githubusercontent.com/hspk/usm/main/scripts/"
@@ -30,6 +31,7 @@ ALIAS_SHIM_MARKER = "usm-managed alias shim"
 AUTO_CHECK_ENV = "USM_AUTO_CHECK_INTERVAL"
 DEFAULT_AUTO_CHECK_INTERVAL = 86400  # 24h, in seconds. 0 disables.
 HASH_PREFIX = "sha256:"
+ENV_MARKER_NAME = ".usm-env.json"
 
 ProgressHook = Callable[[str], None]
 
@@ -49,6 +51,15 @@ class MissingUv(UsmError):
     def __init__(self, requirements: tuple[str, ...]) -> None:
         super().__init__("'uv' is required to satisfy script requirements.")
         self.requirements = requirements
+
+
+class EnvBuildError(UsmError):
+    """Building a script's virtualenv failed (often a network/index issue)."""
+
+    def __init__(self, name: str, detail: str) -> None:
+        super().__init__(f"Failed to prepare the environment for '{name}'.")
+        self.name = name
+        self.detail = detail
 
 
 class UnknownCommand(UsmError):
@@ -116,17 +127,24 @@ class Script:
     def local_path(self, *, debug: bool) -> Path:
         return Path.cwd() / "scripts" / self.path if debug else self.cached_path
 
-    def build_argv(self, script_path: Path, args: Iterable[str]) -> list[str]:
-        """Return the argv to run this script. Raises ``MissingUv`` if needed."""
-        if self.uses_uv:
-            if not shutil.which("uv"):
-                raise MissingUv(self.requirements)
-            python = self.python or f"{sys.version_info.major}.{sys.version_info.minor}"
-            argv = ["uv", "run", "--no-project", "--quiet", "--python", python]
-            for req in self.requirements:
-                argv += ["--with", req]
-            return [*argv, "python", str(script_path), *args]
-        runner = sys.executable if self.is_python else "bash"
+    @property
+    def env_dir(self) -> Path:
+        """Directory of this script's persistent virtualenv."""
+        return CACHE_ENV_DIR / self.name
+
+    def interpreter_version(self) -> str:
+        return self.python or f"{sys.version_info.major}.{sys.version_info.minor}"
+
+    def build_argv(
+        self, script_path: Path, args: Iterable[str], *, python: str
+    ) -> list[str]:
+        """Return the argv to run this script with the given *python* executable.
+
+        Shell scripts run under ``bash``; Python scripts run under *python*
+        (a per-script venv interpreter when the script has requirements, or the
+        usm interpreter otherwise). No package resolution happens here.
+        """
+        runner = python if self.is_python else "bash"
         return [runner, str(script_path), *args]
 
 
@@ -189,11 +207,11 @@ def load_scripts(
 
 
 def clean_cache() -> Path | None:
-    """Remove the script cache directory; return the path if it existed."""
-    if not CACHE_SCRIPT_DIR.exists():
-        return None
-    shutil.rmtree(CACHE_SCRIPT_DIR)
-    return CACHE_SCRIPT_DIR
+    """Remove the script cache (and per-script envs); return the path if any existed."""
+    existed = CACHE_SCRIPT_DIR.exists() or CACHE_ENV_DIR.exists()
+    shutil.rmtree(CACHE_SCRIPT_DIR, ignore_errors=True)
+    shutil.rmtree(CACHE_ENV_DIR, ignore_errors=True)
+    return CACHE_SCRIPT_DIR if existed else None
 
 
 def iter_updates(
@@ -624,6 +642,96 @@ def resolve_script_path(
     return ensure_script_file(script, force=upgrade, on_progress=on_progress)
 
 
+# Per-script virtualenvs ----------------------------------------------------
+
+
+def _env_python(env_dir: Path) -> Path:
+    if os.name == "nt":
+        return env_dir / "Scripts" / "python.exe"
+    return env_dir / "bin" / "python"
+
+
+def _env_spec(script: Script) -> dict:
+    return {
+        "requirements": list(script.requirements),
+        "python": script.interpreter_version(),
+    }
+
+
+def env_ready(script: Script) -> bool:
+    """True if the script's venv exists and matches its current requirements."""
+    if not script.uses_uv:
+        return True
+    py = _env_python(script.env_dir)
+    if not py.exists():
+        return False
+    try:
+        marker = json.loads((script.env_dir / ENV_MARKER_NAME).read_text())
+    except (OSError, json.JSONDecodeError):
+        return False
+    return marker == _env_spec(script)
+
+
+def _build_env(script: Script, *, on_progress: ProgressHook = _null_hook) -> Path:
+    """Create the script's venv and install its requirements (needs network once)."""
+    env_dir = script.env_dir
+    on_progress(script.name)
+    env_dir.parent.mkdir(parents=True, exist_ok=True)
+    shutil.rmtree(env_dir, ignore_errors=True)
+    py_ver = script.interpreter_version()
+    try:
+        subprocess.run(
+            ["uv", "venv", "--python", py_ver, str(env_dir)],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        subprocess.run(
+            [
+                "uv",
+                "pip",
+                "install",
+                "--python",
+                str(_env_python(env_dir)),
+                *script.requirements,
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except subprocess.CalledProcessError as exc:
+        shutil.rmtree(env_dir, ignore_errors=True)
+        detail = (exc.stderr or exc.stdout or str(exc)).strip()
+        raise EnvBuildError(script.name, detail) from exc
+    (env_dir / ENV_MARKER_NAME).write_text(json.dumps(_env_spec(script)))
+    return _env_python(env_dir)
+
+
+def ensure_env(
+    script: Script,
+    *,
+    upgrade: bool = False,
+    on_progress: ProgressHook = _null_hook,
+) -> str:
+    """Return a Python executable that satisfies *script*'s requirements.
+
+    Scripts without requirements use the usm interpreter. Scripts with
+    requirements get a persistent venv under ``~/.cache/usm/envs/<name>`` that
+    is built once (and rebuilt only when requirements change or ``upgrade``);
+    afterwards runs need no network or package resolution.
+
+    Raises :class:`MissingUv` if uv is required but absent, or
+    :class:`EnvBuildError` if building the venv fails.
+    """
+    if not script.uses_uv:
+        return sys.executable
+    if not shutil.which("uv"):
+        raise MissingUv(script.requirements)
+    if not upgrade and env_ready(script):
+        return str(_env_python(script.env_dir))
+    return str(_build_env(script, on_progress=on_progress))
+
+
 def run_script(
     script: Script,
     args: Iterable[str],
@@ -631,14 +739,17 @@ def run_script(
     debug: bool = False,
     upgrade: bool = False,
     on_progress: ProgressHook = _null_hook,
+    on_setup: ProgressHook = _null_hook,
 ) -> None:
     """Execute *script* with *args*.
 
-    Raises ``MissingUv`` if uv is required but missing, and
-    ``subprocess.CalledProcessError`` / ``OSError`` if the subprocess fails.
+    Raises ``MissingUv`` if uv is required but missing, ``EnvBuildError`` if the
+    per-script venv can't be built, and ``subprocess.CalledProcessError`` /
+    ``OSError`` if the script subprocess itself fails.
     """
     script_path = resolve_script_path(
         script, debug=debug, upgrade=upgrade, on_progress=on_progress
     )
-    argv = script.build_argv(script_path, args)
+    python = ensure_env(script, upgrade=upgrade, on_progress=on_setup)
+    argv = script.build_argv(script_path, args, python=python)
     subprocess.run(argv, check=True, text=True)

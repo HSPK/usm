@@ -44,8 +44,8 @@ Per-entry fields:
 | --- | --- | --- |
 | `path` | str | Filename under `scripts/` (and what's downloaded). |
 | `description` | str | One-line description shown by `usm list`. |
-| `requirements` | list[str] | Optional. Triggers `uv run --with ...`. |
-| `python` | str | Optional. Pins the Python version uv resolves against. |
+| `requirements` | list[str] | Optional. Installed once into a persistent per-script venv. |
+| `python` | str | Optional. Pins the Python version of that venv. |
 | `version` | str | Per-script semver. Used by the auto-update probe. |
 | `hash` | str | `sha256:<hex>` of the file. Maintained by the pre-commit hook. |
 
@@ -67,36 +67,50 @@ $ usm tunnel local 8080 user@host
        (downloads on cache miss or --upgrade)
      │
      ▼
-3. Builds argv via Script.build_argv():
-     - shell .sh           -> bash <path> <args>
-     - .py, no requirements -> sys.executable <path> <args>
-     - .py + requirements   -> uv run --no-project --quiet --python 3.x
-                                  --with REQ1 --with REQ2
-                                  python <path> <args>
+3. Ensures a Python interpreter via core.ensure_env():
+     - .py, no requirements -> the usm interpreter (sys.executable)
+     - .py + requirements   -> a persistent venv at
+                                 ~/.cache/usm/envs/<name>, built once with
+                                 `uv venv` + `uv pip install` and reused
+                                 thereafter (rebuilt only when requirements
+                                 change or on --upgrade)
      │
      ▼
-4. subprocess.run(argv, check=True)
+4. Builds argv via Script.build_argv(path, args, python=<interp>):
+     - shell .sh -> bash <path> <args>
+     - .py       -> <interp> <path> <args>
      │
      ▼
-5. Exit code propagated as-is. ClickException only on:
+5. subprocess.run(argv, check=True)
+     │
+     ▼
+6. Exit code propagated as-is. ClickException only on:
      - MissingUv (declared reqs, no uv on PATH)
+     - EnvBuildError (venv build failed, e.g. PyPI unreachable)
      - OSError from spawn itself
 ```
 
-## Why `uv run --with` per invocation
+## Why persistent per-script virtualenvs
 
-It looks expensive — install dependencies every single call? — but:
+Each script with `requirements` gets its own venv under
+`~/.cache/usm/envs/<name>`:
 
-- `uv` keeps a content-addressed cache of every package version it has
-  ever seen. The first call to a script with new requirements is slow;
-  subsequent calls reuse the cached wheels and the resolved environment.
+- The env is built **once** (`uv venv` + `uv pip install`). After that,
+  every invocation execs the venv's Python directly — **no network, no
+  dependency resolution**. This matters for tools like `clash`/`proxy`
+  that you run *to get online*: re-resolving against PyPI on every call
+  would fail behind a firewall (`tls handshake eof`).
+- A marker file (`.usm-env.json`) records the exact `requirements` +
+  `python`. The env is rebuilt only when that spec changes, or when you
+  pass `--upgrade`/`-U`.
 - Each script's dependency tree is **completely isolated** from your
-  system Python, your conda env, your `pyenv`, your project's `.venv`,
-  and from other scripts. No `numpy 1.x` vs `numpy 2.x` headaches.
-- You don't have to remember to `pip install ...` after every fresh
-  machine setup.
+  system Python, conda, `pyenv`, your project's `.venv`, and from other
+  scripts. No `numpy 1.x` vs `numpy 2.x` headaches.
+- If the one-time build fails (PyPI blocked), `usm` prints a mirror hint
+  (`UV_DEFAULT_INDEX=...`). Once uv has cached the wheels, even the first
+  build works offline.
 
-The cost in practice is ~100ms per invocation after the first.
+`usm clean` removes both the script cache and all per-script venvs.
 
 ## Version + hash hygiene
 

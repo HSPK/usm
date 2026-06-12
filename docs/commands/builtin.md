@@ -39,7 +39,8 @@ Built-in:
 ```
 
 The `+uv(N req)` tag means the script declares `requirements` in
-`_config.json` and will run under `uv run --with ...`.
+`_config.json`. On first run usm builds a persistent venv for it under
+`~/.cache/usm/envs/<name>`; later runs reuse it offline.
 
 ## `usm update`
 
@@ -102,8 +103,9 @@ removes its own shims).
 
 ## `usm clean`
 
-Remove `~/.cache/usm/scripts/` (the script cache directory). Next run of
-any script will redownload it.
+Remove `~/.cache/usm/scripts/` (cached script files) and
+`~/.cache/usm/envs/` (per-script virtualenvs). The next run of any script
+redownloads it and rebuilds its env on demand.
 
 ```bash
 usm clean
