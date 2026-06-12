@@ -106,8 +106,8 @@ mark the GitHub Release as prerelease.
 ```
 .
 ├── src/usmo/                  # the installable package
-│   ├── cli.py                 # click + rich entrypoint
-│   ├── core.py                # pure SDK
+│   ├── cli/                   # click + rich frontend (app, presenters, …)
+│   ├── core/                  # pure SDK (catalog, environments, …)
 │   └── _version.py            # written by hatch-vcs at build
 ├── scripts/                   # everything served via the CLI
 │   ├── _config.json

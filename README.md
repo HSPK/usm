@@ -111,10 +111,12 @@ per-command usage.
 
 ## How it Works
 
-The CLI keeps a small manifest of commands in `src/usmo/cli.py`.
+The CLI (`src/usmo/cli/`) is a thin frontend over the `usmo.core` SDK; the
+command manifest lives in `scripts/_config.json`.
 
 - Shell scripts are executed with `bash`.
-- Python scripts are executed with the current interpreter via `sys.executable`.
+- Python scripts run under the current interpreter via `sys.executable`, or —
+  when they declare `requirements` — in a persistent per-script virtualenv.
 - Remote scripts are downloaded from this repository and cached locally.
 - `--upgrade` forces a fresh download of the selected script.
 - `--debug` bypasses the cache and runs the local file under `scripts/`.

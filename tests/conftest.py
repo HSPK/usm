@@ -21,8 +21,14 @@ def tmp_cache(tmp_path, monkeypatch):
     scripts_dir = cache_dir / "scripts"
     envs_dir = cache_dir / "envs"
     last_check = cache_dir / ".last_check"
-    monkeypatch.setattr(core, "CACHE_DIR", cache_dir)
-    monkeypatch.setattr(core, "CACHE_SCRIPT_DIR", scripts_dir)
-    monkeypatch.setattr(core, "CACHE_ENV_DIR", envs_dir)
-    monkeypatch.setattr(core, "LAST_CHECK_FILE", last_check)
+    # SDK functions read these live from usmo.core.constants; tests read them
+    # via the usmo.core facade. Patch both so they stay consistent.
+    for name, value in [
+        ("CACHE_DIR", cache_dir),
+        ("CACHE_SCRIPT_DIR", scripts_dir),
+        ("CACHE_ENV_DIR", envs_dir),
+        ("LAST_CHECK_FILE", last_check),
+    ]:
+        monkeypatch.setattr(core.constants, name, value)
+        monkeypatch.setattr(core, name, value)
     yield cache_dir

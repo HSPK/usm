@@ -14,6 +14,7 @@ from usmo import core
 def tmp_local_bin(tmp_path, monkeypatch):
     """Redirect ~/.local/bin to a temp dir."""
     bin_dir = tmp_path / "local" / "bin"
+    monkeypatch.setattr(core.constants, "LOCAL_BIN_DIR", bin_dir)
     monkeypatch.setattr(core, "LOCAL_BIN_DIR", bin_dir)
     return bin_dir
 
@@ -92,7 +93,7 @@ class TestUpdateConfig:
             calls.append(filename)
             return tmp_cache / "scripts" / filename
 
-        monkeypatch.setattr(core, "download_file", fake_download)
+        monkeypatch.setattr(core.catalog, "download_file", fake_download)
         core.update_config()
         assert calls == [core.CONFIG_FILENAME]
 
@@ -153,7 +154,7 @@ class TestCatalogDiff:
             cfg.write_text(json.dumps(new))
             return cfg
 
-        monkeypatch.setattr(core, "download_file", fake_download)
+        monkeypatch.setattr(core.catalog, "download_file", fake_download)
         by = {c.name: c for c in core.update_config()}
         assert set(by) == {"b", "c", "gone"}
         assert by["b"].status == "changed"

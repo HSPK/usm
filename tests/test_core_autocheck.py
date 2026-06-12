@@ -79,14 +79,17 @@ class TestCheckForUpdate:
     def test_cold_cache_returns_none(self, tmp_cache, monkeypatch):
         called: list[int] = []
         monkeypatch.setattr(
-            core, "fetch_remote_script_versions",
+            core.updates,
+            "fetch_remote_script_versions",
             lambda *a, **k: called.append(1),
         )
         assert core.check_for_update(force=True) is None
         assert not called  # never even reached the network
 
     def test_marks_checked_on_cold_cache(self, tmp_cache, monkeypatch):
-        monkeypatch.setattr(core, "fetch_remote_script_versions", lambda *a, **k: None)
+        monkeypatch.setattr(
+            core.updates, "fetch_remote_script_versions", lambda *a, **k: None
+        )
         assert not core.LAST_CHECK_FILE.exists()
         core.check_for_update(force=True)
         assert core.LAST_CHECK_FILE.exists()
@@ -94,7 +97,8 @@ class TestCheckForUpdate:
     def test_matching_versions_returns_empty_list(self, tmp_cache, monkeypatch):
         _seed_cache_versions({"foo": "1.0.0", "bar": "2.0.0"})
         monkeypatch.setattr(
-            core, "fetch_remote_script_versions",
+            core.updates,
+            "fetch_remote_script_versions",
             lambda *a, **k: {"foo": "1.0.0", "bar": "2.0.0"},
         )
         assert core.check_for_update(force=True) == []
@@ -102,25 +106,30 @@ class TestCheckForUpdate:
     def test_per_script_diff_added_removed_bumped(self, tmp_cache, monkeypatch):
         _seed_cache_versions({"foo": "1.0.0", "bar": "2.0.0", "baz": "1.0.0"})
         monkeypatch.setattr(
-            core, "fetch_remote_script_versions",
+            core.updates,
+            "fetch_remote_script_versions",
             lambda *a, **k: {"foo": "1.1.0", "baz": "1.0.0", "qux": "1.0.0"},
         )
         diffs = core.check_for_update(force=True)
         by_name = {d.name: (d.local_version, d.remote_version) for d in diffs}
         assert by_name == {
             "foo": ("1.0.0", "1.1.0"),  # bumped
-            "bar": ("2.0.0", None),     # removed remotely
-            "qux": (None, "1.0.0"),     # new remotely
+            "bar": ("2.0.0", None),  # removed remotely
+            "qux": (None, "1.0.0"),  # new remotely
         }
 
     def test_network_failure_returns_none(self, tmp_cache, monkeypatch):
         _seed_cache_versions({"foo": "1.0.0"})
-        monkeypatch.setattr(core, "fetch_remote_script_versions", lambda *a, **k: None)
+        monkeypatch.setattr(
+            core.updates, "fetch_remote_script_versions", lambda *a, **k: None
+        )
         assert core.check_for_update(force=True) is None
 
     def test_marks_checked_on_network_failure(self, tmp_cache, monkeypatch):
         _seed_cache_versions({"foo": "1.0.0"})
-        monkeypatch.setattr(core, "fetch_remote_script_versions", lambda *a, **k: None)
+        monkeypatch.setattr(
+            core.updates, "fetch_remote_script_versions", lambda *a, **k: None
+        )
         core.check_for_update(force=True)
         assert core.LAST_CHECK_FILE.exists()
 
@@ -130,7 +139,8 @@ class TestCheckForUpdate:
         core.mark_checked()  # fresh → next probe must be skipped
         called: list[int] = []
         monkeypatch.setattr(
-            core, "fetch_remote_script_versions",
+            core.updates,
+            "fetch_remote_script_versions",
             lambda *a, **k: called.append(1),
         )
         assert core.check_for_update() is None

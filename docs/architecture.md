@@ -1,6 +1,6 @@
 # Architecture
 
-The whole thing is ~500 lines of Python plus a JSON manifest. This page
+The whole thing is a small Python package plus a JSON manifest. This page
 walks through how the pieces fit.
 
 ## The two layers
@@ -18,6 +18,26 @@ walks through how the pieces fit.
 `usmo.core` is the part that's actually tested. `usmo.cli` is the
 "presentation layer" — it formats output, prompts the user, and
 turns SDK exceptions into nice error messages.
+
+Both layers are packages split by responsibility (single-responsibility
+principle), so each file stays small and focused:
+
+```
+usmo/core/                       usmo/cli/
+  constants.py  paths, hooks       output.py      console + progress hooks
+  errors.py     typed exceptions   presenters.py  rich tables / help / diffs
+  model.py      the Script type    commands.py    built-in handlers + registry
+  catalog.py    fetch/cache/diff    runner.py      run a script, map errors
+  environments.py  venvs + run      autocheck.py   the update probe
+  aliases.py    ~/.local/bin shims  app.py         thin click entry + dispatch
+  updates.py    version probe
+  manifest.py   hashing / bump
+```
+
+`usmo/core/__init__.py` re-exports the full public API, so callers (and
+tests) keep importing straight from `usmo.core`. The `usm` entry point is
+`usmo.cli:cli`, defined in `app.py`, which just parses arguments and routes
+to a handler — all logic lives in the focused modules.
 
 ## The manifest
 

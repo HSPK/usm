@@ -156,14 +156,14 @@ class TestEnsureEnv:
         assert core.ensure_env(s) == sys.executable
 
     def test_missing_uv_raises(self, tmp_cache, monkeypatch):
-        monkeypatch.setattr(core.shutil, "which", lambda _: None)
+        monkeypatch.setattr(core.environments.shutil, "which", lambda _: None)
         s = Script(name="x", path="x.py", requirements=("foo",))
         with pytest.raises(MissingUv) as excinfo:
             core.ensure_env(s)
         assert excinfo.value.requirements == ("foo",)
 
     def test_returns_existing_env(self, tmp_cache, monkeypatch):
-        monkeypatch.setattr(core.shutil, "which", lambda _: "/usr/bin/uv")
+        monkeypatch.setattr(core.environments.shutil, "which", lambda _: "/usr/bin/uv")
         s = Script(name="x", path="x.py", requirements=("foo",), python="3.11")
         py = core._env_python(s.env_dir)
         py.parent.mkdir(parents=True)
@@ -174,10 +174,10 @@ class TestEnsureEnv:
         assert core.ensure_env(s) == str(py)
 
     def test_builds_when_missing(self, tmp_cache, monkeypatch):
-        monkeypatch.setattr(core.shutil, "which", lambda _: "/usr/bin/uv")
+        monkeypatch.setattr(core.environments.shutil, "which", lambda _: "/usr/bin/uv")
         built: list[Script] = []
         monkeypatch.setattr(
-            core,
+            core.environments,
             "_build_env",
             lambda s, on_progress=core._null_hook: (
                 built.append(s) or Path("/envs/x/bin/python")
@@ -188,7 +188,7 @@ class TestEnsureEnv:
         assert built == [s]
 
     def test_upgrade_rebuilds_even_if_ready(self, tmp_cache, monkeypatch):
-        monkeypatch.setattr(core.shutil, "which", lambda _: "/usr/bin/uv")
+        monkeypatch.setattr(core.environments.shutil, "which", lambda _: "/usr/bin/uv")
         s = Script(name="x", path="x.py", requirements=("foo",), python="3.11")
         py = core._env_python(s.env_dir)
         py.parent.mkdir(parents=True)
@@ -198,7 +198,7 @@ class TestEnsureEnv:
         )
         built: list[Script] = []
         monkeypatch.setattr(
-            core,
+            core.environments,
             "_build_env",
             lambda s, on_progress=core._null_hook: (
                 built.append(s) or Path("/new/python")
@@ -219,7 +219,7 @@ class TestBuildEnv:
                 s.env_dir.mkdir(parents=True, exist_ok=True)
             return None
 
-        monkeypatch.setattr(core.subprocess, "run", fake_run)
+        monkeypatch.setattr(core.environments.subprocess, "run", fake_run)
         py = core._build_env(s)
         assert py == core._env_python(s.env_dir)
         marker = (s.env_dir / core.ENV_MARKER_NAME).read_text()
@@ -229,11 +229,11 @@ class TestBuildEnv:
 
     def test_raises_env_build_error_on_failure(self, tmp_cache, monkeypatch):
         def fake_run(argv, **kwargs):
-            raise core.subprocess.CalledProcessError(
+            raise core.environments.subprocess.CalledProcessError(
                 1, argv, output="", stderr="tls handshake eof"
             )
 
-        monkeypatch.setattr(core.subprocess, "run", fake_run)
+        monkeypatch.setattr(core.environments.subprocess, "run", fake_run)
         s = Script(name="x", path="x.py", requirements=("foo",), python="3.11")
         with pytest.raises(core.EnvBuildError) as excinfo:
             core._build_env(s)
