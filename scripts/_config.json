@@ -215,12 +215,12 @@
       "path": "net.py",
       "requirements": [
         "click>=8.2.1",
-        "httpx>=0.27.0",
+        "httpx[socks]>=0.27.0",
         "psutil>=7.1.3",
         "rich>=13.0"
       ],
-      "version": "1.0.0",
-      "hash": "sha256:c2cdd74c92c0d6dcef0eac63b76ac7b02608ce0f0346aa96aac1f501a5e6f5d4"
+      "version": "1.0.1",
+      "hash": "sha256:11b94c2a2b767d6038d641381fac783efb0dbe99590a06bf4cb55172fa7a9122"
     }
   }
 }

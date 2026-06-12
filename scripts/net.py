@@ -576,17 +576,27 @@ def cmd_mtu(host: str) -> None:
 
 
 @cli.command("pubip")
-def cmd_pubip() -> None:
-    """Show this host's public IP and geo/ASN (makes one HTTP request)."""
+@click.option(
+    "--direct", "-d", is_flag=True, help="Ignore proxy env vars; query directly."
+)
+def cmd_pubip(direct: bool) -> None:
+    """Show this host's public IP and geo/ASN (makes one HTTP request).
+
+    Honours proxy environment variables (HTTPS_PROXY / ALL_PROXY) by default,
+    so behind a proxy it reports the egress IP; pass --direct to bypass them.
+    """
     import httpx
 
     try:
         with console.status("querying ipinfo.io…"):
-            r = httpx.get("https://ipinfo.io/json", timeout=8.0)
+            r = httpx.get("https://ipinfo.io/json", timeout=8.0, trust_env=not direct)
             r.raise_for_status()
             data = r.json()
     except Exception as exc:  # noqa: BLE001 - report any network/parse failure
-        raise click.ClickException(f"could not reach the IP service: {exc}")
+        msg = f"could not reach the IP service: {exc}"
+        if not direct and any(k in str(exc).lower() for k in ("proxy", "socks")):
+            msg += "\nA proxy is set in your environment — try: usm net pubip --direct"
+        raise click.ClickException(msg)
     table = Table(show_header=False, box=None, pad_edge=False, padding=(0, 2, 0, 1))
     table.add_column(justify="right", style="dim")
     table.add_column(style="bold")
