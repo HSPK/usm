@@ -58,7 +58,7 @@ Nothing is downloaded until you actually use it.
 | --- | --- |
 | `~/.local/bin/usm` | The CLI entry point (from `uv tool`). |
 | `~/.cache/usm/scripts/` | Cached script files + the upstream `_config.json`. |
-| `~/.cache/usm/.last_check` | Timestamp for the auto-update probe. |
+| `~/.cache/usm/envs/` | Persistent per-script virtualenvs. |
 | `~/.cache/usm/tunnels/` | State files for `usm tunnel` (per-tunnel JSON + logs). |
 | `~/.config/systemd/user/usm-tunnel-*.service` | Units installed by `usm tunnel enable`. |
 
@@ -68,13 +68,14 @@ To remove everything: `usm clean` (just the script cache), or
 
 ## Updating cached scripts
 
-Each script carries its own version. `usm` probes the upstream manifest at
-most once every 24h (controlled by `USM_AUTO_CHECK_INTERVAL` in seconds, `0`
-disables) and prints a banner when something is newer. To actually upgrade:
+Each script carries its own version. Updates are always manual — `usm` never
+probes the network on its own. To check for and pull updates:
 
 ```bash
-usm update           # re-fetch the manifest + every cached script
-usm -U <command>     # force a fresh download for one specific command
+usm update           # refresh the manifest, then show what changed
+usm update --all     # also re-download every cached script
+usm update <name>    # refresh the manifest + pull one specific script
+usm -U <command>     # force a fresh download for one command before running it
 ```
 
 ## Required external tools

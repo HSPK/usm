@@ -23,8 +23,6 @@ The package installs as `usmo`, but the executable is `usm`.
   polluting your Python env.
 - **`--debug` mode** runs scripts from a local checkout, so iterating on a
   script feels like editing any other repo file.
-- **Auto-update probe** notifies you when a cached script has a newer version
-  upstream; you stay in control of when to actually upgrade.
 
 ## Quick start
 

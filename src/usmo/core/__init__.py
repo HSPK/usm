@@ -8,7 +8,7 @@ This package is split by responsibility into focused submodules:
 * :mod:`~usmo.core.catalog` – remote fetch, local cache, ``_config.json`` ops
 * :mod:`~usmo.core.environments` – per-script virtualenvs and execution
 * :mod:`~usmo.core.aliases` – ``~/.local/bin`` shim management
-* :mod:`~usmo.core.updates` – version lookup and the auto-update probe
+* :mod:`~usmo.core.version` – installed-version lookup
 * :mod:`~usmo.core.manifest` – manifest hashing / version bumping
 
 The ``usmo.core`` namespace re-exports the full public API so callers can keep
@@ -25,18 +25,15 @@ from . import (
     errors,
     manifest,
     model,
-    updates,
+    version,
 )
 from .constants import (
     ALIAS_SHIM_MARKER,
-    AUTO_CHECK_ENV,
     CACHE_DIR,
     CACHE_ENV_DIR,
     CACHE_SCRIPT_DIR,
     CONFIG_FILENAME,
-    DEFAULT_AUTO_CHECK_INTERVAL,
     HASH_PREFIX,
-    LAST_CHECK_FILE,
     LOCAL_BIN_DIR,
     RESOURCE_BASE_URL,
     UV_INSTALL_HINT,
@@ -87,15 +84,7 @@ from .manifest import (
     sync_manifest,
 )
 from .model import Script, Scripts
-from .updates import (
-    VersionDiff,
-    auto_check_interval,
-    check_for_update,
-    fetch_remote_script_versions,
-    mark_checked,
-    resolve_version,
-    should_auto_check,
-)
+from .version import resolve_version
 
 __all__ = [
     # submodules
@@ -106,18 +95,15 @@ __all__ = [
     "errors",
     "manifest",
     "model",
-    "updates",
+    "version",
     # constants & types
     "ALIAS_SHIM_MARKER",
-    "AUTO_CHECK_ENV",
     "CACHE_DIR",
     "CACHE_ENV_DIR",
     "CACHE_SCRIPT_DIR",
     "CONFIG_FILENAME",
-    "DEFAULT_AUTO_CHECK_INTERVAL",
     "ENV_MARKER_NAME",
     "HASH_PREFIX",
-    "LAST_CHECK_FILE",
     "LOCAL_BIN_DIR",
     "RESOURCE_BASE_URL",
     "UV_INSTALL_HINT",
@@ -157,14 +143,8 @@ __all__ = [
     "install_alias",
     "local_bin_in_path",
     "uninstall_alias",
-    # updates
-    "VersionDiff",
-    "auto_check_interval",
-    "check_for_update",
-    "fetch_remote_script_versions",
-    "mark_checked",
+    # version
     "resolve_version",
-    "should_auto_check",
     # manifest
     "HashChange",
     "audit_manifest",

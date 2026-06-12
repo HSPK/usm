@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import click
 
-from . import autocheck, commands, presenters, runner
+from . import commands, presenters, runner
 
 
 @click.command(
@@ -35,8 +35,6 @@ def cli(
     upgrade: bool,
     debug: bool,
 ) -> None:
-    autocheck.maybe_auto_check(command, debug)
-
     if command is None:
         presenters.print_overview(commands.load_scripts(debug=debug, upgrade=upgrade))
         return

@@ -114,7 +114,6 @@ usm clean
 Does **not** touch:
 
 - `~/.cache/usm/tunnels/` (state files / logs for `usm tunnel`)
-- `~/.cache/usm/.last_check` (auto-update probe timestamp)
 - `~/.config/systemd/user/usm-tunnel-*.service` (installed units)
 
 If you really want a fresh slate: `rm -rf ~/.cache/usm`.
@@ -135,13 +134,3 @@ Resolved from (in order):
 2. `importlib.metadata.version("usmo")` as a fallback.
 3. `unknown (editable install without build)` if both fail (e.g. when
    running straight from a `git clone` without `uv sync`).
-
-## Auto-update probe
-
-Independently of the commands above, any `usm <something>` invocation
-may briefly fetch the upstream `_config.json` to check whether any of
-your cached scripts have a newer version. If yes, it prints a banner
-and (in an interactive TTY) prompts you to pull them (`usm update --all`).
-
-Controlled by `USM_AUTO_CHECK_INTERVAL` (seconds). The default is
-`86400` (24h). `USM_AUTO_CHECK_INTERVAL=0` disables it entirely.

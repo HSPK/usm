@@ -28,9 +28,9 @@ usmo/core/                       usmo/cli/
   errors.py     typed exceptions   presenters.py  rich tables / help / diffs
   model.py      the Script type    commands.py    built-in handlers + registry
   catalog.py    fetch/cache/diff    runner.py      run a script, map errors
-  environments.py  venvs + run      autocheck.py   the update probe
-  aliases.py    ~/.local/bin shims  app.py         thin click entry + dispatch
-  updates.py    version probe
+  environments.py  venvs + run      app.py         thin click entry + dispatch
+  aliases.py    ~/.local/bin shims
+  version.py    installed version
   manifest.py   hashing / bump
 ```
 
@@ -66,7 +66,7 @@ Per-entry fields:
 | `description` | str | One-line description shown by `usm list`. |
 | `requirements` | list[str] | Optional. Installed once into a persistent per-script venv. |
 | `python` | str | Optional. Pins the Python version of that venv. |
-| `version` | str | Per-script semver. Used by the auto-update probe. |
+| `version` | str | Per-script semver. Shown by `usm update`. |
 | `hash` | str | `sha256:<hex>` of the file. Maintained by the pre-commit hook. |
 
 ## Lifecycle of one invocation
@@ -141,7 +141,7 @@ That keeps `_config.json` honest:
 - Edit `scripts/tunnel.py`, commit. Hook bumps `tunnel` 1.3.0 → 1.3.1
   (or to whatever level you ask for with `--bump minor|major`).
 - The new hash is recorded.
-- Users running an older cached copy will see the auto-update banner.
+- Users running an older cached copy can pull it with `usm update`.
 
 You can run it manually:
 
@@ -151,20 +151,6 @@ uv run python dev/bump_version.py --check    # verify only, exit 1 on drift
 uv run python dev/bump_version.py tunnel --bump minor
 ```
 
-## The auto-update probe
-
-`usmo.core.check_for_update()`:
-
-1. If the last check is younger than `USM_AUTO_CHECK_INTERVAL` (default
-   24h), return None (no I/O).
-2. Otherwise: fetch the upstream `_config.json` *in memory* (no cache
-   write), compare per-script `version` strings, return the diffs.
-3. Touch `~/.cache/usm/.last_check` regardless of the outcome.
-
-The CLI then renders a banner and (in a TTY) prompts `Run 'usm update'
-now?`. In non-interactive contexts (cron, CI) it just prints the hint
-and continues.
-
 ## On-disk layout
 
 ```
@@ -173,7 +159,8 @@ and continues.
 │   ├── _config.json         # last-fetched manifest
 │   ├── tunnel.py            # cached script files
 │   └── ...
-├── .last_check              # timestamp file
+├── envs/                    # persistent per-script virtualenvs
+│   └── clash/              # one venv per script with requirements
 └── tunnels/                 # state for `usm tunnel`
     ├── 0.json
     ├── 1.json

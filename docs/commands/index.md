@@ -54,9 +54,3 @@ These work for any subcommand:
 script errors with `click.UsageError`, that's what your shell sees. The CLI
 wrapper itself only emits its own non-zero exit on `MissingUv` (the script
 needs `uv` but it's not installed) and on `OSError` from the spawn itself.
-
-## Environment variables
-
-| Variable | Effect |
-| --- | --- |
-| `USM_AUTO_CHECK_INTERVAL` | Seconds between auto-update probes. `0` disables. Default: `86400` (24h). |
