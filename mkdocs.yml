@@ -73,6 +73,7 @@ nav:
       - clash — ClashX-style manager: commands/clash.md
       - gpu — GPU picker/watch: commands/gpu.md
       - port — Port discovery/kill: commands/port.md
+      - disk — Disk partition/format/mount: commands/disk.md
       - notify — Long-task pings: commands/notify.md
       - secret — Encrypted env store: commands/secret.md
       - rsync — Smart rsync wrapper: commands/rsync.md

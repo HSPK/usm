@@ -221,6 +221,16 @@
       ],
       "version": "1.0.1",
       "hash": "sha256:11b94c2a2b767d6038d641381fac783efb0dbe99590a06bf4cb55172fa7a9122"
+    },
+    "disk": {
+      "description": "Inspect, partition, format, and mount disks.",
+      "path": "disk.py",
+      "requirements": [
+        "click>=8.2.1",
+        "rich>=13.0"
+      ],
+      "version": "1.0.0",
+      "hash": "sha256:81bba632adea7b0854cf23efca480dcd871136fe29772caef9152974b93851ad"
     }
   }
 }

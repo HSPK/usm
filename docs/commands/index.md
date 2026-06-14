@@ -18,6 +18,7 @@ Every subcommand of `usm` falls into one of two buckets:
 | `clash` | [ClashX-style mihomo manager](clash.md) |
 | `gpu` | [GPU picker/watch](gpu.md) |
 | `port` | [Port discovery/kill](port.md) |
+| `disk` | [Disk partition/format/mount](disk.md) |
 | `notify` | [Long-task pings](notify.md) |
 | `secret` | [Encrypted env store](secret.md) |
 | `rsync` | [Smart rsync wrapper](rsync.md) |
