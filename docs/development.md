@@ -112,7 +112,7 @@ mark the GitHub Release as prerelease.
 ├── scripts/                   # everything served via the CLI
 │   ├── _config.json
 │   ├── tunnel.py
-│   ├── init.sh
+│   ├── init.py
 │   ├── ...
 │   └── install.sh             # bootstrap script (not a usm subcommand)
 ├── tests/                     # pytest suite

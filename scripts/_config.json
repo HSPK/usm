@@ -1,10 +1,14 @@
 {
   "scripts": {
     "init": {
-      "description": "Bootstrap a fresh Ubuntu machine.",
-      "path": "init.sh",
-      "version": "1.0.0",
-      "hash": "sha256:776ee7f2e2ee469cb141685f1e54c2a18bbfec060882fda06d7b9c4b0c0f8dd8"
+      "description": "Bootstrap a machine with modern dev tools (cross-platform).",
+      "path": "init.py",
+      "requirements": [
+        "click>=8.2.1",
+        "pyyaml>=6.0.3"
+      ],
+      "version": "1.0.1",
+      "hash": "sha256:93ca172dbdb3269b17e14f2aa6b2bd0b82d65a5068b02ced0cb8a2424f88b775"
     },
     "blobmount": {
       "description": "Mount an Azure blob container locally.",
