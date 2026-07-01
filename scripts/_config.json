@@ -60,12 +60,13 @@
       "requirements": [
         "azure-identity>=1.17.0",
         "click>=8.2.1",
+        "concurrent-log-handler>=0.9.28",
         "httpx>=0.27.0",
         "starlette>=0.36.0",
         "uvicorn>=0.30.0"
       ],
-      "version": "1.0.5",
-      "hash": "sha256:5f3cacbcae16756f7a137436d786c8cf5a3bf98070f5d8205e85ce3229aabef1"
+      "version": "1.0.6",
+      "hash": "sha256:e87f8027df5dc1345e6cf4067becff2ab1728b80c9b3220a629403c2e34e8859"
     },
     "tunnel": {
       "description": "Manage SSH tunnels (local/remote/SOCKS) with autostart.",

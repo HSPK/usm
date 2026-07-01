@@ -9,6 +9,9 @@ so streaming timing can be observed.
 from __future__ import annotations
 
 import asyncio
+import logging
+import logging.config
+import re
 import socket
 import socketserver
 import threading
@@ -20,8 +23,14 @@ import httpx
 import pytest
 import uvicorn
 from asgi_lifespan import LifespanManager
-
-from openai_proxy import build_app, check_api_key, resolve_url
+from openai_proxy import (
+    DEFAULT_LOG_MAX_BYTES,
+    PrettyAccessFormatter,
+    build_app,
+    build_uvicorn_log_config,
+    check_api_key,
+    resolve_url,
+)
 
 
 # --- Unit: resolve_url -----------------------------------------------------
@@ -148,6 +157,94 @@ class TestCheckApiKey:
     )
     def test_no_match(self, headers):
         assert check_api_key(headers, "sekret") is False
+
+
+# --- Unit: access logging --------------------------------------------------
+
+
+def _reset_logger(name: str) -> None:
+    logger = logging.getLogger(name)
+    for handler in logger.handlers[:]:
+        handler.close()
+        logger.removeHandler(handler)
+    logger.setLevel(logging.NOTSET)
+    logger.propagate = True
+
+
+class TestAccessLogging:
+    def test_pretty_access_formatter_aligns_fields(self):
+        formatter = PrettyAccessFormatter(
+            fmt=(
+                "%(asctime)s | %(levelname)-7s | %(client_ip)-39s | "
+                "%(method)-6s | %(path)-72s | %(status_code)s"
+            ),
+            datefmt="%Y-%m-%d %H:%M:%S",
+            use_colors=False,
+        )
+        record = logging.LogRecord(
+            "uvicorn.access",
+            logging.INFO,
+            "",
+            0,
+            '%s - "%s %s HTTP/%s" %d',
+            ("127.0.0.1:12345", "POST", "/v1/chat/completions", "1.1", 200),
+            None,
+        )
+
+        line = formatter.format(record)
+
+        assert re.search(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}", line)
+        assert "127.0.0.1" in line
+        assert "POST  " in line
+        assert "/v1/chat/completions" in line
+        assert "200 OK" in line
+
+    def test_log_config_routes_uvicorn_access_to_rotating_file(self, tmp_path):
+        log_file = tmp_path / "proxy.log"
+        config = build_uvicorn_log_config("info", log_file, max_bytes=120)
+        logging.config.dictConfig(config)
+        try:
+            logger = logging.getLogger("uvicorn.access")
+            logger.info(
+                '%s - "%s %s HTTP/%s" %d',
+                "203.0.113.10:0",
+                "GET",
+                "/health",
+                "1.1",
+                200,
+            )
+            for handler in logger.handlers:
+                handler.flush()
+
+            text = log_file.read_text()
+        finally:
+            _reset_logger("uvicorn.access")
+
+        assert re.search(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}", text)
+        assert "INFO" in text
+        assert "203.0.113.10" in text
+        assert "GET" in text
+        assert "/health" in text
+        assert "200 OK" in text
+
+    def test_log_file_handler_rotates_by_day_and_size(self, tmp_path):
+        log_file = tmp_path / "proxy.log"
+        config = build_uvicorn_log_config("info", log_file, max_bytes=DEFAULT_LOG_MAX_BYTES)
+        logging.config.dictConfig(config)
+
+        try:
+            handlers = logging.getLogger("uvicorn.access").handlers
+            file_handlers = [
+                h
+                for h in handlers
+                if h.__class__.__name__ == "ConcurrentTimedRotatingFileHandler"
+            ]
+        finally:
+            _reset_logger("uvicorn.access")
+
+        assert len(file_handlers) == 1
+        assert file_handlers[0].when == "MIDNIGHT"
+        assert file_handlers[0].clh.maxBytes == DEFAULT_LOG_MAX_BYTES
 
 
 # --- Fake upstream HTTP server --------------------------------------------

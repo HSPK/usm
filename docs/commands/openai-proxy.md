@@ -77,8 +77,23 @@ for chunk in stream:
 | `--port` | `8000` | Listen port. |
 | `--upstream` | TRAPI prod URL | Override the upstream base. |
 | `--api-version` | TRAPI default | The `api-version` query parameter. |
+| `--log-level` | `info` | Access log verbosity. |
+| `--log-file` | `openai-proxy.log` | Access log file; rotates daily and by size. |
+| `--log-max-mb` | `5` | Maximum size of one access log file before rotation. |
 
 `--help` for the full list (timeouts, default deployment, etc.).
+
+## Logs
+
+Every request is logged to stderr and to `--log-file` with aligned fields:
+
+```text
+2026-07-01 15:20:35 | INFO    | 127.0.0.1                               | POST   | /v1/chat/completions                                                    | 200 OK
+```
+
+The access log includes timestamp, client IP, method, path, and status. Uvicorn
+handles the request logging; `concurrent-log-handler` writes the file and rotates
+it at midnight and whenever the active file exceeds 5 MiB.
 
 ## Why it exists
 

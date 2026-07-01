@@ -29,6 +29,7 @@ dev = [
     "asgi-lifespan>=2.1.0",  # tests only: lets httpx.ASGITransport fire lifespan
     # Mirror of scripts/_config.json requirements (kept in sync manually).
     "azure-identity>=1.17.0",
+    "concurrent-log-handler>=0.9.28",
     "cryptography>=42.0.0",
     "httpx[socks]>=0.27.0",
     "psutil>=7.1.3",

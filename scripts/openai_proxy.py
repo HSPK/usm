@@ -17,9 +17,12 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import sys
 import urllib.parse
+from copy import copy
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any, Awaitable, Callable
 
 import click
@@ -30,8 +33,12 @@ from starlette.background import BackgroundTask
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response, StreamingResponse
 from starlette.routing import Route
+from uvicorn.logging import AccessFormatter
 
 SCOPE = "api://trapi/.default"
+DEFAULT_LOG_FILE = "openai-proxy.log"
+DEFAULT_LOG_MAX_MB = 5
+DEFAULT_LOG_MAX_BYTES = DEFAULT_LOG_MAX_MB * 1024 * 1024
 
 # Headers we never relay (transport-level, or replaced by the proxy itself).
 HOP_REQ = {
@@ -61,6 +68,120 @@ HOP_RES = {
 NO_DEPLOY = ("/models", "/files", "/fine_tuning", "/batches", "/threads", "/assistants")
 
 AsyncTokenProvider = Callable[[], Awaitable[str]]
+
+
+# Logging ------------------------------------------------------------------
+
+
+class PrettyAccessFormatter(AccessFormatter):
+    """Uvicorn access formatter with aligned IP, method, path, and status fields."""
+
+    def formatMessage(self, record: logging.LogRecord) -> str:  # noqa: N802
+        recordcopy = copy(record)
+        client_addr, method, full_path, _http_version, status_code = recordcopy.args
+        status = self.get_status_code(int(status_code))
+        path = str(full_path)
+        if self.use_colors:
+            method = click.style(str(method), bold=True)
+            path = click.style(path, bold=True)
+
+        recordcopy.__dict__.update(
+            {
+                "client_ip": _strip_client_port(str(client_addr)),
+                "method": method,
+                "path": path,
+                "status_code": status,
+            }
+        )
+        return logging.Formatter.formatMessage(self, recordcopy)
+
+
+def _strip_client_port(client_addr: str) -> str:
+    if client_addr.count(":") >= 1:
+        host, port = client_addr.rsplit(":", 1)
+        if port.isdigit():
+            return host
+    return client_addr or "-"
+
+
+def build_uvicorn_log_config(
+    log_level: str,
+    log_file: str | Path | None,
+    *,
+    max_bytes: int = DEFAULT_LOG_MAX_BYTES,
+) -> dict[str, Any]:
+    """Return uvicorn log config with access logs on stderr and a rotating file."""
+
+    level = log_level.upper()
+    access_handlers = ["access_console"]
+    handlers: dict[str, dict[str, Any]] = {
+        "default": {
+            "formatter": "default",
+            "class": "logging.StreamHandler",
+            "stream": "ext://sys.stderr",
+        },
+        "access_console": {
+            "formatter": "access_console",
+            "class": "logging.StreamHandler",
+            "stream": "ext://sys.stderr",
+        },
+    }
+
+    if log_file:
+        log_path = Path(log_file).expanduser()
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        handlers["access_file"] = {
+            "formatter": "access_file",
+            "class": "concurrent_log_handler.ConcurrentTimedRotatingFileHandler",
+            "filename": str(log_path),
+            "when": "midnight",
+            "interval": 1,
+            "backupCount": 0,
+            "maxBytes": max_bytes,
+            "encoding": "utf-8",
+        }
+        access_handlers.append("access_file")
+
+    return {
+        "version": 1,
+        "disable_existing_loggers": False,
+        "formatters": {
+            "default": {
+                "()": "uvicorn.logging.DefaultFormatter",
+                "fmt": "%(asctime)s | %(levelprefix)s %(message)s",
+                "datefmt": "%Y-%m-%d %H:%M:%S",
+                "use_colors": None,
+            },
+            "access_console": {
+                "()": PrettyAccessFormatter,
+                "fmt": (
+                    "%(asctime)s | %(levelname)-7s | %(client_ip)-39s | "
+                    "%(method)-6s | %(path)-72s | %(status_code)s"
+                ),
+                "datefmt": "%Y-%m-%d %H:%M:%S",
+                "use_colors": False,
+            },
+            "access_file": {
+                "()": PrettyAccessFormatter,
+                "fmt": (
+                    "%(asctime)s | %(levelname)-7s | %(client_ip)-39s | "
+                    "%(method)-6s | %(path)-72s | %(status_code)s"
+                ),
+                "datefmt": "%Y-%m-%d %H:%M:%S",
+                "use_colors": False,
+            },
+        },
+        "handlers": handlers,
+        "loggers": {
+            "uvicorn": {"handlers": ["default"], "level": level, "propagate": False},
+            "uvicorn.error": {"level": level},
+            "uvicorn.access": {
+                "handlers": access_handlers,
+                "level": level,
+                "propagate": False,
+            },
+        },
+    }
 
 
 # Pure helpers (unit-tested) -----------------------------------------------
@@ -343,6 +464,19 @@ def build_app(
     envvar="TRAPI_PROXY_LOG_LEVEL",
     type=click.Choice(["debug", "info", "warning", "error"]),
 )
+@click.option(
+    "--log-file",
+    default=DEFAULT_LOG_FILE,
+    envvar="TRAPI_PROXY_LOG_FILE",
+    help="Access log file. Rotates daily and when a file reaches --log-max-mb.",
+)
+@click.option(
+    "--log-max-mb",
+    default=DEFAULT_LOG_MAX_MB,
+    envvar="TRAPI_PROXY_LOG_MAX_MB",
+    type=click.IntRange(min=1),
+    help="Maximum size of one access log file before rotation.",
+)
 def cli(
     host,
     port,
@@ -354,8 +488,11 @@ def cli(
     api_key,
     skip_token_warmup,
     log_level,
+    log_file,
+    log_max_mb,
 ):
     base = f"{endpoint.rstrip('/')}/{instance.strip('/')}/openai"
+    log_path = Path(log_file).expanduser() if log_file else None
     cfg = {
         "endpoint": endpoint,
         "instance": instance,
@@ -370,10 +507,22 @@ def cli(
         f"TRAPI proxy on http://{host}:{port}\n"
         f"  upstream:    {base}\n"
         f"  api-version: {api_version}\n"
+        f"  access log:  {log_path or '-'}\n"
         f"  endpoints:   /health, /status, /v1/*",
         err=True,
     )
-    uvicorn.run(build_app(cfg), host=host, port=port, log_level=log_level)
+    uvicorn.run(
+        build_app(cfg),
+        host=host,
+        port=port,
+        log_level=log_level,
+        log_config=build_uvicorn_log_config(
+            log_level,
+            log_path,
+            max_bytes=log_max_mb * 1024 * 1024,
+        ),
+        access_log=True,
+    )
 
 
 if __name__ == "__main__":
