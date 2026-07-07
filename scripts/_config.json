@@ -74,8 +74,8 @@
         "click>=8.2.1",
         "rich>=13.0"
       ],
-      "version": "1.3.1",
-      "hash": "sha256:d3d7df5c0cd0964847e52961588881a678e7efaecbe04caace29151a65cc775c"
+      "version": "1.3.6",
+      "hash": "sha256:ee573b155904654d487dcfe371bd26f108cb554609f1ebda985ffcabf69033e6"
     },
     "gpu": {
       "description": "GPU inventory, free-picker, watch, and kill.",

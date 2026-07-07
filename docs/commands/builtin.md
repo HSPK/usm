@@ -114,7 +114,8 @@ usm clean
 Does **not** touch:
 
 - `~/.cache/usm/tunnels/` (state files / logs for `usm tunnel`)
-- `~/.config/systemd/user/usm-tunnel-*.service` (installed units)
+- `~/Library/LaunchAgents/com.github.hspk.usm.tunnel.*.plist` (macOS autostart)
+- `~/.config/systemd/user/usm-tunnel-*.service` (Linux autostart)
 
 If you really want a fresh slate: `rm -rf ~/.cache/usm`.
 

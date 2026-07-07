@@ -12,7 +12,7 @@ Examples
   usm tunnel stop local-8080-bastion                # keeps definition; start later
   usm tunnel start local-8080-bastion               # relaunch a stopped tunnel
   usm tunnel restart local-8080-bastion
-  usm tunnel enable local-8080-bastion              # autostart at boot via systemd
+  usm tunnel enable local-8080-bastion              # autostart via launchd/systemd
   usm tunnel disable local-8080-bastion
   usm tunnel rm local-8080-bastion                  # delete the definition
 """
@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import os
+import plistlib
 import re
 import shutil
 import signal
@@ -38,7 +39,12 @@ from rich.table import Table
 STATE_DIR = Path.home() / ".cache" / "usm" / "tunnels"
 LOG_DIR = STATE_DIR / "logs"
 SYSTEMD_USER_DIR = Path.home() / ".config" / "systemd" / "user"
+LAUNCHD_USER_DIR = Path.home() / "Library" / "LaunchAgents"
 UNIT_PREFIX = "usm-tunnel-"
+LABEL_PREFIX = "com.github.hspk.usm.tunnel."
+SUPERVISE_ENV = "USM_TUNNEL_SUPERVISE_ID"
+STARTUP_GRACE_SECS = 1.5
+RESTART_DELAY_SECS = 5.0
 
 KIND_FLAG = {"local": "-L", "remote": "-R", "socks": "-D"}
 DEFAULT_SSH_OPTS = (
@@ -73,6 +79,7 @@ class Tunnel:
     jumphost: Optional[str] = None
     extra_opts: list[str] = field(default_factory=list)
     pid: Optional[int] = None
+    supervisor_pid: Optional[int] = None
     started_at: Optional[float] = None
 
     def spec_str(self) -> str:
@@ -107,14 +114,11 @@ class Tunnel:
 
     def alive(self) -> bool:
         if _is_enabled(self.id):
-            return _systemd_is_active(self.id)
-        if not self.pid:
+            return _service_is_active(self.id)
+        managed_pid = self.supervisor_pid or self.pid
+        if not managed_pid:
             return False
-        try:
-            os.kill(self.pid, 0)
-        except (OSError, ProcessLookupError):
-            return False
-        return True
+        return _pid_alive(managed_pid)
 
 
 # Helpers ------------------------------------------------------------------
@@ -206,7 +210,15 @@ def _build_argv(t: Tunnel) -> list[str]:
     return argv
 
 
-# systemd user-unit helpers ------------------------------------------------
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except (OSError, ProcessLookupError):
+        return False
+    return True
+
+
+# service helpers ----------------------------------------------------------
 
 
 def _unit_name(tid: str) -> str:
@@ -217,8 +229,140 @@ def _unit_path(tid: str) -> Path:
     return SYSTEMD_USER_DIR / _unit_name(tid)
 
 
+def _launchd_label(tid: str) -> str:
+    return f"{LABEL_PREFIX}{tid}"
+
+
+def _launchd_path(tid: str) -> Path:
+    return LAUNCHD_USER_DIR / f"{_launchd_label(tid)}.plist"
+
+
+def _enabled_kind(tid: str) -> str | None:
+    if sys.platform == "darwin" and _launchd_path(tid).exists():
+        return "launchd"
+    if sys.platform != "darwin" and _unit_path(tid).exists():
+        return "systemd"
+    return None
+
+
 def _is_enabled(tid: str) -> bool:
-    return _unit_path(tid).exists()
+    return _enabled_kind(tid) is not None
+
+
+def _default_service_kind() -> str:
+    return "launchd" if sys.platform == "darwin" else "systemd"
+
+
+def _path_value(usm_bin: str) -> str:
+    uv_bin = shutil.which("uv")
+    extra_paths = [os.path.dirname(usm_bin)]
+    if uv_bin:
+        extra_paths.append(os.path.dirname(uv_bin))
+    return ":".join(
+        dict.fromkeys(
+            extra_paths
+            + [
+                f"{Path.home()}/.local/bin",
+                f"{Path.home()}/.cargo/bin",
+                "/opt/homebrew/bin",
+                "/usr/local/sbin",
+                "/usr/local/bin",
+                "/usr/sbin",
+                "/usr/bin",
+                "/sbin",
+                "/bin",
+            ]
+        )
+    )
+
+
+def _require_service_backend(kind: str) -> None:
+    if kind == "launchd":
+        _require_launchd()
+        return
+    _require_systemd()
+
+
+def _service_is_active(tid: str) -> bool:
+    kind = _enabled_kind(tid)
+    if kind == "launchd":
+        return _launchd_is_active(tid)
+    if kind == "systemd":
+        return _systemd_is_active(tid)
+    return False
+
+
+def _service_main_pid(tid: str) -> Optional[int]:
+    kind = _enabled_kind(tid)
+    if kind == "launchd":
+        return _launchd_main_pid(tid)
+    if kind == "systemd":
+        return _systemd_main_pid(tid)
+    return None
+
+
+def _service_start(tid: str) -> subprocess.CompletedProcess:
+    kind = _enabled_kind(tid)
+    if kind == "launchd":
+        return _launchd_start(tid)
+    if kind == "systemd":
+        return _systemctl("start", _unit_name(tid))
+    raise click.ClickException(f"{tid} is not enabled.")
+
+
+def _service_stop(tid: str) -> subprocess.CompletedProcess:
+    kind = _enabled_kind(tid)
+    if kind == "launchd":
+        return _launchd_bootout(tid, missing_ok=True)
+    if kind == "systemd":
+        return _systemctl("stop", _unit_name(tid))
+    raise click.ClickException(f"{tid} is not enabled.")
+
+
+def _service_restart(tid: str) -> subprocess.CompletedProcess:
+    kind = _enabled_kind(tid)
+    if kind == "launchd":
+        stopped = _launchd_bootout(tid, missing_ok=True)
+        if stopped.returncode != 0:
+            return stopped
+        return _launchd_bootstrap(tid)
+    if kind == "systemd":
+        return _systemctl("restart", _unit_name(tid))
+    raise click.ClickException(f"{tid} is not enabled.")
+
+
+def _service_disable(tid: str) -> None:
+    kind = _enabled_kind(tid)
+    if kind == "launchd":
+        _launchd_bootout(tid, missing_ok=True)
+        _launchd_path(tid).unlink(missing_ok=True)
+        return
+    if kind == "systemd":
+        _systemctl("disable", "--now", _unit_name(tid))
+        _unit_path(tid).unlink(missing_ok=True)
+        _systemctl("daemon-reload")
+        return
+
+
+def _service_target_name(tid: str) -> str:
+    kind = _enabled_kind(tid)
+    if kind == "launchd":
+        return _launchd_label(tid)
+    if kind == "systemd":
+        return _unit_name(tid)
+    return "-"
+
+
+def _service_path(tid: str) -> Path | None:
+    kind = _enabled_kind(tid)
+    if kind == "launchd":
+        return _launchd_path(tid)
+    if kind == "systemd":
+        return _unit_path(tid)
+    return None
+
+
+# systemd user-unit helpers ------------------------------------------------
 
 
 def _systemctl(*args: str, check: bool = False) -> subprocess.CompletedProcess:
@@ -280,25 +424,7 @@ def _current_user() -> str:
 
 
 def _render_unit(t: Tunnel, usm_bin: str) -> str:
-    uv_bin = shutil.which("uv")
-    extra_paths = [os.path.dirname(usm_bin)]
-    if uv_bin:
-        extra_paths.append(os.path.dirname(uv_bin))
-    path_value = ":".join(
-        dict.fromkeys(
-            extra_paths
-            + [
-                f"{Path.home()}/.local/bin",
-                f"{Path.home()}/.cargo/bin",
-                "/usr/local/sbin",
-                "/usr/local/bin",
-                "/usr/sbin",
-                "/usr/bin",
-                "/sbin",
-                "/bin",
-            ]
-        )
-    )
+    path_value = _path_value(usm_bin)
     return (
         "[Unit]\n"
         f"Description=usm SSH tunnel {t.id}: {t.route()}\n"
@@ -309,12 +435,103 @@ def _render_unit(t: Tunnel, usm_bin: str) -> str:
         "Type=simple\n"
         f'Environment="PATH={path_value}"\n'
         f"ExecStart={usm_bin} tunnel up {t.id}\n"
-        "Restart=on-failure\n"
+        "Restart=always\n"
         "RestartSec=5\n"
         "\n"
         "[Install]\n"
         "WantedBy=default.target\n"
     )
+
+
+# launchd user-agent helpers -----------------------------------------------
+
+
+def _launchd_domain() -> str:
+    return f"gui/{os.getuid()}"
+
+
+def _launchd_service(tid: str) -> str:
+    return f"{_launchd_domain()}/{_launchd_label(tid)}"
+
+
+def _launchctl(*args: str, check: bool = False) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        ["launchctl", *args],
+        text=True,
+        capture_output=True,
+        check=check,
+    )
+
+
+def _require_launchd() -> None:
+    if sys.platform != "darwin" or not shutil.which("launchctl"):
+        raise click.ClickException(
+            "Autostart needs launchd on macOS or systemd on Linux. "
+            "No supported service manager is available on this system."
+        )
+
+
+def _launchd_bootstrap(tid: str) -> subprocess.CompletedProcess:
+    p = _launchctl("bootstrap", _launchd_domain(), str(_launchd_path(tid)))
+    if p.returncode != 0 and _launchd_is_loaded(tid):
+        return subprocess.CompletedProcess(p.args, 0, p.stdout, p.stderr)
+    return p
+
+
+def _launchd_start(tid: str) -> subprocess.CompletedProcess:
+    if _launchd_is_loaded(tid):
+        if _launchd_is_active(tid):
+            return subprocess.CompletedProcess(
+                ["launchctl", "print", _launchd_service(tid)], 0, "", ""
+            )
+        return _launchctl("kickstart", "-k", _launchd_service(tid))
+    return _launchd_bootstrap(tid)
+
+
+def _launchd_bootout(
+    tid: str, *, missing_ok: bool = False
+) -> subprocess.CompletedProcess:
+    p = _launchctl("bootout", _launchd_domain(), str(_launchd_path(tid)))
+    if missing_ok and p.returncode != 0 and not _launchd_is_loaded(tid):
+        return subprocess.CompletedProcess(p.args, 0, p.stdout, p.stderr)
+    return p
+
+
+def _launchd_print(tid: str) -> subprocess.CompletedProcess:
+    return _launchctl("print", _launchd_service(tid))
+
+
+def _launchd_is_loaded(tid: str) -> bool:
+    return _launchd_print(tid).returncode == 0
+
+
+def _launchd_main_pid(tid: str) -> Optional[int]:
+    p = _launchd_print(tid)
+    if p.returncode != 0:
+        return None
+    m = re.search(r"\bpid\s*=\s*(\d+)", p.stdout)
+    if not m:
+        return None
+    return int(m.group(1))
+
+
+def _launchd_is_active(tid: str) -> bool:
+    return _launchd_main_pid(tid) is not None
+
+
+def _render_plist(t: Tunnel, usm_bin: str) -> bytes:
+    path_value = _path_value(usm_bin)
+    data = {
+        "Label": _launchd_label(t.id),
+        "ProgramArguments": [usm_bin, "tunnel", "up", t.id],
+        "RunAtLoad": True,
+        "KeepAlive": True,
+        "ThrottleInterval": int(RESTART_DELAY_SECS),
+        "EnvironmentVariables": {"PATH": path_value},
+        "StandardOutPath": str(t.log_path()),
+        "StandardErrorPath": str(t.log_path()),
+    }
+    return plistlib.dumps(data, sort_keys=False)
 
 
 def _tunnel_from_raw(raw: dict) -> Tunnel:
@@ -349,14 +566,123 @@ def _delete(t: Tunnel) -> None:
             pass
 
 
-def _start(t: Tunnel, *, new: bool = False) -> None:
-    LOG_DIR.mkdir(parents=True, exist_ok=True)
-    argv = _build_argv(t)
-    log = open(t.log_path(), "ab", buffering=0)
-    log.write(f"\n--- start {time.strftime('%Y-%m-%dT%H:%M:%S')} ---\n".encode())
+def _supervisor_argv() -> list[str]:
+    return [sys.executable, str(Path(__file__).resolve())]
+
+
+def _supervisor_env(tid: str) -> dict[str, str]:
+    env = os.environ.copy()
+    env[SUPERVISE_ENV] = tid
+    return env
+
+
+def _clear_runtime(t: Tunnel) -> None:
+    t.pid = None
+    t.supervisor_pid = None
+    t.started_at = None
+
+
+def _save_runtime(
+    tid: str,
+    *,
+    pid: int | None,
+    supervisor_pid: int | None,
+    started_at: float | None,
+) -> None:
+    t = _load(tid)
+    t.pid = pid
+    t.supervisor_pid = supervisor_pid
+    t.started_at = started_at
+    t.save()
+
+
+def _write_start_log(log, argv: list[str], *, label: str = "start") -> None:
+    log.write(f"\n--- {label} {time.strftime('%Y-%m-%dT%H:%M:%S')} ---\n".encode())
     log.write(("$ " + " ".join(argv) + "\n").encode())
 
+
+def _supervise(tid: str) -> int:
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    stop_requested = False
+    child: subprocess.Popen | None = None
+
+    def request_stop(signum, frame) -> None:  # noqa: ARG001
+        nonlocal stop_requested, child
+        stop_requested = True
+        if child and child.poll() is None:
+            try:
+                child.terminate()
+            except OSError:
+                pass
+
+    if os.name == "posix":
+        signal.signal(signal.SIGTERM, request_stop)
+        signal.signal(signal.SIGINT, request_stop)
+
+    first_attempt = True
+    while not stop_requested:
+        t = _load(tid)
+        argv = _build_argv(t)
+        started_at = time.time()
+        with open(t.log_path(), "ab", buffering=0) as log:
+            _write_start_log(log, argv, label="start" if first_attempt else "restart")
+            try:
+                child = subprocess.Popen(
+                    argv,
+                    stdin=subprocess.DEVNULL,
+                    stdout=log,
+                    stderr=subprocess.STDOUT,
+                )
+            except FileNotFoundError:
+                log.write(f"{argv[0]} not found on PATH.\n".encode())
+                _save_runtime(
+                    tid, pid=None, supervisor_pid=None, started_at=None
+                )
+                return 127
+
+            _save_runtime(
+                tid,
+                pid=child.pid,
+                supervisor_pid=os.getpid(),
+                started_at=started_at,
+            )
+            returncode = child.wait()
+            child = None
+            uptime = time.time() - started_at
+
+            if stop_requested:
+                _save_runtime(tid, pid=None, supervisor_pid=None, started_at=None)
+                log.write(b"supervisor stopped.\n")
+                return 0
+            _save_runtime(tid, pid=None, supervisor_pid=os.getpid(), started_at=None)
+            if first_attempt and uptime < STARTUP_GRACE_SECS:
+                _save_runtime(tid, pid=None, supervisor_pid=None, started_at=None)
+                log.write(f"ssh exited during startup (code {returncode}).\n".encode())
+                return returncode or 1
+
+            log.write(
+                f"ssh exited (code {returncode}); restarting in "
+                f"{RESTART_DELAY_SECS:g}s.\n".encode()
+            )
+
+        first_attempt = False
+        deadline = time.time() + RESTART_DELAY_SECS
+        while not stop_requested and time.time() < deadline:
+            time.sleep(0.2)
+
+    _save_runtime(tid, pid=None, supervisor_pid=None, started_at=None)
+    return 0
+
+
+def _start(t: Tunnel, *, new: bool = False) -> None:
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    argv = _supervisor_argv()
+    _clear_runtime(t)
+    t.save()
+
+    log = open(t.log_path(), "ab", buffering=0)
     popen_kwargs: dict = {
+        "env": _supervisor_env(t.id),
         "stdin": subprocess.DEVNULL,
         "stdout": log,
         "stderr": subprocess.STDOUT,
@@ -372,19 +698,21 @@ def _start(t: Tunnel, *, new: bool = False) -> None:
         raise click.ClickException(
             f"{argv[0]} not found on PATH. Install it first."
         ) from exc
+    finally:
+        log.close()
 
-    t.pid = proc.pid
+    t.supervisor_pid = proc.pid
     t.started_at = time.time()
     t.save()
 
-    time.sleep(1.5)
+    time.sleep(STARTUP_GRACE_SECS)
+
     if proc.poll() is not None:
         tail = _tail(t.log_path(), 12)
         if new:
             _delete(t)
         else:
-            t.pid = None
-            t.started_at = None
+            _clear_runtime(t)
             t.save()
         console.print(
             f"[red]✗[/red] ssh exited immediately (code {proc.returncode}). Recent log:"
@@ -393,33 +721,42 @@ def _start(t: Tunnel, *, new: bool = False) -> None:
             console.print(f"  [dim]{line}[/dim]")
         raise click.ClickException("Tunnel failed to start.")
 
-    console.print(f"[green]✓[/green] Started tunnel [bold]{t.id}[/bold] (pid {t.pid})")
+    t = _load(t.id)
+    pid_info = f"pid {t.pid}" if t.pid else f"supervisor pid {t.supervisor_pid}"
+    console.print(f"[green]✓[/green] Started tunnel [bold]{t.id}[/bold] ({pid_info})")
     console.print(f"  {t.route()}")
 
 
 def _kill_pid(t: Tunnel) -> bool:
     """SIGTERM then SIGKILL the recorded pid. Returns True if it was alive."""
-    if not t.pid:
+    pid = t.supervisor_pid or t.pid
+    if not pid:
         return False
-    try:
-        os.kill(t.pid, 0)
-    except OSError:
+    if not _pid_alive(pid):
         return False
+    if os.name == "posix":
+        term = lambda sig: os.killpg(pid, sig)
+    else:
+        term = lambda sig: os.kill(pid, sig)
     try:
-        os.kill(t.pid, signal.SIGTERM)
+        term(signal.SIGTERM)
     except OSError:
-        pass
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except OSError:
+            pass
     deadline = time.time() + 5
     while time.time() < deadline:
-        try:
-            os.kill(t.pid, 0)
-        except OSError:
+        if not _pid_alive(pid):
             return True
         time.sleep(0.1)
     try:
-        os.kill(t.pid, _SIGKILL)
+        term(_SIGKILL)
     except OSError:
-        pass
+        try:
+            os.kill(pid, _SIGKILL)
+        except OSError:
+            pass
     return True
 
 
@@ -573,16 +910,18 @@ def cmd_ls(prune):
     table.add_column("Status")
     table.add_column("Boot")
     for t in tunnels:
-        enabled = _is_enabled(t.id)
-        if enabled:
-            pid = _systemd_main_pid(t.id)
-            alive = bool(pid) and _systemd_is_active(t.id)
+        enabled_kind = _enabled_kind(t.id)
+        if enabled_kind:
+            pid = _service_main_pid(t.id)
+            alive = bool(pid) and _service_is_active(t.id)
         else:
             pid = t.pid if (t.pid and t.alive()) else None
+            if not pid and t.supervisor_pid and t.alive():
+                pid = t.supervisor_pid
             alive = bool(pid)
         up = _fmt_uptime(time.time() - t.started_at) if alive and t.started_at else "-"
         status = "[green]running[/green]" if alive else "[dim]stopped[/dim]"
-        boot = "[cyan]enabled[/cyan]" if enabled else "[dim]-[/dim]"
+        boot = f"[cyan]{enabled_kind}[/cyan]" if enabled_kind else "[dim]-[/dim]"
         table.add_row(t.id, t.kind, t.route(), str(pid or "-"), up, status, boot)
     console.print(table)
 
@@ -596,17 +935,21 @@ def cmd_stop(target):
         return
     for t in tunnels:
         if _is_enabled(t.id):
-            p = _systemctl("stop", _unit_name(t.id))
+            p = _service_stop(t.id)
             if p.returncode == 0:
-                console.print(f"[green]✓[/green] {t.id}: stopped (systemd)")
+                _clear_runtime(t)
+                t.save()
+                console.print(
+                    f"[green]✓[/green] {t.id}: stopped "
+                    f"({_service_target_name(t.id)})"
+                )
             else:
                 console.print(
-                    f"[red]✗[/red] {t.id}: {p.stderr.strip() or 'systemctl stop failed'}"
+                    f"[red]✗[/red] {t.id}: {p.stderr.strip() or 'service stop failed'}"
                 )
             continue
         was_alive = _kill_pid(t)
-        t.pid = None
-        t.started_at = None
+        _clear_runtime(t)
         t.save()
         console.print(
             f"[green]✓[/green] {t.id}: {'stopped' if was_alive else 'already stopped'}"
@@ -618,13 +961,16 @@ def cmd_stop(target):
 def cmd_start(tid):
     t = _load(tid)
     if _is_enabled(tid):
-        p = _systemctl("start", _unit_name(tid))
+        p = _service_start(tid)
         if p.returncode != 0:
-            raise click.ClickException(p.stderr.strip() or "systemctl start failed.")
-        console.print(f"[green]✓[/green] Started {tid} via systemd.")
+            raise click.ClickException(p.stderr.strip() or "service start failed.")
+        console.print(
+            f"[green]✓[/green] Started {tid} via {_service_target_name(tid)}."
+        )
         return
     if t.alive():
-        raise click.ClickException(f"{tid} is already running (pid {t.pid}).")
+        running_pid = t.pid or t.supervisor_pid
+        raise click.ClickException(f"{tid} is already running (pid {running_pid}).")
     _start(t)
 
 
@@ -633,14 +979,15 @@ def cmd_start(tid):
 def cmd_restart(tid):
     t = _load(tid)
     if _is_enabled(tid):
-        p = _systemctl("restart", _unit_name(tid))
+        p = _service_restart(tid)
         if p.returncode != 0:
-            raise click.ClickException(p.stderr.strip() or "systemctl restart failed.")
-        console.print(f"[green]✓[/green] Restarted {tid} via systemd.")
+            raise click.ClickException(p.stderr.strip() or "service restart failed.")
+        console.print(
+            f"[green]✓[/green] Restarted {tid} via {_service_target_name(tid)}."
+        )
         return
     _kill_pid(t)
-    t.pid = None
-    t.started_at = None
+    _clear_runtime(t)
     _start(t)
 
 
@@ -653,9 +1000,7 @@ def cmd_rm(target):
         return
     for t in tunnels:
         if _is_enabled(t.id):
-            _systemctl("disable", "--now", _unit_name(t.id))
-            _unit_path(t.id).unlink(missing_ok=True)
-            _systemctl("daemon-reload")
+            _service_disable(t.id)
         _kill_pid(t)
         _delete(t)
         console.print(f"[green]✓[/green] removed {t.id}")
@@ -663,37 +1008,49 @@ def cmd_rm(target):
 
 @cli.command(
     "enable",
-    short_help="Install systemd user unit so the tunnel autostarts.",
+    short_help="Install a user service so the tunnel autostarts.",
     help=(
-        "Install a systemd --user unit for this tunnel so it starts at login "
-        "(and at boot if `loginctl enable-linger` is set), and auto-restarts "
-        "on failure. Replaces any standalone process."
+        "Install a user service for this tunnel so it starts at login and "
+        "auto-restarts when ssh exits. Uses launchd on macOS and systemd --user "
+        "on Linux. Replaces any standalone process."
     ),
 )
 @click.argument("tid")
 def cmd_enable(tid):
     t = _load(tid)
-    _require_systemd()
+    kind = _enabled_kind(tid) or _default_service_kind()
+    _require_service_backend(kind)
     usm_bin = shutil.which("usm")
     if not usm_bin:
         raise click.ClickException(
             "'usm' not found on PATH; install it (e.g. `uv tool install usmo`) first."
         )
     _kill_pid(t)
-    t.pid = None
+    _clear_runtime(t)
     t.started_at = time.time()
     t.save()
-    SYSTEMD_USER_DIR.mkdir(parents=True, exist_ok=True)
-    _unit_path(tid).write_text(_render_unit(t, usm_bin))
-    _systemctl("daemon-reload", check=True)
-    p = _systemctl("enable", "--now", _unit_name(tid))
+    if kind == "launchd":
+        LOG_DIR.mkdir(parents=True, exist_ok=True)
+        LAUNCHD_USER_DIR.mkdir(parents=True, exist_ok=True)
+        _launchd_path(tid).write_bytes(_render_plist(t, usm_bin))
+        stopped = _launchd_bootout(tid, missing_ok=True)
+        if stopped.returncode != 0:
+            raise click.ClickException(
+                stopped.stderr.strip() or "launchctl bootout failed."
+            )
+        p = _launchd_bootstrap(tid)
+    else:
+        SYSTEMD_USER_DIR.mkdir(parents=True, exist_ok=True)
+        _unit_path(tid).write_text(_render_unit(t, usm_bin))
+        _systemctl("daemon-reload", check=True)
+        p = _systemctl("enable", "--now", _unit_name(tid))
     if p.returncode != 0:
-        raise click.ClickException(p.stderr.strip() or "systemctl enable --now failed.")
+        raise click.ClickException(p.stderr.strip() or "service enable failed.")
     console.print(
         f"[green]✓[/green] Enabled & started [bold]{tid}[/bold] "
-        f"({_unit_path(tid).name})."
+        f"({_service_target_name(tid)})."
     )
-    if not _linger_enabled():
+    if kind == "systemd" and not _linger_enabled():
         console.print(
             "  [yellow]note:[/yellow] to start at boot without logging in, run "
             f"[bold]sudo loginctl enable-linger {_current_user()}[/bold]"
@@ -702,7 +1059,7 @@ def cmd_enable(tid):
 
 @cli.command(
     "disable",
-    short_help="Remove the systemd user unit (keeps definition).",
+    short_help="Remove the user service (keeps definition).",
 )
 @click.argument("tid")
 def cmd_disable(tid):
@@ -710,10 +1067,12 @@ def cmd_disable(tid):
     if not _is_enabled(tid):
         console.print(f"[dim]{tid} is not enabled.[/dim]")
         return
-    _require_systemd()
-    _systemctl("disable", "--now", _unit_name(tid))
-    _unit_path(tid).unlink(missing_ok=True)
-    _systemctl("daemon-reload")
+    kind = _enabled_kind(tid) or _default_service_kind()
+    _require_service_backend(kind)
+    _service_disable(tid)
+    t = _load(tid)
+    _clear_runtime(t)
+    t.save()
     console.print(f"[green]✓[/green] Disabled {tid}.")
 
 
@@ -726,7 +1085,13 @@ def cmd_disable(tid):
 def cmd_up(tid):
     t = _load(tid)
     argv = _build_argv(t)
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    log = open(t.log_path(), "ab", buffering=0)
+    _write_start_log(log, argv)
+    os.dup2(log.fileno(), 1)
+    os.dup2(log.fileno(), 2)
     t.pid = os.getpid()
+    t.supervisor_pid = None
     t.started_at = time.time()
     t.save()
     try:
@@ -739,10 +1104,14 @@ def cmd_up(tid):
 @click.argument("tid")
 def cmd_show(tid):
     t = _load(tid)
+    enabled_kind = _enabled_kind(tid)
+    service_path = _service_path(tid)
     data = asdict(t)
     data["alive"] = t.alive()
-    data["enabled"] = _is_enabled(tid)
-    data["unit_path"] = str(_unit_path(tid)) if _is_enabled(tid) else None
+    data["enabled"] = enabled_kind is not None
+    data["service_kind"] = enabled_kind
+    data["service_path"] = str(service_path) if service_path else None
+    data["unit_path"] = str(_unit_path(tid)) if enabled_kind == "systemd" else None
     data["argv"] = _build_argv(t)
     console.print_json(json.dumps(data))
 
@@ -761,6 +1130,8 @@ def cmd_logs(tid, lines):
 
 
 def main() -> None:
+    if tid := os.environ.pop(SUPERVISE_ENV, None):
+        sys.exit(_supervise(tid))
     try:
         cli(standalone_mode=False)
     except click.ClickException as exc:

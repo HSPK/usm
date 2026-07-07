@@ -46,7 +46,7 @@ you want from the [Commands](commands/index.md) section.
 
 | Command | What it does |
 | --- | --- |
-| [`usm tunnel`](commands/tunnel.md) | SSH tunnels (local / remote / SOCKS) with state + systemd autostart |
+| [`usm tunnel`](commands/tunnel.md) | SSH tunnels (local / remote / SOCKS) with state + launchd/systemd autostart |
 | [`usm proxy`](commands/proxy.md) | Turn a box into an HTTP/SOCKS (+Shadowsocks) proxy, or a Clash client routing rule-matched traffic through one (mihomo) |
 | [`usm clash`](commands/clash.md) | ClashX-style CLI manager for mihomo: subscriptions, TUN, mode, node selection, system proxy, LAN, live logs, latency tests |
 | [`usm gpu`](commands/gpu.md) | GPU inventory, free-picker, watch, kill (nvidia-smi wrapper) |

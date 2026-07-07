@@ -1,7 +1,7 @@
 # `usm tunnel`
 
 A friendlier wrapper around `ssh -L / -R / -D` with persistent state, short
-ids, and optional systemd autostart.
+ids, and optional autostart via launchd on macOS or systemd on Linux.
 
 ## Why
 
@@ -13,7 +13,7 @@ The raw flags are fiddly:
 - No story for "make this come back after a reboot".
 
 `usm tunnel` keeps the simple cases short, hands the supervision problem
-to systemd, and makes inspection (`ls`, `show`, `logs`) trivial.
+to the OS service manager, and makes inspection (`ls`, `show`, `logs`) trivial.
 
 ## Subcommands
 
@@ -23,12 +23,12 @@ to systemd, and makes inspection (`ls`, `show`, `logs`) trivial.
 | `remote SPEC SSH_TARGET` | Start an `ssh -R` tunnel (detached). |
 | `socks SPEC SSH_TARGET` | Start an `ssh -D` SOCKS5 proxy. |
 | `ls [--prune]` | List all tunnels with route / PID / uptime / status / boot flag. |
-| `start <id>` | Relaunch a stopped tunnel (or `systemctl start` if enabled). |
+| `start <id>` | Relaunch a stopped tunnel (or service manager start if enabled). |
 | `stop <id\|all>` | Stop a tunnel but **keep the definition** for later. |
-| `restart <id>` | `stop` + `start` (or `systemctl restart` if enabled). |
-| `rm <id\|all>` | Delete the definition (also disables systemd if enabled). |
-| `enable <id>` | Install a `systemd --user` unit and start it. |
-| `disable <id>` | Remove the unit (keeps the definition). |
+| `restart <id>` | `stop` + `start` (or service manager restart if enabled). |
+| `rm <id\|all>` | Delete the definition (also disables autostart if enabled). |
+| `enable <id>` | Install a launchd/systemd user service and start it. |
+| `disable <id>` | Remove the service (keeps the definition). |
 | `show <id>` | Dump the JSON definition + resolved ssh argv. |
 | `logs <id> [-n N]` | Print the tail of the per-tunnel log. |
 
@@ -127,6 +127,14 @@ That gives roughly 90-second dead-peer detection without you having to
 remember any of it. `accept-new` means first connection to a fresh host
 is allowed; subsequent key changes still fail loudly.
 
+Standalone tunnels are supervised internally by default. If `ssh` exits after
+startup because the network drops, the remote closes the session, or a keepalive
+check fails, usm waits 5 seconds and starts the same tunnel again. Immediate
+startup failures still fail loudly so bad ports, auth, or host keys do not loop
+forever. The supervisor is detached from the terminal, so closing the terminal
+after `usm tunnel local` / `remote` / `socks` does not stop the tunnel; use
+`usm tunnel stop <id>` when you want to close it.
+
 ## State files
 
 Each tunnel is a JSON file under `~/.cache/usm/tunnels/<id>.json`. `stop`
@@ -153,20 +161,29 @@ $ usm tunnel show 1
 }
 ```
 
-## Autostart at boot (systemd)
+## Autostart at login / boot
 
-`usm tunnel enable <id>` writes
+On macOS, `usm tunnel enable <id>` writes
+`~/Library/LaunchAgents/com.github.hspk.usm.tunnel.<id>.plist` and loads it
+with `launchctl bootstrap`. The LaunchAgent:
+
+- runs `usm tunnel up <id>` in the foreground
+- starts at login (`RunAtLoad=true`)
+- restarts when `ssh` exits (`KeepAlive=true`, `ThrottleInterval=5`)
+- writes stdout/stderr to the tunnel log path
+
+On Linux, `usm tunnel enable <id>` writes
 `~/.config/systemd/user/usm-tunnel-<id>.service`, runs `daemon-reload`,
 then `systemctl --user enable --now`. The unit:
 
 - has `Type=simple` with `ExecStart=usm tunnel up <id>`
 - sets a PATH including `~/.local/bin`, `~/.cargo/bin`, `/usr/local/bin` so
   `uv` is discoverable inside the user-systemd environment
-- restarts on failure (`Restart=on-failure`, `RestartSec=5`)
+- restarts when `ssh` exits (`Restart=always`, `RestartSec=5`)
 - starts after `network-online.target`
 
-After enabling, `usm tunnel ls` reflects systemd state — `stop`, `start`,
-and `restart` route through `systemctl --user` automatically.
+After enabling, `usm tunnel ls` reflects service-manager state — `stop`,
+`start`, and `restart` route through launchd/systemd automatically.
 
 !!! warning "Linger for actual boot-time start"
     By default, user units only start when you log in. To have them start
@@ -181,10 +198,11 @@ and `restart` route through `systemctl --user` automatically.
 ### Why not `autossh`?
 
 Earlier versions had an `--autossh` flag. It was removed in
-[v0.3.0](https://github.com/HSPK/usm/releases/tag/v0.3.0): under systemd
-the supervision is already handled at the unit level, and plain `ssh`
-with the defaults above detects dead peers in time for `Restart=on-failure`
-to kick in. Outside systemd you can still wrap manually:
+[v0.3.0](https://github.com/HSPK/usm/releases/tag/v0.3.0): usm now handles
+supervision itself in standalone mode, and launchd/systemd handles it for
+enabled tunnels. Plain `ssh` with the defaults above detects dead peers in time
+for the supervisor to reconnect. If you still prefer `autossh`, you can wrap
+manually:
 
 ```bash
 autossh -M 0 -N -L 8080:db:5432 user@bastion
@@ -193,9 +211,9 @@ autossh -M 0 -N -L 8080:db:5432 user@bastion
 ## Removing a tunnel cleanly
 
 ```bash
-usm tunnel rm 1         # stops + disables systemd if needed + deletes state
+usm tunnel rm 1         # stops + disables autostart if needed + deletes state
 usm tunnel rm all       # same for every defined tunnel
 ```
 
-If you ever uninstall `usm`, run `rm all` first so the systemd units don't
-keep trying to call a binary that no longer exists.
+If you ever uninstall `usm`, run `rm all` first so launchd/systemd doesn't keep
+trying to call a binary that no longer exists.

@@ -60,7 +60,8 @@ Nothing is downloaded until you actually use it.
 | `~/.cache/usm/scripts/` | Cached script files + the upstream `_config.json`. |
 | `~/.cache/usm/envs/` | Persistent per-script virtualenvs. |
 | `~/.cache/usm/tunnels/` | State files for `usm tunnel` (per-tunnel JSON + logs). |
-| `~/.config/systemd/user/usm-tunnel-*.service` | Units installed by `usm tunnel enable`. |
+| `~/Library/LaunchAgents/com.github.hspk.usm.tunnel.*.plist` | macOS LaunchAgents installed by `usm tunnel enable`. |
+| `~/.config/systemd/user/usm-tunnel-*.service` | Linux systemd units installed by `usm tunnel enable`. |
 
 To remove everything: `usm clean` (just the script cache), or
 `rm -rf ~/.cache/usm` (everything including tunnel state) and
@@ -88,4 +89,4 @@ most common are:
 - `bash` (every shell script runs under bash)
 - `azcopy`, `blobfuse2`, `az` CLI (for [`blobmount`](commands/blobmount.md) /
   [`cp`](commands/cp.md))
-- `systemctl --user` (only for `usm tunnel enable`)
+- `launchctl` on macOS or `systemctl --user` on Linux (only for `usm tunnel enable`)

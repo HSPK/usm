@@ -170,6 +170,9 @@ uv run python dev/bump_version.py tunnel --bump minor
 
 ~/.config/systemd/user/
 └── usm-tunnel-0.service     # installed by `usm tunnel enable`
+
+~/Library/LaunchAgents/
+└── com.github.hspk.usm.tunnel.0.plist  # macOS autostart equivalent
 ```
 
 ## Release flow
