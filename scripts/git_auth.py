@@ -22,15 +22,16 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
-from typing import Any, Iterator, Sequence
+from typing import Any, Callable, Iterator, Sequence
 
 import click
 
 
 SCHEMA_VERSION = 1
 ROOT = Path(os.environ.get("USM_GIT_AUTH_HOME", "~/.config/usm/git")).expanduser()
-ALIAS_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+ALIAS_RE = re.compile(r"^[A-Za-z][A-Za-z0-9._-]*$")
 GIT_KEY_RE = re.compile(r"^[A-Za-z][A-Za-z0-9-]*\.[A-Za-z][A-Za-z0-9-]*$")
+SSH_OPTION_RE = re.compile(r"^[A-Za-z][A-Za-z0-9-]*$")
 BEGIN_MARKER = "## __USM_GIT_AUTH_BEGIN__"
 END_MARKER = "## __USM_GIT_AUTH_END__"
 SUPPORTED_SHELLS = ("bash", "zsh")
@@ -188,7 +189,8 @@ def _check_schema(data: Any, path: Path) -> None:
 def _validate_alias(alias: str) -> str:
     if not ALIAS_RE.fullmatch(alias):
         raise click.BadParameter(
-            "alias may contain only letters, digits, '.', '_' and '-'",
+            "alias must start with a letter and contain only letters, digits, "
+            "'.', '_' and '-'",
             param_hint="alias",
         )
     return alias
@@ -211,6 +213,86 @@ def _validate_email(email: str) -> str:
     return email
 
 
+def _validate_ssh_option_name(option: str) -> str:
+    if not SSH_OPTION_RE.fullmatch(option):
+        raise click.BadParameter(f"invalid SSH option name: {option!r}")
+    return option
+
+
+def _validate_git_setting_key(git_key: str) -> str:
+    if not GIT_KEY_RE.fullmatch(git_key):
+        raise click.BadParameter(
+            "Git keys must use git.<section>.<name> with letters, digits or '-'"
+        )
+    if git_key.lower() in {"user.name", "user.email", "core.sshcommand"}:
+        raise click.BadParameter(f"{git_key} is managed by git-auth")
+    return git_key
+
+
+def _invalid_profile(path: Path, message: str) -> click.ClickException:
+    return click.ClickException(f"invalid profile {path}: {message}")
+
+
+def _validate_profile_value(
+    path: Path, value: str, validator: Callable[[str], str]
+) -> None:
+    try:
+        validator(value)
+    except click.BadParameter as exc:
+        raise _invalid_profile(path, exc.format_message()) from exc
+
+
+def _validate_string_settings(
+    path: Path,
+    field: str,
+    values: Any,
+    key_validator: Callable[[str], str],
+) -> None:
+    if not isinstance(values, dict):
+        raise _invalid_profile(path, f"{field} must be an object")
+    for key, value in values.items():
+        if not isinstance(key, str) or not isinstance(value, str):
+            raise _invalid_profile(path, f"{field} must use string keys and values")
+        _validate_profile_value(path, key, key_validator)
+
+
+def _validate_loaded_profile(
+    alias: str, data: dict[str, Any], path: Path
+) -> None:
+    if data.get("alias") != alias:
+        raise _invalid_profile(path, f"alias does not match {alias!r}")
+    for field, validator in (("name", _validate_name), ("email", _validate_email)):
+        value = data.get(field)
+        if not isinstance(value, str) or not value.strip():
+            raise _invalid_profile(path, f"field {field!r} is missing")
+        _validate_profile_value(path, value, validator)
+
+    ssh = data.get("ssh", {})
+    if not isinstance(ssh, dict):
+        raise _invalid_profile(path, "ssh must be an object")
+    identity = ssh.get("identity_file")
+    if identity is not None and (
+        not isinstance(identity, str) or not identity.strip()
+    ):
+        raise _invalid_profile(
+            path, "ssh.identity_file must be a non-empty string or null"
+        )
+    if not isinstance(ssh.get("identities_only", True), bool):
+        raise _invalid_profile(path, "ssh.identities_only must be a boolean")
+    _validate_string_settings(
+        path,
+        "ssh.options",
+        ssh.get("options", {}),
+        _validate_ssh_option_name,
+    )
+    _validate_string_settings(
+        path,
+        "git",
+        data.get("git", {}),
+        _validate_git_setting_key,
+    )
+
+
 def _list_aliases() -> list[str]:
     if not _profiles_dir().exists():
         return []
@@ -231,22 +313,7 @@ def _load_profile(alias: str) -> dict[str, Any]:
         )
     data = _read_json(path, {})
     _check_schema(data, path)
-    if data.get("alias") != alias:
-        raise click.ClickException(f"profile alias mismatch in {path}")
-    for field in ("name", "email"):
-        if not isinstance(data.get(field), str) or not data[field].strip():
-            raise click.ClickException(f"profile field {field!r} is missing in {path}")
-    try:
-        _validate_name(data["name"])
-        _validate_email(data["email"])
-    except click.BadParameter as exc:
-        raise click.ClickException(
-            f"invalid profile {path}: {exc.format_message()}"
-        ) from exc
-    if not isinstance(data.get("ssh", {}), dict) or not isinstance(
-        data.get("git", {}), dict
-    ):
-        raise click.ClickException(f"profile ssh/git fields must be objects in {path}")
+    _validate_loaded_profile(alias, data, path)
     return data
 
 
@@ -335,21 +402,19 @@ def _render_generated(mappings_data: dict[str, Any] | None = None) -> str:
     for mapping in mappings:
         alias = mapping["alias"]
         include_path = _profile_gitconfig(alias)
-        candidates: list[tuple[Path, bool]] = []
+        candidates: dict[tuple[Path, bool], None] = {}
         for raw in (mapping.get("path"), mapping.get("real_path")):
             if raw:
-                candidate = Path(raw)
-                if all(existing != candidate for existing, _ in candidates):
-                    candidates.append((candidate, True))
+                candidates.setdefault((Path(raw), True), None)
         exact_git_dirs = (
             mapping.get("git_dirs", [])
             if mapping.get("scope") in {"repository", "worktree"}
             else []
         )
         for raw in exact_git_dirs:
-            candidate = Path(raw)
-            if all(existing != candidate for existing, _ in candidates):
-                candidates.append((candidate, False))
+            # Bare repositories need both an exact rule for themselves and a
+            # tree rule for any repositories nested below them.
+            candidates.setdefault((Path(raw), False), None)
         for candidate, descendants in candidates:
             patterns = [_gitdir_pattern(candidate, descendants=descendants)]
             if descendants:
@@ -486,24 +551,54 @@ def _strip_managed_block(content: str) -> tuple[str, bool]:
     return "\n".join(kept).rstrip("\n"), found
 
 
-def _install_shell_block(path: Path, shell: str) -> str:
-    original = path.read_text(encoding="utf-8") if path.exists() else ""
-    mode = stat.S_IMODE(path.stat().st_mode) if path.exists() else 0o644
-    cleaned, existed = _strip_managed_block(original)
+def _shell_profile_write_path(path: Path) -> Path:
+    if not path.is_symlink():
+        return path
+    try:
+        return path.resolve(strict=False)
+    except (OSError, RuntimeError) as exc:
+        raise click.ClickException(
+            f"cannot resolve shell profile symlink {path}: {exc}"
+        ) from exc
+
+
+def _file_snapshot(path: Path) -> tuple[str | None, int | None]:
+    if not path.exists():
+        return None, None
+    return path.read_text(encoding="utf-8"), stat.S_IMODE(path.stat().st_mode)
+
+
+def _restore_file(path: Path, snapshot: tuple[str | None, int | None]) -> None:
+    content, mode = snapshot
+    if content is None:
+        with contextlib.suppress(FileNotFoundError):
+            path.unlink()
+        return
+    _atomic_write(path, content, mode if mode is not None else 0o644)
+
+
+def _install_shell_block(write_path: Path, shell: str) -> str:
+    original, mode = _file_snapshot(write_path)
+    cleaned, existed = _strip_managed_block(original or "")
     content = (
         f"{cleaned}\n\n{_managed_block(shell)}" if cleaned else _managed_block(shell)
     )
-    _atomic_write(path, content, mode)
+    _atomic_write(write_path, content, mode if mode is not None else 0o644)
     return "updated" if existed else "installed"
 
 
 def _remove_shell_block(path: Path) -> bool:
-    if not path.exists():
+    write_path = _shell_profile_write_path(path)
+    original, mode = _file_snapshot(write_path)
+    if original is None:
         return False
-    cleaned, existed = _strip_managed_block(path.read_text(encoding="utf-8"))
+    cleaned, existed = _strip_managed_block(original)
     if existed:
-        mode = stat.S_IMODE(path.stat().st_mode)
-        _atomic_write(path, cleaned + ("\n" if cleaned else ""), mode)
+        _atomic_write(
+            write_path,
+            cleaned + ("\n" if cleaned else ""),
+            mode if mode is not None else 0o644,
+        )
     return existed
 
 
@@ -730,18 +825,10 @@ def _set_profile_key(profile: dict[str, Any], key: str, value: str) -> None:
     elif key == "ssh.identities-only":
         profile.setdefault("ssh", {})["identities_only"] = _bool_value(value)
     elif key.startswith("ssh.option."):
-        option = key.removeprefix("ssh.option.")
-        if not re.fullmatch(r"[A-Za-z][A-Za-z0-9-]*", option):
-            raise click.BadParameter(f"invalid SSH option name: {option!r}")
+        option = _validate_ssh_option_name(key.removeprefix("ssh.option."))
         profile.setdefault("ssh", {}).setdefault("options", {})[option] = value
     elif key.startswith("git."):
-        git_key = key.removeprefix("git.")
-        if not GIT_KEY_RE.fullmatch(git_key):
-            raise click.BadParameter(
-                "Git keys must use git.<section>.<name> with letters, digits or '-'"
-            )
-        if git_key.lower() in {"user.name", "user.email", "core.sshcommand"}:
-            raise click.BadParameter(f"{git_key} is managed by git-auth")
+        git_key = _validate_git_setting_key(key.removeprefix("git."))
         profile.setdefault("git", {})[git_key] = value
     else:
         raise click.BadParameter(f"unsupported profile key: {key!r}")
@@ -811,9 +898,13 @@ def _git_value(
     )
     if result.returncode or not result.stdout.strip():
         return None, None
-    line = result.stdout.rstrip("\n")
-    parts = line.split(None, 1)
-    return (parts[1] if len(parts) > 1 else "", parts[0])
+    line = result.stdout.removesuffix("\n")
+    origin, separator, value = line.partition("\t")
+    if not separator:
+        raise click.ClickException(
+            f"unexpected output from git config --show-origin for {key}"
+        )
+    return value, origin
 
 
 def _runtime_generated_include() -> bool:
@@ -951,11 +1042,10 @@ def cmd_enable(
                     if profile_file
                     else _profile_target(shell)
                 )
-                snapshots[target] = (
-                    target.read_text(encoding="utf-8") if target.exists() else None,
-                    stat.S_IMODE(target.stat().st_mode) if target.exists() else None,
-                )
-                action = _install_shell_block(target, shell)
+                write_target = _shell_profile_write_path(target)
+                if write_target not in snapshots:
+                    snapshots[write_target] = _file_snapshot(write_target)
+                action = _install_shell_block(write_target, shell)
                 entry = {"type": "shell", "shell": shell, "file": str(target)}
                 installations[:] = [
                     item
@@ -970,12 +1060,8 @@ def cmd_enable(
                 )
             _write_json(_config_path(), config)
         except BaseException:
-            for target, (content, mode) in snapshots.items():
-                if content is None:
-                    with contextlib.suppress(FileNotFoundError):
-                        target.unlink()
-                else:
-                    _atomic_write(target, content, mode or 0o644)
+            for target, snapshot in snapshots.items():
+                _restore_file(target, snapshot)
             raise
         for message in messages:
             click.echo(message)
@@ -1917,7 +2003,8 @@ def _doctor_fix() -> None:
     _sync_unlocked()
     for entry in config.get("installations", []):
         if entry.get("type") == "shell":
-            _install_shell_block(Path(entry["file"]), entry["shell"])
+            write_path = _shell_profile_write_path(Path(entry["file"]))
+            _install_shell_block(write_path, entry["shell"])
         elif entry.get("type") == "global" and not _global_generated_include():
             if shutil.which("git") is None:
                 continue

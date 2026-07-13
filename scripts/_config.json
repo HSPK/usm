@@ -155,8 +155,8 @@
       "requirements": [
         "click>=8.2.1"
       ],
-      "version": "1.0.0",
-      "hash": "sha256:9d7d5e824770682ae472d28cf2f5866a1317d8f2e4024f880cbe810664a13d70"
+      "version": "1.0.2",
+      "hash": "sha256:6b7c29990fa8ae75334b2a9c06b540cda428e0a75c4ccb5e568d8cf27f9f1f7b"
     },
     "bench": {
       "description": "Benchmark CPU / memory / disk / network / GPU.",

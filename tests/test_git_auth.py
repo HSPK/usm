@@ -63,6 +63,22 @@ def test_add_writes_source_and_generated_profile(auth_home, runner):
     assert stat.S_IMODE((auth_home / "profiles" / "work").stat().st_mode) == 0o700
 
 
+@pytest.mark.parametrize("alias", [".", "..", "1work", "_work", "-work"])
+def test_add_rejects_alias_that_does_not_start_with_letter(
+    auth_home, runner, alias
+):
+    add_profile(runner, "work")
+
+    result = runner.invoke(
+        git_auth.cli,
+        ["add", "--", alias, "Invalid User", "invalid@example.com"],
+    )
+
+    assert result.exit_code != 0
+    assert "must start with a letter" in result.output
+    assert (auth_home / "profiles" / "work" / "profile.json").is_file()
+
+
 def test_add_imports_private_key_and_sets_permissions(auth_home, tmp_path, runner):
     source = make_key(tmp_path)
     source.chmod(0o644)
@@ -289,6 +305,39 @@ def test_explicit_linked_worktree_mapping_uses_exact_gitdir(
     assert result.stdout.strip() == "work@example.com"
 
 
+def test_explicit_bare_repository_mapping_uses_exact_gitdir(
+    auth_home, tmp_path, runner, monkeypatch
+):
+    monkeypatch.setenv("GIT_CONFIG_COUNT", "0")
+    bare_repo = tmp_path / "repository.git"
+    subprocess.run(["git", "init", "-q", "--bare", str(bare_repo)], check=True)
+    add_profile(runner, "work")
+
+    invoke_ok(runner, "use", "work", str(bare_repo))
+
+    mapping = json.loads((auth_home / "mappings.json").read_text())["mappings"][0]
+    assert mapping["scope"] == "repository"
+    assert mapping["git_dirs"] == [str(bare_repo.resolve())]
+    nested_repo = bare_repo / "nested"
+    subprocess.run(["git", "init", "-q", str(nested_repo)], check=True)
+    for repository in (bare_repo, nested_repo):
+        result = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(repository),
+                "-c",
+                f"include.path={auth_home / 'generated.gitconfig'}",
+                "config",
+                "user.email",
+            ],
+            check=True,
+            text=True,
+            stdout=subprocess.PIPE,
+        )
+        assert result.stdout.strip() == "work@example.com"
+
+
 def test_tree_mapping_escapes_gitdir_glob_characters(auth_home, tmp_path, runner):
     tree = tmp_path / "projects-[team]*"
     repo = tree / "repo"
@@ -437,6 +486,65 @@ def test_enable_and_disable_manage_only_marker_block(auth_home, tmp_path, runner
     assert profile_file.read_text() == "export KEEP_ME=yes\n"
 
 
+def test_enable_and_disable_preserve_symlinked_shell_profile(
+    auth_home, tmp_path, runner
+):
+    target = tmp_path / "dotfiles" / ".zshrc"
+    target.parent.mkdir()
+    target.write_text("export KEEP_ME=yes\n")
+    profile_file = tmp_path / ".zshrc"
+    profile_file.symlink_to(target)
+
+    invoke_ok(
+        runner,
+        "enable",
+        "--shell",
+        "zsh",
+        "--file",
+        str(profile_file),
+    )
+
+    assert profile_file.is_symlink()
+    assert git_auth.BEGIN_MARKER in target.read_text()
+
+    invoke_ok(runner, "disable", "--shell", "zsh")
+    assert profile_file.is_symlink()
+    assert target.read_text() == "export KEEP_ME=yes\n"
+
+
+def test_enable_restores_symlink_target_when_config_write_fails(
+    auth_home, tmp_path, runner, monkeypatch
+):
+    add_profile(runner, "work")
+    target = tmp_path / "dotfiles" / ".zshrc"
+    target.parent.mkdir()
+    target.write_text("export KEEP_ME=yes\n")
+    profile_file = tmp_path / ".zshrc"
+    profile_file.symlink_to(target)
+    real_write_json = git_auth._write_json
+
+    def fail_config_write(path, data):
+        if path == git_auth._config_path():
+            raise OSError("simulated config write failure")
+        return real_write_json(path, data)
+
+    monkeypatch.setattr(git_auth, "_write_json", fail_config_write)
+    result = runner.invoke(
+        git_auth.cli,
+        [
+            "enable",
+            "--shell",
+            "zsh",
+            "--file",
+            str(profile_file),
+        ],
+    )
+
+    assert result.exit_code != 0
+    assert profile_file.is_symlink()
+    assert target.read_text() == "export KEEP_ME=yes\n"
+
+
 def test_global_enable_and_disable_manage_one_include(auth_home, tmp_path, runner):
     home = tmp_path / "home"
     home.mkdir()
@@ -520,6 +628,32 @@ def test_status_and_list_json(auth_home, tmp_path, runner):
     )
     assert status_data["enabled"] is False
     assert status_data["profile"]["email"] == "work@example.com"
+
+
+def test_status_parses_git_origin_when_global_path_contains_spaces(
+    auth_home, tmp_path, runner, monkeypatch
+):
+    home = tmp_path / "home with space"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+    monkeypatch.setenv("GIT_CONFIG_COUNT", "0")
+    repo = tmp_path / "repository"
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    subprocess.run(
+        ["git", "config", "--global", "user.name", "Space User"],
+        check=True,
+    )
+    add_profile(runner, "work")
+    invoke_ok(runner, "use", "work", str(repo))
+
+    status_data = json.loads(
+        invoke_ok(runner, "status", str(repo), "--json").output
+    )
+
+    actual = status_data["actual"]["user.name"]
+    assert actual["value"] == "Space User"
+    assert "home with space/.gitconfig" in actual["origin"]
 
 
 def test_resolve_explains_parent_to_child_precedence(auth_home, tmp_path, runner):
@@ -726,6 +860,24 @@ def test_doctor_detects_and_repairs_stale_profile_render(auth_home, runner):
         ).stdout.strip()
         == "Edited By Hand"
     )
+
+
+@pytest.mark.parametrize("command", ["doctor", "sync"])
+def test_commands_report_invalid_persisted_git_key(
+    auth_home, runner, command
+):
+    add_profile(runner, "work")
+    profile_path = auth_home / "profiles" / "work" / "profile.json"
+    profile = json.loads(profile_path.read_text())
+    profile["git"]["broken"] = "value"
+    profile_path.write_text(json.dumps(profile))
+
+    result = runner.invoke(git_auth.cli, [command])
+
+    assert result.exit_code != 0
+    assert isinstance(result.exception, SystemExit)
+    assert "invalid profile" in result.output
+    assert "Git keys must use" in result.output
 
 
 def test_doctor_fix_does_not_mutate_when_dangling_mapping_exists(

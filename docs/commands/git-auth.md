@@ -41,8 +41,9 @@ usm git-auth list
 usm git-auth rm <alias>
 ```
 
-Aliases may contain letters, numbers, `.`, `_`, and `-`. `add -i` prompts for
-missing values. An imported private key is validated, copied to
+Aliases must start with an ASCII letter and may otherwise contain letters,
+numbers, `.`, `_`, and `-`. `add -i` prompts for missing values. An imported
+private key is validated, copied to
 `profiles/<alias>/identity`, and set to mode `0600`; its passphrase is never
 stored by usm. Validation uses `ssh-keygen`, not just the key file header. Key
 imports, replacements, removals, and profile updates are staged in a temporary
@@ -129,7 +130,8 @@ Shell mode supports bash and zsh, honors zsh's `$ZDOTDIR`, and uses
 `.bash_profile` for a macOS bash login shell when appropriate. Re-running `enable` updates the existing
 managed block rather than adding duplicates. `disable` removes only that block
 and keeps all profiles and mappings. Restart the shell after disabling to
-clear the already-exported runtime variables.
+clear the already-exported runtime variables. If the shell profile is a
+symbolic link, git-auth updates its target without replacing the link.
 
 Programs launched outside an enabled shell, such as a desktop IDE, do not
 inherit its environment. Install the generated file through Git's global
