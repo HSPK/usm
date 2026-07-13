@@ -53,6 +53,7 @@ you want from the [Commands](commands/index.md) section.
 | [`usm port`](commands/port.md) | Show what's on a port; kill the holder |
 | [`usm notify`](commands/notify.md) | Wrap a command and ping ntfy.sh / Telegram / webhook when it exits |
 | [`usm secret`](commands/secret.md) | Encrypted local env store; inject into shells or processes |
+| [`usm git-auth`](commands/git-auth.md) | Automatically select Git identity and SSH key by directory |
 | [`usm rsync`](commands/rsync.md) | rsync with sensible defaults + auto-excludes |
 | [`usm clip`](commands/clip.md) | Cross-platform clipboard; OSC52 fallback for SSH |
 | [`usm wait`](commands/wait.md) | wait-for-it (host:port, TCP, HTTP) |

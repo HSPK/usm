@@ -21,6 +21,7 @@ Every subcommand of `usm` falls into one of two buckets:
 | `disk` | [Disk partition/format/mount](disk.md) |
 | `notify` | [Long-task pings](notify.md) |
 | `secret` | [Encrypted env store](secret.md) |
+| `git-auth` | [Directory-aware Git identities and SSH keys](git-auth.md) |
 | `rsync` | [Smart rsync wrapper](rsync.md) |
 | `clip` | [Clipboard / OSC52](clip.md) |
 | `wait` | [wait-for-it](wait.md) |

@@ -60,6 +60,7 @@ Nothing is downloaded until you actually use it.
 | `~/.cache/usm/scripts/` | Cached script files + the upstream `_config.json`. |
 | `~/.cache/usm/envs/` | Persistent per-script virtualenvs. |
 | `~/.cache/usm/tunnels/` | State files for `usm tunnel` (per-tunnel JSON + logs). |
+| `~/.config/usm/git/` | `git-auth` profiles, imported SSH keys, mappings, and generated config. |
 | `~/Library/LaunchAgents/com.github.hspk.usm.tunnel.*.plist` | macOS LaunchAgents installed by `usm tunnel enable`. |
 | `~/.config/systemd/user/usm-tunnel-*.service` | Linux systemd units installed by `usm tunnel enable`. |
 

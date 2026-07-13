@@ -149,6 +149,15 @@
       "version": "1.0.2",
       "hash": "sha256:32b80947b3ff066a9b41df3229039400d3a271421a47dd90a6bdf53f6739ceaf"
     },
+    "git-auth": {
+      "description": "Select Git identities and SSH keys by directory.",
+      "path": "git_auth.py",
+      "requirements": [
+        "click>=8.2.1"
+      ],
+      "version": "1.0.0",
+      "hash": "sha256:9d7d5e824770682ae472d28cf2f5866a1317d8f2e4024f880cbe810664a13d70"
+    },
     "bench": {
       "description": "Benchmark CPU / memory / disk / network / GPU.",
       "path": "bench.py",

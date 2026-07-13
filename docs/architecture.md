@@ -171,6 +171,12 @@ uv run python dev/bump_version.py tunnel --bump minor
 ~/.config/systemd/user/
 └── usm-tunnel-0.service     # installed by `usm tunnel enable`
 
+~/.config/usm/git/
+├── profiles/                # git-auth identities, keys, and rendered config
+├── shell/                   # generated bash/zsh integration helpers
+├── mappings.json            # directory-to-profile bindings
+└── generated.gitconfig      # ordered includeIf rules
+
 ~/Library/LaunchAgents/
 └── com.github.hspk.usm.tunnel.0.plist  # macOS autostart equivalent
 ```
