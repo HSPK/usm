@@ -229,7 +229,13 @@ def cmd_export(group):
 
 @cli.command(
     "run",
-    context_settings={"ignore_unknown_options": True},
+    context_settings={
+        # No "-h" here: the command line we forward is parsed with
+        # ignore_unknown_options, and click matches short flags inside glued
+        # tokens, so "-h" would fire on things like `curl -sh URL`.
+        "help_option_names": ["--help"],
+        "ignore_unknown_options": True,
+    },
     help="Run a command with the group's secrets injected as env vars.",
 )
 @click.argument("group")

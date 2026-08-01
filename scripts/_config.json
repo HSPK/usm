@@ -124,8 +124,8 @@
       "requirements": [
         "click>=8.2.1"
       ],
-      "version": "1.0.1",
-      "hash": "sha256:f0df59cffbd63bc6c46a6e86697b6050035bfa70cdde006a5f1e7a610827d369"
+      "version": "1.0.2",
+      "hash": "sha256:0970eddc4ac4804449b0423f7eb9382165fee274d0b5c3348bd39a8f20705599"
     },
     "notify": {
       "description": "Ping ntfy.sh / Telegram / webhook when a command exits.",
@@ -135,8 +135,8 @@
         "httpx>=0.27.0",
         "rich>=13.0"
       ],
-      "version": "1.0.4",
-      "hash": "sha256:3938ab8be26b5383311d9a9baf238c136858871c56c50cff75e6386b73624427"
+      "version": "1.0.5",
+      "hash": "sha256:80ae86902575fa0c8cdf3e43f510de0a3087805b6dbcf6c47256abd18e35660e"
     },
     "secret": {
       "description": "Encrypted local env store; inject secrets into processes.",
@@ -146,8 +146,8 @@
         "cryptography>=42.0.0",
         "rich>=13.0"
       ],
-      "version": "1.0.2",
-      "hash": "sha256:32b80947b3ff066a9b41df3229039400d3a271421a47dd90a6bdf53f6739ceaf"
+      "version": "1.0.3",
+      "hash": "sha256:8fcb71b4bf24463fee38dc28135e6d4d17a1320322f8e5bf9e627740918a5e5b"
     },
     "git-auth": {
       "description": "Select Git identities and SSH keys by directory.",
@@ -155,8 +155,8 @@
       "requirements": [
         "click>=8.2.1"
       ],
-      "version": "1.0.2",
-      "hash": "sha256:6b7c29990fa8ae75334b2a9c06b540cda428e0a75c4ccb5e568d8cf27f9f1f7b"
+      "version": "1.0.3",
+      "hash": "sha256:d80beb40c42e8fc6b55884fdcd2390094c68463d46a36145242a50d3490cda87"
     },
     "bench": {
       "description": "Benchmark CPU / memory / disk / network / GPU.",
@@ -244,6 +244,16 @@
       ],
       "version": "1.0.0",
       "hash": "sha256:81bba632adea7b0854cf23efca480dcd871136fe29772caef9152974b93851ad"
+    },
+    "ssh": {
+      "description": "ssh with auto-reconnect and terminal repair.",
+      "path": "ssh.py",
+      "requirements": [
+        "click>=8.2.1",
+        "rich>=13.0"
+      ],
+      "version": "1.0.0",
+      "hash": "sha256:e309321db2eab130a01e8f3a77dedcf84a26a3ec478113bf19356f9ae9fe4420"
     }
   }
 }

@@ -69,6 +69,7 @@ nav:
       - session — Login sessions: commands/session.md
       - net — Network inspect/diagnose: commands/net.md
       - tunnel — SSH tunnels: commands/tunnel.md
+      - ssh — Resilient ssh wrapper: commands/ssh.md
       - proxy — HTTP/SOCKS/Clash proxy: commands/proxy.md
       - clash — ClashX-style manager: commands/clash.md
       - gpu — GPU picker/watch: commands/gpu.md

@@ -14,6 +14,7 @@ Every subcommand of `usm` falls into one of two buckets:
 | Command | Page |
 | --- | --- |
 | `tunnel` | [SSH tunnel manager](tunnel.md) |
+| `ssh` | [Resilient ssh wrapper](ssh.md) |
 | `proxy` | [HTTP/SOCKS/Clash proxy (mihomo)](proxy.md) |
 | `clash` | [ClashX-style mihomo manager](clash.md) |
 | `gpu` | [GPU picker/watch](gpu.md) |
@@ -49,6 +50,14 @@ These work for any subcommand:
 | `-U`, `--upgrade` | Force re-download of the script before running it. |
 | `--debug` | Bypass the cache; run from `./scripts/<name>` in the current dir (for iterating on scripts inside a `git clone`). |
 | `-h`, `--help` | Print usage for that command (works on the top-level CLI too). |
+
+!!! note
+
+    Commands that forward an arbitrary command line — `ssh`, `rsync`,
+    `notify run`, `secret run`, `git-auth exec/clone` — accept `--help` but
+    **not** `-h`. Click matches registered short flags inside glued tokens, so
+    a `-h` alias would fire on ordinary arguments like `rsync -avh` or
+    `ssh -L8080:localhost:80` and print help instead of running anything.
 
 ## Exit codes
 

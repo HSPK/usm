@@ -176,7 +176,10 @@ class _NotifyGroup(click.Group):
     cls=_NotifyGroup,
     invoke_without_command=True,
     context_settings={
-        "help_option_names": ["-h", "--help"],
+        # No "-h": this group forwards an arbitrary command line (parsed with
+        # ignore_unknown_options), and click matches short flags inside glued
+        # tokens, so "-h" would fire on things like `curl -sh URL`.
+        "help_option_names": ["--help"],
         "ignore_unknown_options": True,
         "allow_extra_args": True,
     },

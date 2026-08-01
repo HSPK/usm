@@ -1734,7 +1734,14 @@ def _runtime_env_for(alias: str) -> dict[str, str]:
 
 @cli.command(
     "exec",
-    context_settings={"ignore_unknown_options": True, "allow_extra_args": True},
+    context_settings={
+        # No "-h": the forwarded command line is parsed with
+        # ignore_unknown_options, and click matches short flags inside glued
+        # tokens, so "-h" would fire on things like `git log -sh`.
+        "help_option_names": ["--help"],
+        "ignore_unknown_options": True,
+        "allow_extra_args": True,
+    },
 )
 @click.argument("alias")
 @click.argument("command", nargs=-1, type=click.UNPROCESSED, required=True)
@@ -1751,7 +1758,11 @@ def cmd_exec(alias: str, command: tuple[str, ...]) -> None:
 
 @cli.command(
     "clone",
-    context_settings={"ignore_unknown_options": True, "allow_extra_args": True},
+    context_settings={
+        "help_option_names": ["--help"],  # see cmd_exec
+        "ignore_unknown_options": True,
+        "allow_extra_args": True,
+    },
 )
 @click.argument("alias")
 @click.argument("repository")

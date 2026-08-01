@@ -46,7 +46,10 @@ DEFAULT_EXCLUDES = [
 
 @click.command(
     context_settings={
-        "help_option_names": ["-h", "--help"],
+        # No "-h": with ignore_unknown_options, click's short-option parser
+        # matches registered flags *inside* a glued token, so "-h" would fire
+        # on ordinary rsync clusters like -avh and print help instead.
+        "help_option_names": ["--help"],
         "ignore_unknown_options": True,
     },
     help="rsync wrapper. Pass extra rsync flags after `--`.",
