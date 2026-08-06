@@ -35,7 +35,9 @@ gmp () {
 }
 export PATH="$HOME/.local/bin:$PATH"
 export PATH="$HOME/.cargo/bin:$PATH"
-export AZCOPY_AUTO_LOGIN_TYPE=AZCLI"""
+export AZCOPY_AUTO_LOGIN_TYPE=AZCLI
+eval "$(starship init __SHELL__)"
+"""
 POWERSHELL_ALIAS_BLOCK_BODY = """function ll { Get-ChildItem @args }
 function gs { git status @args }
 function ga { git add @args }
@@ -80,6 +82,7 @@ if (-not (($env:Path -split ';') -contains $usmCargoBin)) {
 }
 
 $env:AZCOPY_AUTO_LOGIN_TYPE = "AZCLI"
+Invoke-Expression (&starship init powershell)
 """
 
 
@@ -157,9 +160,11 @@ def prompt_for_shell(system_name: str) -> str:
 
 
 def render_alias_block(shell: str) -> str:
-    block_body = (
-        POWERSHELL_ALIAS_BLOCK_BODY if shell == "powershell" else POSIX_ALIAS_BLOCK_BODY
-    )
+    if shell == "powershell":
+        block_body = POWERSHELL_ALIAS_BLOCK_BODY
+    else:
+        # `starship init` takes the shell name (bash/zsh) as its argument.
+        block_body = POSIX_ALIAS_BLOCK_BODY.replace("__SHELL__", shell)
     return f"{BEGIN_MARKER}\n{block_body}\n{END_MARKER}\n"
 
 

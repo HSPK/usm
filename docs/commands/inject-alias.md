@@ -16,8 +16,11 @@ A curated set of one-letter aliases the author uses everywhere — `ll`,
 [`scripts/inject_alias.py`](https://github.com/HSPK/usm/blob/main/scripts/inject_alias.py)
 for the exact list — the alias body is part of the script source.
 
-Plus a few PATH exports (`~/.local/bin`, `~/.cargo/bin`) and
-`AZCOPY_AUTO_LOGIN_TYPE=AZCLI`.
+Plus a few PATH exports (`~/.local/bin`, `~/.cargo/bin`),
+`AZCOPY_AUTO_LOGIN_TYPE=AZCLI`, and the shell-init hook for `starship`
+(`eval "$(starship init bash|zsh)"`, or `Invoke-Expression (&starship init
+powershell)` on PowerShell) so the prompt is active as soon as the block is
+sourced.
 
 ## Default target
 
