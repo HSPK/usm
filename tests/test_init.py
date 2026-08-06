@@ -189,6 +189,91 @@ class TestActions:
         assert executor.commands == ["usm inject-alias"]
 
 
+class TestTmuxConfig:
+    @staticmethod
+    def _run(tmp_path, *, dry_run=False):
+        item = init.Item(name="tmux-config", action="tmux-config")
+        executor = RecordingExecutor()
+        ctx = _context(init.Linux(), executor, dry_run=dry_run, tmp_home=tmp_path)
+        return init.ActionStep(item).execute(ctx), executor
+
+    @staticmethod
+    def _fake_tpm(tmp_path):
+        (tmp_path / ".tmux" / "plugins" / "tpm").mkdir(parents=True, exist_ok=True)
+
+    def test_writes_managed_block_with_requested_settings(self, tmp_path):
+        result, executor = self._run(tmp_path)
+        conf = (tmp_path / ".tmux.conf").read_text()
+        assert result is init.StepResult.OK
+        assert any("git clone" in cmd for cmd in executor.commands)
+        assert conf.startswith(init._TMUX_BEGIN_MARKER)
+        assert conf.rstrip().endswith(init._TMUX_END_MARKER)
+        for line in (
+            'set -g default-terminal "tmux-256color"',
+            'set -as terminal-features ",xterm-256color:RGB:clipboard"',
+            "set -g set-clipboard on",
+            "set -g focus-events on",
+            "set -sg escape-time 10",
+        ):
+            assert line in conf
+
+    def test_repeated_runs_do_not_duplicate(self, tmp_path):
+        self._run(tmp_path)
+        self._fake_tpm(tmp_path)
+        first = (tmp_path / ".tmux.conf").read_text()
+        for _ in range(3):
+            result, _executor = self._run(tmp_path)
+            assert result is init.StepResult.SKIPPED
+        conf = (tmp_path / ".tmux.conf").read_text()
+        assert conf == first
+        assert conf.count(init._TMUX_BEGIN_MARKER) == 1
+        assert conf.count("run '~/.tmux/plugins/tpm/tpm'") == 1
+
+    def test_refreshes_stale_block_and_keeps_user_config(self, tmp_path):
+        conf_path = tmp_path / ".tmux.conf"
+        conf_path.write_text(
+            f"# mine\nset -g status off\n\n"
+            f"{init._TMUX_BEGIN_MARKER}\nset -g history-limit 1\n"
+            f"{init._TMUX_END_MARKER}\n",
+            encoding="utf-8",
+        )
+        self._fake_tpm(tmp_path)
+        result, _executor = self._run(tmp_path)
+        conf = conf_path.read_text()
+        assert result is init.StepResult.OK
+        assert conf.startswith("# mine\nset -g status off\n")
+        assert "set -g history-limit 1\n" not in conf
+        assert conf.count(init._TMUX_BEGIN_MARKER) == 1
+
+    def test_legacy_unmarked_blocks_are_replaced(self, tmp_path):
+        conf_path = tmp_path / ".tmux.conf"
+        conf_path.write_text(
+            "# mine\n\n" + init._TMUX_LEGACY_CONF + "\n" + init._TMUX_LEGACY_CONF,
+            encoding="utf-8",
+        )
+        self._fake_tpm(tmp_path)
+        self._run(tmp_path)
+        conf = conf_path.read_text()
+        assert conf.startswith("# mine\n")
+        assert conf.count("run '~/.tmux/plugins/tpm/tpm'") == 1
+        assert conf.count("set -g @plugin 'dracula/tmux'") == 1
+
+    def test_broken_markers_fail_without_touching_file(self, tmp_path):
+        conf_path = tmp_path / ".tmux.conf"
+        original = f"{init._TMUX_BEGIN_MARKER}\nset -g mouse on\n"
+        conf_path.write_text(original, encoding="utf-8")
+        self._fake_tpm(tmp_path)
+        result, _executor = self._run(tmp_path)
+        assert result is init.StepResult.FAILED
+        assert conf_path.read_text() == original
+
+    def test_dry_run_writes_nothing(self, tmp_path):
+        result, executor = self._run(tmp_path, dry_run=True)
+        assert result is init.StepResult.OK
+        assert executor.commands == []
+        assert not (tmp_path / ".tmux.conf").exists()
+
+
 class TestCli:
     def test_list_exits_clean(self):
         result = CliRunner().invoke(init.cli, ["--list"])

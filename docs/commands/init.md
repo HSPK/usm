@@ -26,7 +26,8 @@ By default (no flags) it installs everything in `default_groups` non-interactive
 | `editor` | `neovim` + `~/.config/nvim/init.vim` |
 | `profile` | shell alias block (delegates to [`inject-alias`](inject-alias.md)) |
 | `uv-tools` | `azure-cli`, `nvitop`, `amlt` (via `uv tool install`) |
-| `tmux` | `tmux` + Tmux Plugin Manager (POSIX only; skipped on Windows) |
+| `ai-tools` | `copilot-cli` (`@github/copilot`), `claude-code` (`@anthropic-ai/claude-code`), via `npm install -g` |
+| `tmux` | `tmux` + Tmux Plugin Manager + managed `~/.tmux.conf` block (POSIX only; skipped on Windows) |
 
 `linux-extras` (build deps, Tailscale, `dua-cli`) is **Linux-only** and **not**
 in the defaults — run it explicitly with `usm init linux-extras`.
@@ -50,6 +51,23 @@ items:
   step is skipped.
 - An `all:` key is used as a fallback for platforms without a specific command
   (e.g. the `uv tool install` recipes are identical everywhere).
+
+## tmux config
+
+The `tmux-config` action clones [tpm](https://github.com/tmux-plugins/tpm) and
+writes a block into `~/.tmux.conf` delimited by
+`# __USM_TMUX_BEGIN__` / `# __USM_TMUX_END__`. Re-running rewrites that block in
+place — it is never appended twice — and anything you add outside the markers is
+left untouched (blocks written by older usm versions are removed on upgrade).
+Press `prefix + I` inside tmux once to install the plugins.
+
+It sets truecolor + `tmux-256color`, OSC 52 clipboard (`set-clipboard on`, which
+[`usm clip`](clip.md) relies on), `focus-events`, a 10 ms `escape-time`, mouse
+support, a 50k-line history, 1-based window/pane numbering with
+`renumber-windows`, vi copy-mode keys, and a few bindings (`prefix + R` reloads
+the config; `|` / `-` / `c` open splits and windows in the current directory).
+Version-gated options are wrapped in `%if` guards, so older tmux builds skip
+them instead of erroring.
 
 ## Configuration
 
@@ -93,8 +111,10 @@ usm init                       # now runs your version
   processes get `~/.local/bin`, `~/.cargo/bin`, and Homebrew bins prepended —
   but on Windows a freshly `winget`-installed tool may not be visible until a
   new shell.
-- Re-running is safe: installed tools are skipped, and the alias block is
-  managed in place.
+- `ai-tools` (`copilot-cli`, `claude-code`) need `npm` on `PATH`; install
+  Node.js yourself first (not managed by this script).
+- Re-running is safe: installed tools are skipped, and the alias and
+  `~/.tmux.conf` blocks are managed in place.
 
 ## Source
 

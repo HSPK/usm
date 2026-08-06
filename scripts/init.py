@@ -51,7 +51,7 @@ _EXTRA_BIN_PATHS = (
 DEFAULT_CONFIG_YAML = """\
 # usm init configuration. Edit freely; this file is merged over the built-in
 # defaults. `default_groups` run when `usm init` is called with no arguments.
-default_groups: [lang, cli, editor, profile, uv-tools, tmux]
+default_groups: [lang, cli, editor, profile, uv-tools, ai-tools, tmux]
 
 groups:
   lang:
@@ -69,6 +69,9 @@ groups:
   uv-tools:
     description: uv-managed Python CLI tools
     items: [azure-cli, nvitop, amlt]
+  ai-tools:
+    description: AI coding assistants (npm-based)
+    items: [copilot-cli, claude-code]
   tmux:
     description: tmux and its plugin manager
     platforms: [linux, macos]
@@ -157,6 +160,12 @@ items:
   amlt:
     check: amlt
     all: uv tool install --upgrade amlt --index-url https://msrpypi.azurewebsites.net/stable/leloojoo
+  copilot-cli:
+    check: copilot
+    all: npm install -g @github/copilot
+  claude-code:
+    check: claude
+    all: npm install -g @anthropic-ai/claude-code
   build-deps:
     platforms: [linux]
     linux: |
@@ -548,7 +557,57 @@ tnoremap <Esc> <C-\\><C-n>
 """
 
 
-_TMUX_CONF = """\
+_TMUX_BEGIN_MARKER = "# __USM_TMUX_BEGIN__"
+_TMUX_END_MARKER = "# __USM_TMUX_END__"
+
+_TMUX_CONF = r"""# List of plugins
+set -g @plugin 'tmux-plugins/tpm'
+set -g @plugin 'tmux-plugins/tmux-sensible'
+
+set -g @dracula-plugins "git cpu-usage ram-usage network-bandwidth battery time"
+set -g @dracula-border-contrast true
+set -g @dracula-show-timezone false
+set -g @dracula-military-time true
+set -g @plugin 'dracula/tmux'
+
+# --- Terminal, colour and clipboard ---
+set -g default-terminal "tmux-256color"
+set -g set-clipboard on
+set -g focus-events on
+set -sg escape-time 10
+%if #{>=:#{version},3.2}
+set -as terminal-features ",xterm-256color:RGB:clipboard"
+%endif
+%if #{>=:#{version},3.3}
+set -g allow-passthrough on
+%endif
+
+# --- Comfort ---
+set -g mouse on
+set -g history-limit 50000
+set -g base-index 1
+setw -g pane-base-index 1
+set -g renumber-windows on
+setw -g mode-keys vi
+setw -g aggressive-resize on
+set -g display-time 2000
+set -g status-interval 5
+set -g set-titles on
+set -g set-titles-string "#S · #W"
+
+# --- Keys ---
+bind R source-file ~/.tmux.conf \; display-message "tmux.conf reloaded"
+bind | split-window -h -c "#{pane_current_path}"
+bind - split-window -v -c "#{pane_current_path}"
+bind c new-window -c "#{pane_current_path}"
+
+# Initialize TMUX plugin manager (keep this line at the very bottom of tmux.conf)
+run '~/.tmux/plugins/tpm/tpm'
+"""
+
+# Block appended by older usm versions (before the managed markers existed);
+# removed on upgrade so the config is not duplicated.
+_TMUX_LEGACY_CONF = """\
 # List of plugins
 set -g @plugin 'tmux-plugins/tpm'
 set -g @plugin 'tmux-plugins/tmux-sensible'
@@ -563,6 +622,44 @@ setw -g mouse on
 # Initialize TMUX plugin manager (keep this line at the very bottom of tmux.conf)
 run '~/.tmux/plugins/tpm/tpm'
 """
+
+
+def _strip_managed_block(content: str, begin: str, end: str) -> tuple[str, bool]:
+    """Remove a ``begin``/``end`` delimited block, returning (rest, was_found)."""
+    kept: list[str] = []
+    inside = False
+    found = False
+    for line in content.splitlines():
+        stripped = line.strip()
+        if stripped == begin:
+            if inside:
+                raise ValueError(f"nested {begin} marker; fix the file manually")
+            inside = True
+            found = True
+            continue
+        if stripped == end:
+            if not inside:
+                raise ValueError(f"{end} without a matching {begin}; fix it manually")
+            inside = False
+            continue
+        if not inside:
+            kept.append(line)
+    if inside:
+        raise ValueError(f"unterminated {begin} block; fix the file manually")
+    return "\n".join(kept).strip("\n"), found
+
+
+def _upsert_managed_block(path: Path, body: str, begin: str, end: str) -> str:
+    """Insert/refresh a managed block in ``path``; returns what happened."""
+    original = path.read_text(encoding="utf-8") if path.exists() else ""
+    cleaned, replaced = _strip_managed_block(original, begin, end)
+    block = f"{begin}\n{body.strip()}\n{end}\n"
+    updated = f"{cleaned}\n\n{block}" if cleaned else block
+    if updated == original:
+        return "unchanged"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(updated, encoding="utf-8")
+    return "updated" if replaced else "inserted"
 
 
 def _nvim_paths(ctx: RunContext) -> tuple[Path, Path]:
@@ -589,21 +686,44 @@ def _action_nvim_config(ctx: RunContext) -> StepResult:
     return StepResult.OK
 
 
+def _upsert_tmux_conf(conf_path: Path) -> str:
+    """Sync the managed tmux block, dropping blocks appended by old versions."""
+    original = conf_path.read_text(encoding="utf-8") if conf_path.exists() else ""
+    without_legacy = original.replace(_TMUX_LEGACY_CONF, "")
+    if without_legacy != original:
+        conf_path.write_text(without_legacy.strip("\n"), encoding="utf-8")
+    return _upsert_managed_block(
+        conf_path, _TMUX_CONF, _TMUX_BEGIN_MARKER, _TMUX_END_MARKER
+    )
+
+
 @action("tmux-config")
 def _action_tmux_config(ctx: RunContext) -> StepResult:
     tpm_dir = ctx.home / ".tmux" / "plugins" / "tpm"
     conf_path = ctx.home / ".tmux.conf"
-    if tpm_dir.is_dir():
-        return StepResult.SKIPPED
+    needs_tpm = not tpm_dir.is_dir()
     if ctx.dry_run:
-        click.echo(f"  [dry-run] clone tpm into {tpm_dir} and write {conf_path}")
+        if needs_tpm:
+            click.echo(f"  [dry-run] clone tpm into {tpm_dir}")
+        click.echo(f"  [dry-run] sync managed tmux block in {conf_path}")
         return StepResult.OK
-    code = ctx.run_shell(f"git clone https://github.com/tmux-plugins/tpm {tpm_dir}")
-    if code != 0:
+    if needs_tpm:
+        code = ctx.run_shell(
+            f"git clone https://github.com/tmux-plugins/tpm '{tpm_dir}'"
+        )
+        if code != 0:
+            return StepResult.FAILED
+    try:
+        outcome = _upsert_tmux_conf(conf_path)
+    except ValueError as error:
+        click.echo(f"  {conf_path}: {error}", err=True)
         return StepResult.FAILED
-    with conf_path.open("a", encoding="utf-8") as handle:
-        handle.write("\n" + _TMUX_CONF)
-    click.echo(f"  wrote {conf_path} (press prefix + I in tmux to install plugins)")
+    if outcome == "unchanged":
+        return StepResult.OK if needs_tpm else StepResult.SKIPPED
+    click.echo(
+        f"  {outcome} managed tmux block in {conf_path} "
+        "(press prefix + I in tmux to install plugins)"
+    )
     return StepResult.OK
 
 
