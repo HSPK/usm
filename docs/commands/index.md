@@ -34,7 +34,7 @@ Every subcommand of `usm` falls into one of two buckets:
 | `cp` | [Copy with Azure support](cp.md) |
 | `cu122` | [CUDA 12.2 install](cu122.md) |
 | `inject-alias` | [Shell alias injection](inject-alias.md) |
-| `openai-proxy` | [OpenAI → TRAPI proxy](openai-proxy.md) |
+| `openai-proxy` | [OpenAI + Anthropic → TRAPI proxy](openai-proxy.md) |
 | `sysinfo` / `check_py` | [System / Python info](sysinfo.md) |
 
 ## Built-in helpers

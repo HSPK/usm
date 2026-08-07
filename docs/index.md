@@ -65,7 +65,7 @@ you want from the [Commands](commands/index.md) section.
 | [`usm cp`](commands/cp.md) | Copy across local + blobfuse mountpoints, delegating to azcopy |
 | [`usm cu122`](commands/cu122.md) | Install NVIDIA driver 535 + CUDA 12.2 on Ubuntu |
 | [`usm inject-alias`](commands/inject-alias.md) | Manage a marker-fenced alias block in your shell rc |
-| [`usm openai-proxy`](commands/openai-proxy.md) | Run a local OpenAI-compatible proxy to Microsoft TRAPI |
+| [`usm openai-proxy`](commands/openai-proxy.md) | Local OpenAI + Anthropic compatible proxy to Microsoft TRAPI |
 | [`usm sysinfo` / `check_py`](commands/sysinfo.md) | Print system / Python info |
 | [Built-in helpers](commands/builtin.md) | `list`, `update`, `clean`, `version` |
 

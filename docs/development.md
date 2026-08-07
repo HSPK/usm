@@ -18,7 +18,7 @@ edits. Run the released version again with `uv tool install --force usmo`.
 uv run pytest -q
 ```
 
-101+ tests covering `usmo.core` and `scripts/openai_proxy.py`. Tests live
+620+ tests covering `usmo.core` and `scripts/openai_proxy.py`. Tests live
 under `tests/` and are wired up so scripts in `scripts/` can be imported
 directly (see `tests/conftest.py`).
 

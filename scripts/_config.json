@@ -55,7 +55,7 @@
       "hash": "sha256:294217d05bcfa5d8928288755d0fb64824724c164075ee1fd166482bff91b9c9"
     },
     "openai-proxy": {
-      "description": "Local OpenAI-compatible proxy for Microsoft TRAPI.",
+      "description": "Local OpenAI + Anthropic compatible proxy for Microsoft TRAPI.",
       "path": "openai_proxy.py",
       "requirements": [
         "azure-identity>=1.17.0",
@@ -64,8 +64,8 @@
         "starlette>=0.36.0",
         "uvicorn>=0.30.0"
       ],
-      "version": "1.0.5",
-      "hash": "sha256:5f3cacbcae16756f7a137436d786c8cf5a3bf98070f5d8205e85ce3229aabef1"
+      "version": "1.2.0",
+      "hash": "sha256:9d9fda2a8ed8d0d7038b35f8f290bf34db807c7f529ff2e9cb0515088dd4c93c"
     },
     "tunnel": {
       "description": "Manage SSH tunnels (local/remote/SOCKS) with autostart.",
