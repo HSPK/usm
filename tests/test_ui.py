@@ -456,3 +456,96 @@ class TestConsoleHelpers:
     def test_public_surface_is_declared(self):
         for name in ui.__all__:
             assert hasattr(ui, name), f"__all__ lists a missing name: {name}"
+
+
+def rendered_width(renderable, width: int = 200) -> int:
+    """Widest non-blank line, ignoring trailing padding."""
+    lines = [line.rstrip() for line in render(renderable, width=width).splitlines()]
+    return max((len(line) for line in lines), default=0)
+
+
+class TestTableFitsItsContent:
+    """A table should stop at its data, not at the right margin.
+
+    Filling the terminal drags the rule far past the last character, which
+    on a wide window reads as a stray line rather than as a table.
+    """
+
+    def _listing(self, **kwargs):
+        built = ui.table(
+            ui.Column("id", min_width=4),
+            ui.Column("path", min_width=10, ratio=1),
+            ui.Column("state", min_width=5),
+            **kwargs,
+        )
+        built.add_row("data", "~/mnt/data", "ready")
+        return built
+
+    def test_a_small_table_does_not_reach_the_margin(self):
+        assert rendered_width(self._listing(), width=200) < 40
+
+    def test_width_tracks_content_not_terminal(self):
+        built = self._listing()
+        assert rendered_width(built, width=200) == rendered_width(built, width=120)
+
+    def test_a_wide_table_is_capped(self):
+        built = ui.table(ui.Column("text", ratio=1))
+        built.add_row("x" * 400)
+        assert rendered_width(built, width=300) <= ui.MAX_TABLE_WIDTH
+
+    def test_the_cap_is_configurable(self):
+        built = ui.table(ui.Column("text", ratio=1), max_width=40)
+        built.add_row("y" * 400)
+        assert rendered_width(built, width=300) <= 40
+
+    def test_no_cap_means_content_width(self):
+        built = ui.table(ui.Column("text", ratio=1), max_width=None)
+        built.add_row("z" * 120)
+        assert rendered_width(built, width=200) > ui.MAX_TABLE_WIDTH
+
+    def test_a_narrow_terminal_still_wins(self):
+        built = self._listing()
+        assert rendered_width(built, width=30) <= 30
+
+    def test_expand_still_fills_the_terminal(self):
+        assert rendered_width(self._listing(expand=True), width=120) > 100
+
+    def test_the_squeeze_lands_on_the_flexible_column(self):
+        """Identifying columns must stay readable when space runs out.
+
+        Rich only shrinks columns it may wrap, and every column here is
+        no_wrap, so left alone it ellipsizes the id and the state as
+        eagerly as the long path.
+        """
+        built = self._listing()
+        built.add_row("production-archive", "~/" + "deep/" * 40 + "archive", "ready")
+        out = render(built, width=200)
+        assert "production-archive" in out
+        assert "ready" in out
+        assert "…" in out
+
+    def test_a_long_title_does_not_wrap_one_character_per_line(self):
+        built = ui.table(ui.Column("a", min_width=1), title="Catalog changes (12)")
+        built.add_row("x")
+        assert "Catalog changes (12)" in render(built, width=200)
+
+    def test_hidden_columns_do_not_reserve_width(self):
+        wide = ui.table(ui.Column("a", min_width=4), ui.Column("b", min_width=30))
+        wide.add_row("x", "y")
+        narrow = ui.table(
+            ui.Column("a", min_width=4),
+            ui.Column("b", min_width=30, hide_below=100),
+            terminal_width=80,
+        )
+        narrow.add_row("x")
+        assert rendered_width(narrow) < rendered_width(wide)
+
+    def test_an_empty_table_renders(self):
+        assert rendered_width(ui.table(ui.Column("a", ratio=1))) >= 1
+
+    def test_fitting_does_not_leak_between_renders(self):
+        """The pinned width is temporary; a reused table must re-measure."""
+        built = self._listing()
+        rendered_width(built, width=200)
+        assert built.width is None
+        assert rendered_width(built, width=30) <= 30

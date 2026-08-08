@@ -416,3 +416,234 @@ class TestDebugUsesTheLocalCheckout:
         )
         assert core.environments.env_ready(script) is True
         assert core.environments.env_ready(script, debug=True) is False
+
+
+class TestCatalogFileSkew:
+    """A stale manifest must never describe freshly downloaded code.
+
+    Regression for a real failure: `_config.json` is cached per user but
+    script files are always fetched from the default branch, so a user who
+    had not run `usm update` got new code (importing `usmo.ui`) paired with
+    an old requirement list that never mentioned `usmo` -- the venv was built
+    without it and the script died with ModuleNotFoundError on import.
+    """
+
+    def _write(self, tmp_cache, name, body):
+        path = tmp_cache / "scripts" / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(body)
+        return path
+
+    def _script(self, tmp_cache, *, hash_of=None, modules=()):
+        raw = {
+            "path": "demo.py",
+            "requirements": ["click>=8"],
+            "modules": list(modules),
+        }
+        if hash_of is not None:
+            raw["hash"] = core.compute_entry_hash(hash_of)
+        return Script.from_config("demo", raw)
+
+    def test_matching_files_are_left_alone(self, tmp_cache):
+        script_path = self._write(tmp_cache, "demo.py", "print('v1')\n")
+        script = self._script(tmp_cache, hash_of=[script_path])
+        assert core.script_files_match(script) is True
+
+    def test_drifted_files_are_detected(self, tmp_cache):
+        script_path = self._write(tmp_cache, "demo.py", "print('v1')\n")
+        script = self._script(tmp_cache, hash_of=[script_path])
+        script_path.write_text("print('v2 from main')\n")
+        assert core.script_files_match(script) is False
+
+    def test_a_changed_shared_module_is_detected(self, tmp_cache):
+        script_path = self._write(tmp_cache, "demo.py", "import shared\n")
+        module_path = self._write(tmp_cache, "shared.py", "A = 1\n")
+        script = self._script(
+            tmp_cache, hash_of=[script_path, module_path], modules=["shared.py"]
+        )
+        assert core.script_files_match(script) is True
+        module_path.write_text("from usmo.ui import ok\n")
+        assert core.script_files_match(script) is False
+
+    def test_entries_without_a_hash_are_accepted(self, tmp_cache):
+        self._write(tmp_cache, "demo.py", "x\n")
+        assert core.script_files_match(self._script(tmp_cache)) is True
+
+    def test_absent_files_fall_through_to_the_download_path(self, tmp_cache):
+        script_path = self._write(tmp_cache, "demo.py", "x\n")
+        script = self._script(tmp_cache, hash_of=[script_path])
+        script_path.unlink()
+        assert core.script_files_match(script) is True
+
+    def test_a_missing_module_falls_through(self, tmp_cache):
+        script_path = self._write(tmp_cache, "demo.py", "import shared\n")
+        module_path = self._write(tmp_cache, "shared.py", "A = 1\n")
+        script = self._script(
+            tmp_cache, hash_of=[script_path, module_path], modules=["shared.py"]
+        )
+        module_path.unlink()
+        assert core.script_files_match(script) is True
+
+    def test_reconcile_refreshes_a_stale_manifest(self, tmp_cache, monkeypatch):
+        """The reported bug, end to end: old requirements, new code."""
+        script_path = self._write(tmp_cache, "demo.py", "from usmo.ui import ok\n")
+        stale = Script.from_config(
+            "demo",
+            {
+                "path": "demo.py",
+                "requirements": ["click>=8"],  # no usmo: the venv would break
+                "hash": core.compute_entry_hash(
+                    [self._write(tmp_cache, "old.py", "print('v1')\n")]
+                ),
+            },
+        )
+        fresh = Script.from_config(
+            "demo",
+            {
+                "path": "demo.py",
+                "requirements": ["click>=8", "usmo>=0.11.0"],
+                "hash": core.compute_entry_hash([script_path]),
+            },
+        )
+        refreshed = []
+        monkeypatch.setattr(
+            core.environments,
+            "reload_script",
+            lambda name, on_progress=core._null_hook: (refreshed.append(name) or fresh),
+        )
+        result = core.environments.reconcile_catalog(stale)
+        assert refreshed == ["demo"]
+        assert "usmo>=0.11.0" in result.requirements
+
+    def test_reconcile_is_a_noop_when_consistent(self, tmp_cache, monkeypatch):
+        script_path = self._write(tmp_cache, "demo.py", "print('v1')\n")
+        script = self._script(tmp_cache, hash_of=[script_path])
+
+        def explode(*a, **kw):
+            raise AssertionError("must not refresh a consistent catalog")
+
+        monkeypatch.setattr(core.environments, "reload_script", explode)
+        assert core.environments.reconcile_catalog(script) is script
+
+    def test_reconcile_redownloads_when_still_mismatched(self, tmp_cache, monkeypatch):
+        """If the refreshed entry still disagrees, pull the files again."""
+        script_path = self._write(tmp_cache, "demo.py", "new code\n")
+        stale = self._script(
+            tmp_cache,
+            hash_of=[self._write(tmp_cache, "old.py", "old\n")],
+        )
+        fresh = Script.from_config(
+            "demo",
+            {
+                "path": "demo.py",
+                "requirements": ["click>=8"],
+                "hash": core.compute_entry_hash(
+                    [self._write(tmp_cache, "other.py", "different again\n")]
+                ),
+            },
+        )
+        monkeypatch.setattr(
+            core.environments,
+            "reload_script",
+            lambda name, on_progress=core._null_hook: fresh,
+        )
+        pulled = []
+        monkeypatch.setattr(
+            core.environments,
+            "ensure_script_file",
+            lambda s, force=False, on_progress=core._null_hook: (
+                pulled.append((s.name, force)) or script_path
+            ),
+        )
+        core.environments.reconcile_catalog(stale)
+        assert pulled == [("demo", True)]
+
+    def test_run_script_reconciles_before_building_the_env(
+        self, tmp_cache, monkeypatch
+    ):
+        """The venv must be built from the entry that matches the code."""
+        script_path = self._write(tmp_cache, "demo.py", "new code\n")
+        stale = Script.from_config(
+            "demo",
+            {
+                "path": "demo.py",
+                "requirements": ["click>=8"],
+                "hash": core.compute_entry_hash(
+                    [self._write(tmp_cache, "old.py", "old\n")]
+                ),
+            },
+        )
+        fresh = Script.from_config(
+            "demo",
+            {
+                "path": "demo.py",
+                "requirements": ["click>=8", "usmo>=0.11.0"],
+                "hash": core.compute_entry_hash([script_path]),
+            },
+        )
+        monkeypatch.setattr(
+            core.environments,
+            "reload_script",
+            lambda name, on_progress=core._null_hook: fresh,
+        )
+        seen = {}
+        monkeypatch.setattr(
+            core.environments,
+            "ensure_env",
+            lambda s, **kw: seen.setdefault("requirements", s.requirements)
+            or sys.executable,
+        )
+        monkeypatch.setattr(core.environments.subprocess, "run", lambda *a, **kw: None)
+        core.run_script(stale, [])
+        assert "usmo>=0.11.0" in seen["requirements"]
+
+    def test_debug_mode_skips_reconciliation(self, tmp_cache, monkeypatch):
+        """--debug runs local files; the cached manifest is irrelevant."""
+
+        def explode(*a, **kw):
+            raise AssertionError("debug must not touch the network")
+
+        monkeypatch.setattr(core.environments, "reconcile_catalog", explode)
+        monkeypatch.setattr(
+            core.environments, "ensure_env", lambda s, **kw: sys.executable
+        )
+        monkeypatch.setattr(core.environments.subprocess, "run", lambda *a, **kw: None)
+        script = Script.from_config("demo", {"path": "demo.py", "hash": "sha256:x"})
+        core.run_script(script, [], debug=True)
+
+
+class TestReloadScript:
+    """Refreshing a single entry from the published catalog."""
+
+    def test_returns_the_freshly_published_entry(self, tmp_cache, monkeypatch):
+        calls = []
+        monkeypatch.setattr(
+            core.catalog,
+            "download_file",
+            lambda name, on_progress=core._null_hook: calls.append(name),
+        )
+        monkeypatch.setattr(
+            core.catalog,
+            "load_scripts",
+            lambda on_progress=core._null_hook: {
+                "demo": Script.from_config(
+                    "demo", {"path": "demo.py", "requirements": ["usmo>=0.11.0"]}
+                )
+            },
+        )
+        script = core.catalog.reload_script("demo")
+        assert calls == [core.constants.CONFIG_FILENAME]
+        assert list(script.requirements) == ["usmo>=0.11.0"]
+
+    def test_a_withdrawn_script_reports_clearly(self, tmp_cache, monkeypatch):
+        """Upstream may drop a script; say so instead of raising KeyError."""
+        monkeypatch.setattr(
+            core.catalog,
+            "download_file",
+            lambda name, on_progress=core._null_hook: None,
+        )
+        monkeypatch.setattr(
+            core.catalog, "load_scripts", lambda on_progress=core._null_hook: {}
+        )
+        with pytest.raises(core.UnknownCommand):
+            core.catalog.reload_script("demo")

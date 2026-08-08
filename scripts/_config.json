@@ -23,8 +23,8 @@
         "rich>=13.0",
         "usmo>=0.11.0"
       ],
-      "version": "1.0.3",
-      "hash": "sha256:ce6b976540991aa1191b443e54460a79ffa15db76996f8a372ea8398f200bad6"
+      "version": "1.0.4",
+      "hash": "sha256:0cfacefd58ad20a7a0888c32422903e0aef1d712ee8f67d15a202193c0130c0e"
     },
     "cu122": {
       "description": "Install NVIDIA driver + CUDA 12.2.",
@@ -57,8 +57,8 @@
         "usmo>=0.11.0",
         "watchdog>=4.0.0"
       ],
-      "version": "1.0.3",
-      "hash": "sha256:498df95327c791e1556c0c926ec111d0a043292c05408857ed57513e71368e53"
+      "version": "1.0.4",
+      "hash": "sha256:c70c2131fa026fe223a684a8e63a8b173cdf52a5bea308a1f003e76f7d2a396a"
     },
     "check_py": {
       "description": "Show active Python/pip versions.",

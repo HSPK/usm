@@ -11,7 +11,11 @@ import sys
 from pathlib import Path
 from typing import Iterable
 
-from .catalog import ensure_script_file
+from .catalog import (
+    ensure_script_file,
+    reload_script,
+    script_files_match,
+)
 from .constants import ProgressHook, _null_hook
 from .errors import EnvBuildError, MissingUv
 from .model import Script
@@ -165,6 +169,27 @@ def ensure_env(
     return str(_build_env(script, debug=debug, on_progress=on_progress))
 
 
+def reconcile_catalog(
+    script: Script, *, on_progress: ProgressHook = _null_hook
+) -> Script:
+    """Re-sync the manifest when the cached files no longer match it.
+
+    Files are always fetched from the default branch while the manifest is
+    cached, so a user who has not run ``usm update`` in a while can end up
+    with new code described by an old entry — new imports, old requirements,
+    ``ModuleNotFoundError``. Refreshing here makes that self-healing instead
+    of a traceback.
+    """
+    if script_files_match(script):
+        return script
+    fresh = reload_script(script.name, on_progress=on_progress)
+    # Usually the files were already current and only the manifest lagged;
+    # re-download only if they still disagree with the refreshed entry.
+    if not script_files_match(fresh):
+        ensure_script_file(fresh, force=True, on_progress=on_progress)
+    return fresh
+
+
 def run_script(
     script: Script,
     args: Iterable[str],
@@ -183,6 +208,11 @@ def run_script(
     script_path = resolve_script_path(
         script, debug=debug, upgrade=upgrade, on_progress=on_progress
     )
+    if not debug:
+        # The requirements about to be installed must describe the code that
+        # is about to run; see reconcile_catalog.
+        script = reconcile_catalog(script, on_progress=on_progress)
+        script_path = script.cached_path
     python = ensure_env(script, upgrade=upgrade, debug=debug, on_progress=on_setup)
     argv = script.build_argv(script_path, args, python=python)
     subprocess.run(argv, check=True, text=True)

@@ -62,6 +62,13 @@ built = ui.table(
 )
 ```
 
+A table stops at its content, not at the right margin — a rule trailing off
+across a wide window reads as a stray line, not as a table. It grows to at
+most `ui.MAX_TABLE_WIDTH` (96) columns; past that the `ratio` column takes
+the squeeze on its own, so identifiers and states stay readable while only
+the long path or description ellipsizes. Pass `max_width=` for a different
+cap, or `expand=True` for the rare table that really should fill the width.
+
 `hide_below` is the terminal width under which a column disappears. Build
 rows to match with `ui.row_for`, keyed by header:
 

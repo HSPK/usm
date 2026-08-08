@@ -388,22 +388,90 @@ class Column:
         return f"Column({self.header!r}, hide_below={self.hide_below})"
 
 
+#: A table wider than this is harder to scan than it is informative -- the
+#: eye loses the row on the way back from the last column. Tables stop here
+#: however wide the terminal happens to be.
+MAX_TABLE_WIDTH = 96
+
+
+def _fitted_table_class():
+    """Build (once) a Table that stops at its content instead of the margin.
+
+    Rich sizes a table one of two ways, and neither is what we want on its
+    own. Left alone, a table is exactly as wide as its content but, when that
+    content overflows, rich shrinks every column it is allowed to -- and ours
+    are all ``no_wrap``, so it ellipsizes the short identifying columns just
+    as readily as the long path. Set ``expand`` and ``ratio`` instead and the
+    squeeze lands only on the flexible column, but the table now always fills
+    the terminal, trailing a rule far past the last character.
+
+    So: measure the content, then pin the width to it (or to the cap, if the
+    content is bigger). Rich's expand machinery does the distribution, but
+    against the content width rather than the terminal width.
+    """
+    from rich.table import Table
+
+    class FittedTable(Table):
+        #: Fit to content, rather than filling the terminal.
+        fit: bool = True
+        #: Stop growing here even if the content would go further.
+        fit_cap: int | None = MAX_TABLE_WIDTH
+
+        def __rich_console__(self, console, options):
+            if self.width is not None or not self.fit:
+                yield from super().__rich_console__(console, options)
+                return
+            from rich.measure import Measurement
+
+            natural = Measurement.get(console, options, self).maximum
+            if self.title:
+                # Otherwise a table narrower than its own title wraps the
+                # title one character per line.
+                natural = max(natural, _plain_width(self.title))
+            cap = min(self.fit_cap or options.max_width, options.max_width)
+            self.width = max(1, min(natural, cap))
+            try:
+                yield from super().__rich_console__(console, options)
+            finally:
+                self.width = None
+
+    return FittedTable
+
+
+_fitted_table = None
+
+
+def _plain_width(text) -> int:
+    """Width of a title once rich markup is discounted."""
+    from rich.text import Text
+
+    return len(Text.from_markup(str(text)).plain)
+
+
 def table(
     *columns: "Column | str | tuple[str, dict]",
     title: str | None = None,
-    expand: bool = True,
+    expand: bool = False,
     terminal_width: int | None = None,
+    max_width: int | None = MAX_TABLE_WIDTH,
 ) -> "Table":
     """A table in the family style: thin rule, no wrapping, one line per row.
+
+    Sizes to its content rather than to the terminal, so the rule stops where
+    the data does. When the content does not fit, the squeeze lands on the
+    flexible (``ratio``) column and the identifying ones stay legible.
 
     Accepts :class:`Column` objects (which may declare ``hide_below``), plain
     header strings, or ``(header, {rich kwargs})`` pairs.
     """
+    global _fitted_table
     from rich import box
-    from rich.table import Table
+
+    if _fitted_table is None:
+        _fitted_table = _fitted_table_class()
 
     term = terminal_width if terminal_width is not None else width()
-    built = Table(
+    built = _fitted_table(
         title=title,
         title_justify="left",
         title_style="bold",
@@ -411,8 +479,10 @@ def table(
         header_style=STYLE_MUTED,
         pad_edge=False,
         padding=(0, 2, 0, 0),
-        expand=expand,
+        expand=True,
     )
+    built.fit = not expand
+    built.fit_cap = max_width
     for spec in columns:
         if isinstance(spec, Column):
             if not spec.visible(term):

@@ -228,3 +228,39 @@ def closest_names(query: str, scripts: Scripts, limit: int = 3) -> list[str]:
         return close
     needle = query.lower()
     return [n for n in names if needle in n.lower()][:limit]
+
+
+# Catalog / file consistency ------------------------------------------------
+
+
+def script_files_match(script: Script) -> bool:
+    """Do the cached files still match the hash the catalog recorded?
+
+    The catalog is cached per user, but :func:`download_file` always fetches
+    from the default branch. A stale ``_config.json`` can therefore pair an
+    old requirement list with freshly downloaded code — which is how a script
+    ends up importing a dependency its virtualenv was never told about. The
+    recorded hash is what catches that; entries without one (or with files
+    not yet downloaded) are reported as matching so the caller falls through
+    to its normal download path.
+    """
+    if not script.hash:
+        return True
+    paths = [constants.CACHE_SCRIPT_DIR / name for name in script.files]
+    if any(not path.exists() for path in paths):
+        return True
+    from .manifest import compute_entry_hash
+
+    try:
+        return compute_entry_hash(paths) == script.hash
+    except OSError:  # pragma: no cover - unreadable cache
+        return False
+
+
+def reload_script(name: str, *, on_progress: ProgressHook = _null_hook) -> Script:
+    """Re-download the manifest and return the named script's current entry."""
+    download_file(constants.CONFIG_FILENAME, on_progress=on_progress)
+    scripts = load_scripts(on_progress=on_progress)
+    if name not in scripts:
+        raise UnknownCommand(name, scripts.keys())
+    return scripts[name]

@@ -1967,7 +1967,7 @@ def cmd_ls():
     ]
     if show_boot:
         columns.append(("Boot", {"justify": "center", "min_width": 4}))
-    table = new_table(*columns, expand=True)
+    table = new_table(*columns)
 
     now = time.time()
     for job in jobs:

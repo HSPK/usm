@@ -1115,7 +1115,7 @@ def cmd_ls(show_all):
         columns.append(("SAS", {"justify": "right", "min_width": 4}))
     if show_boot:
         columns.append(("Boot", {"justify": "center", "min_width": 4}))
-    table = new_table(*columns, expand=True)
+    table = new_table(*columns)
 
     managed_dirs = set()
     for mount in mounts:

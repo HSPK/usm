@@ -33,6 +33,9 @@ from typing import TYPE_CHECKING
 # access (PEP 562) so importing usmo.core costs nothing until the
 # SDK is actually used; `usm` itself only needs this for real work.
 _EXPORTS = {
+    "script_files_match": "catalog",
+    "reload_script": "catalog",
+    "reconcile_catalog": "environments",
     "ALIAS_SHIM_MARKER": "constants",
     "CACHE_DIR": "constants",
     "CACHE_ENV_DIR": "constants",
@@ -193,6 +196,9 @@ def __dir__() -> list[str]:
 
 
 __all__ = [
+    "script_files_match",
+    "reload_script",
+    "reconcile_catalog",
     "aliases",
     "catalog",
     "constants",
