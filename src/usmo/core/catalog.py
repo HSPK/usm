@@ -194,3 +194,37 @@ def update_config(*, on_progress: ProgressHook = _null_hook) -> list[CatalogChan
         if (ov, oh) != (nv, nh):
             changes.append(CatalogChange(name, ov, nv, oh, nh))
     return changes
+
+
+# Discovery ----------------------------------------------------------------
+
+
+def match_scripts(scripts: Scripts, query: str) -> Scripts:
+    """Scripts whose name or description contains *query* (case-insensitive).
+
+    Name matches sort ahead of description-only matches by being the same
+    dict — callers render sorted by name — but the distinction is preserved
+    for presentation via :func:`matched_field`.
+    """
+    if not query:
+        return dict(scripts)
+    needle = query.lower()
+    return {
+        name: script
+        for name, script in scripts.items()
+        if needle in name.lower() or needle in (script.description or "").lower()
+    }
+
+
+def closest_names(query: str, scripts: Scripts, limit: int = 3) -> list[str]:
+    """Best-guess corrections for a mistyped command name."""
+    import difflib
+
+    if not query:
+        return []
+    names = list(scripts)
+    close = difflib.get_close_matches(query, names, n=limit, cutoff=0.6)
+    if close:
+        return close
+    needle = query.lower()
+    return [n for n in names if needle in n.lower()][:limit]

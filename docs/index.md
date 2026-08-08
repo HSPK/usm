@@ -32,6 +32,7 @@ curl -fsSL https://raw.githubusercontent.com/HSPK/usm/main/scripts/install.sh | 
 
 # 2. see what's available
 usm list
+usm search blob          # or look something up
 
 # 3. run something
 usm sysinfo

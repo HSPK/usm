@@ -4,43 +4,94 @@ Commands implemented directly in `usmo.cli` — they don't pull anything
 from `scripts/` and never spawn a subprocess (exceptions: `update` and
 `install` read/refresh the catalog).
 
-## `usm list`
-
-Print every command (scripts + built-ins) with cache status and any
-declared `uv` requirements.
+Every built-in supports `-h` / `--help`:
 
 ```bash
-usm list
+usm list --help
+usm update -h
 ```
 
-Sample output:
+## `usm` (no arguments)
+
+A short landing page — what usm is and where to go next. It deliberately
+does **not** list the catalog: with 25+ commands that was a wall of text,
+and it meant every bare `usm` hit the cache (or the network) before it
+could print anything.
 
 ```text
-Available commands:
+usm 0.10.0
+Run cached utility scripts from one CLI.
 
-Scripts:
-  blobmount             Mount a blob storage as a filesystem.              not cached
-  check_py              Check Python3 installation and version.            cached
-  cp                    Copy files with blob storage support.              not cached  +uv(3 req)
-  cu122                 Setup CUDA 12.2 environment.                       not cached
-  init                  Initialize a new machine setup.                    cached
-  inject-alias          Insert or update the managed usm alias block ...   cached      +uv(1 req)
-  openai-proxy          Run a local OpenAI-compatible proxy that for...    not cached  +uv(5 req)
-  sysinfo               Print system, GPU, CUDA, MPI, ...                  not cached
-  tunnel                Manage SSH tunnels (local/remote/SOCKS) with ...   cached      +uv(2 req)
-
-Built-in:
-  list                  List all commands.
-  update                Refresh the catalog; --all or NAME pulls scripts.
-  install               Install a script as an alias in ~/.local/bin.
-  uninstall             Remove an installed alias.
-  clean                 Remove the script cache.
-  version               Show usm version.
+  usm list             See every available command
+  usm search <query>   Find a command by name or description
+  usm <name> --help    Help for one command
+  usm update           Refresh the catalog
 ```
 
-The `+uv(N req)` tag means the script declares `requirements` in
-`_config.json`. On first run usm builds a persistent venv for it under
-`~/.cache/usm/envs/<name>`; later runs reuse it offline.
+It touches nothing on disk, so it renders instantly even on a cold machine
+with no network.
+
+## `usm list`
+
+List every available command.
+
+```bash
+usm list                 # everything, plus the built-ins
+usm list azure           # only commands matching "azure"
+usm list --cached        # only what's already downloaded
+usm list --missing       # only what isn't
+usm list --names         # bare names, one per line (for scripts/completion)
+```
+
+```text
+Commands
+
+     name         version   description
+ ────────────────────────────────────────────────────────────────────────
+ ●   azsync       v1.0.2    Watch a directory and keep it synced to Azure Blob.
+ ○   bench        v1.0.3    Benchmark CPU / memory / disk / network / GPU.
+ ●   blobmount    v1.0.2    Mount Azure Blob containers, refreshing the SAS.
+
+● cached  ○ not yet downloaded  · 2/3 cached · usm <name> --help for details
+```
+
+The leading glyph is the cache state — `●` downloaded, `○` not yet. A
+command that hasn't been downloaded works exactly the same; it is fetched
+on first use.
+
+`PATTERN` matches against both the name and the description, so
+`usm list azure` finds `blobmount` even though "azure" isn't in its name.
+
+## `usm search`
+
+The same matching as `usm list PATTERN`, but phrased as a lookup: it
+reports the number of hits, highlights what matched, and exits non-zero
+when nothing does (so it composes in scripts).
+
+```bash
+usm search blob
+usm search blob --names | xargs -n1 usm update
+```
+
+```text
+2 match(es) for 'blob'
+
+     name         version   description
+ ────────────────────────────────────────────────────────────────────────
+ ●   blobmount    v1.0.2    Mount Azure **Blob** containers, refreshing the SAS.
+ ○   cp           v1.0.3    Copy files, with Azure **blob** support.
+```
+
+A near miss suggests a correction rather than dumping the catalog:
+
+```text
+$ usm search blomount
+No command matches blomount.
+Did you mean: blobmount?
+```
+
+The same suggestion appears when you mistype a command name outright
+(`usm blomount`).
 
 ## `usm update`
 
@@ -125,7 +176,8 @@ Print the installed `usmo` version.
 
 ```bash
 usm version
-# -> usm version 0.3.0
+usm -V          # same thing
+# -> usm version 0.10.0
 ```
 
 Resolved from (in order):

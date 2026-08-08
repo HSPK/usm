@@ -67,10 +67,12 @@ few built-in helpers. Scripts live in [`scripts/_config.json`](scripts/_config.j
 and download on first use — add new ones by editing that file, no Python changes
 required.
 
-See everything (with one-line descriptions and cache status) from the CLI:
+Find things from the CLI:
 
 ```bash
 usm list                 # all commands
+usm list --cached        # just what's downloaded
+usm search blob          # match names and descriptions
 usm <command> --help     # help for one command
 ```
 

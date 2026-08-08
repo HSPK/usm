@@ -40,7 +40,7 @@ Every subcommand of `usm` falls into one of two buckets:
 
 ## Built-in helpers
 
-See [Built-in helpers](builtin.md): `list`, `update`, `clean`, `version`.
+See [Built-in helpers](builtin.md): `list`, `search`, `update`, `install`, `uninstall`, `clean`, `version`.
 
 ## Global flags
 

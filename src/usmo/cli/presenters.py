@@ -1,149 +1,232 @@
-"""Rich rendering for the CLI: tables, overview, help, and update diffs.
+"""Rich rendering for the CLI: tables, the landing page, help, update diffs.
 
 Pure presentation — every function here only formats data and writes to the
 shared console; no catalog or filesystem logic lives in this module.
+
+``rich`` is imported inside the functions that need it so importing this
+module stays free (see :mod:`usmo.cli.output`).
 """
 
 from __future__ import annotations
 
-from rich import box
-from rich.table import Table
+from typing import TYPE_CHECKING
 
-from usmo import core
-from usmo.core import Script, Scripts
+from .output import console, get_console
 
-from .output import console
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    from usmo.core import CatalogChange, Script, Scripts
+
+
+def _core():
+    from usmo import core
+
+    return core
+
 
 BUILTIN_HELP: list[tuple[str, str]] = [
-    ("list", "List all commands."),
+    ("list", "List available commands."),
+    ("search", "Find commands by name or description."),
     ("update", "Refresh the catalog; --all or NAME pulls scripts."),
     ("install", "Install a script as an alias in ~/.local/bin."),
     ("uninstall", "Remove an installed alias."),
     ("clean", "Remove the script cache."),
-    ("version", "Show usm version."),
+    ("version", "Show the usm version."),
+]
+
+CACHED_GLYPH = "[green]●[/green]"
+MISSING_GLYPH = "[dim]○[/dim]"
+
+
+def _table(**kwargs):
+    from rich import box
+    from rich.table import Table
+
+    kwargs.setdefault("box", box.SIMPLE_HEAD)
+    kwargs.setdefault("header_style", "dim")
+    kwargs.setdefault("pad_edge", False)
+    kwargs.setdefault("padding", (0, 2, 0, 0))
+    kwargs.setdefault("expand", False)
+    kwargs.setdefault("title_justify", "left")
+    kwargs.setdefault("title_style", "bold")
+    return Table(**kwargs)
+
+
+# -- landing page -----------------------------------------------------------
+
+
+LANDING: list[tuple[str, str]] = [
+    ("usm list", "See every available command"),
+    ("usm search <query>", "Find a command by name or description"),
+    ("usm <name> --help", "Help for one command"),
+    ("usm update", "Refresh the catalog"),
 ]
 
 
-def scripts_table(scripts: Scripts) -> Table:
-    table = Table(
-        title="Scripts",
-        title_justify="left",
-        title_style="bold",
-        show_header=True,
-        header_style="dim",
-        box=box.SIMPLE_HEAD,
-        pad_edge=False,
-        padding=(0, 2, 0, 0),
-        expand=False,
+def print_landing(version: str) -> None:
+    """The bare ``usm`` page: what this is, and where to go next.
+
+    Rendered with click rather than rich: this is the most common invocation
+    and a fixed four-row layout does not need a table engine, which roughly
+    halves the time to first paint. It also never touches the catalog, so it
+    is instant on a cold machine with no network.
+    """
+    import click
+
+    click.echo(
+        click.style("usm", fg="cyan", bold=True) + " " + click.style(version, dim=True)
     )
+    click.echo(click.style("Run cached utility scripts from one CLI.", dim=True))
+    click.echo()
+    width = max(len(cmd) for cmd, _ in LANDING)
+    for cmd, blurb in LANDING:
+        click.echo(
+            "  "
+            + click.style(cmd.ljust(width), bold=True)
+            + "   "
+            + click.style(blurb, dim=True)
+        )
+
+
+# -- listings ---------------------------------------------------------------
+
+
+def scripts_table(
+    scripts: "Scripts",
+    *,
+    title: str = "Commands",
+    highlight: str | None = None,
+) -> "object":
+    table = _table(title=title)
+    table.add_column("", no_wrap=True, justify="center")
     table.add_column("name", style="bold cyan", no_wrap=True)
     table.add_column("version", style="dim", no_wrap=True)
-    table.add_column("description", overflow="fold", min_width=30, ratio=1)
-    table.add_column("uv", no_wrap=True, justify="center")
-    table.add_column("status", no_wrap=True, justify="right")
+    table.add_column("description", overflow="fold", min_width=24, ratio=1)
 
     for name in sorted(scripts):
-        s = scripts[name]
-        status = (
-            "[green]●[/green] cached"
-            if s.cached_path.exists()
-            else "[dim]○ missing[/dim]"
-        )
+        script = scripts[name]
         table.add_row(
-            name,
-            f"v{s.version}" if s.version else "v?",
-            s.description,
-            "[cyan]uv[/cyan]" if s.uses_uv else "",
-            status,
+            CACHED_GLYPH if script.cached_path.exists() else MISSING_GLYPH,
+            _mark(name, highlight),
+            f"v{script.version}" if script.version else "v?",
+            _mark(script.description, highlight),
         )
     return table
 
 
-def builtin_table() -> Table:
-    table = Table(
-        title="Built-in",
-        title_justify="left",
-        title_style="bold",
-        show_header=False,
-        box=box.SIMPLE_HEAD,
-        pad_edge=False,
-        padding=(0, 2, 0, 0),
-        expand=False,
-    )
+def _mark(text: str, needle: str | None) -> str:
+    """Bold the matched span so a search result shows *why* it matched."""
+    if not needle or not text:
+        return text
+    lowered = text.lower()
+    start = lowered.find(needle.lower())
+    if start < 0:
+        return text
+    end = start + len(needle)
+    return f"{text[:start]}[bold yellow]{text[start:end]}[/bold yellow]{text[end:]}"
+
+
+def print_scripts(
+    scripts: "Scripts",
+    *,
+    title: str = "Commands",
+    highlight: str | None = None,
+    footer: bool = True,
+) -> None:
+    console = get_console()
+    console.print(scripts_table(scripts, title=title, highlight=highlight))
+    if footer:
+        cached = sum(1 for s in scripts.values() if s.cached_path.exists())
+        console.print(
+            f"[dim]{CACHED_GLYPH} cached[/dim]  [dim]{MISSING_GLYPH} not yet "
+            f"downloaded[/dim]  [dim]· {cached}/{len(scripts)} cached · "
+            f"usm <name> --help for details[/dim]"
+        )
+
+
+def print_builtins() -> None:
+    table = _table(title="Built-in", show_header=False)
     table.add_column("name", style="bold cyan", no_wrap=True)
-    table.add_column("help", overflow="fold", min_width=30, ratio=1)
+    table.add_column("help", overflow="fold", min_width=24, ratio=1)
     for name, help_text in BUILTIN_HELP:
         table.add_row(name, help_text)
-    return table
+    get_console().print(table)
 
 
-def print_overview(scripts: Scripts) -> None:
-    console.print(scripts_table(scripts))
-    console.print(builtin_table())
+def print_no_matches(query: str, scripts: "Scripts") -> None:
+    console = get_console()
+    console.print(f"[yellow]No command matches[/yellow] [bold]{query}[/bold].")
+    close = _core().closest_names(query, scripts)
+    if close:
+        console.print(f"[dim]Did you mean: {', '.join(close)}?[/dim]")
+    else:
+        console.print("[dim]Run [bold]usm list[/bold] to see everything.[/dim]")
+
+
+def print_unknown_command(command: str, scripts: "Scripts") -> None:
+    console = get_console()
+    console.print(f"[bold red]Error:[/bold red] Unknown command '{command}'.")
+    close = _core().closest_names(command, scripts)
+    if close:
+        console.print(f"[dim]Did you mean: {', '.join(close)}?[/dim]")
     console.print(
-        "[dim]Run [bold]usm <name> --help[/bold] for command-specific help.[/dim]"
+        "[dim]Run [bold]usm list[/bold] to see every command, or "
+        "[bold]usm search <query>[/bold] to look one up.[/dim]"
     )
 
 
-def print_unknown_command(command: str, scripts: Scripts) -> None:
-    console.print(f"[bold red]Error:[/bold red] Unknown command '{command}'.")
-    print_overview(scripts)
-
-
-def print_script_help(script: Script) -> None:
-    header = f"[bold]{script.name}[/bold]"
+def print_script_help(script: "Script") -> None:
+    console = get_console()
+    header = f"[bold cyan]{script.name}[/bold cyan]"
     if script.version:
         header += f" [dim]v{script.version}[/dim]"
-    console.print(f"{header}: {script.description}")
-    console.print("Usage:")
-    console.print(f"  usm {script.name} [ARGS...]")
+    console.print(f"{header}  {script.description}")
+    console.print(f"\n[bold]Usage[/bold]\n  usm {script.name} [ARGS...]")
     if script.requirements:
         console.print(
-            "Requirements (installed on first run via [cyan]uv[/cyan]): "
-            + ", ".join(script.requirements)
+            "\n[bold]Requirements[/bold] [dim](installed on first run via "
+            "uv)[/dim]\n  " + ", ".join(script.requirements)
         )
+    if script.modules:
+        console.print("\n[bold]Shared modules[/bold]\n  " + ", ".join(script.modules))
     if script.python:
-        console.print(f"Python: {script.python}")
+        console.print(f"\n[bold]Python[/bold]\n  {script.python}")
+    state = "cached" if script.cached_path.exists() else "not downloaded yet"
+    console.print(f"\n[dim]{state} · {script.cached_path}[/dim]")
 
 
-def change_row(c: core.CatalogChange) -> tuple[str, str, str]:
+# -- update diffs -----------------------------------------------------------
+
+
+def change_row(c: "CatalogChange") -> tuple[str, str, str]:
     """(script, version, hash) cells for one catalog change."""
     if c.status == "added":
         return (
             c.name,
             f"[green]new {c.new_version}[/green]",
-            f"[green]{core.short_hash(c.new_hash)}[/green]",
+            f"[green]{_core().short_hash(c.new_hash)}[/green]",
         )
     if c.status == "removed":
         return (
             f"[dim]{c.name}[/dim]",
             "[red]removed[/red]",
-            f"[dim]{core.short_hash(c.old_hash)}[/dim]",
+            f"[dim]{_core().short_hash(c.old_hash)}[/dim]",
         )
     return (
         c.name,
         f"{c.old_version} [dim]→[/dim] [cyan]{c.new_version}[/cyan]",
-        f"{core.short_hash(c.old_hash)} [dim]→[/dim] {core.short_hash(c.new_hash)}",
+        f"{_core().short_hash(c.old_hash)} [dim]→[/dim] {_core().short_hash(c.new_hash)}",
     )
 
 
-def changes_table(title: str) -> Table:
-    table = Table(
-        title=title,
-        title_justify="left",
-        title_style="bold",
-        header_style="dim",
-        box=box.SIMPLE_HEAD,
-        pad_edge=False,
-        padding=(0, 2, 0, 0),
-    )
+def changes_table(title: str):
+    table = _table(title=title)
     table.add_column("script", style="bold cyan", no_wrap=True)
     table.add_column("version")
     table.add_column("hash")
     return table
 
 
-def print_catalog_changes(changes: list[core.CatalogChange], *, cold: bool) -> None:
+def print_catalog_changes(changes: "list[CatalogChange]", *, cold: bool) -> None:
     if not changes:
         console.print("[green]✓[/green] Catalog is up to date.")
         return
@@ -155,19 +238,17 @@ def print_catalog_changes(changes: list[core.CatalogChange], *, cold: bool) -> N
     table = changes_table(f"Catalog changes ({len(changes)})")
     for c in changes:
         table.add_row(*change_row(c))
-    console.print(table)
+    get_console().print(table)
 
 
-def print_named_update(
-    names: tuple[str, ...], changes: list[core.CatalogChange]
-) -> None:
+def print_named_update(names: tuple[str, ...], changes: "list[CatalogChange]") -> None:
     by_name = {c.name: c for c in changes}
-    meta = core.read_catalog_meta()
+    meta = _core().read_catalog_meta()
     table = changes_table("Updated")
     for name in names:
         if name in by_name:
             table.add_row(*change_row(by_name[name]))
         else:
             version, h = meta.get(name, (None, None))
-            table.add_row(name, version or "?", core.short_hash(h))
-    console.print(table)
+            table.add_row(name, version or "?", _core().short_hash(h))
+    get_console().print(table)
