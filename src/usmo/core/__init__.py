@@ -80,6 +80,7 @@ from .manifest import (
     HashChange,
     _bump_version,
     audit_manifest,
+    compute_entry_hash,
     compute_script_hash,
     sync_manifest,
 )
@@ -148,6 +149,7 @@ __all__ = [
     # manifest
     "HashChange",
     "audit_manifest",
+    "compute_entry_hash",
     "compute_script_hash",
     "sync_manifest",
     "_bump_version",

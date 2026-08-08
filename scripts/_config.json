@@ -7,14 +7,23 @@
         "click>=8.2.1",
         "pyyaml>=6.0.3"
       ],
-      "version": "1.0.1",
-      "hash": "sha256:93ca172dbdb3269b17e14f2aa6b2bd0b82d65a5068b02ced0cb8a2424f88b775"
+      "version": "1.0.2",
+      "hash": "sha256:c93223f4037416ab45a79a9a20eb8e76948501541deaf04e467b3ef4156a4f29"
     },
     "blobmount": {
-      "description": "Mount an Azure blob container locally.",
-      "path": "blobmount.sh",
-      "version": "1.0.0",
-      "hash": "sha256:ae634e5577d90755a89a65c3e54d396ab795491befdff6f35e1cd6cf8e64901b"
+      "description": "Mount Azure Blob containers, refreshing the SAS.",
+      "path": "blobmount.py",
+      "modules": [
+        "usm_azure.py"
+      ],
+      "requirements": [
+        "click>=8.2.1",
+        "psutil>=7.1.3",
+        "pyyaml>=6.0.3",
+        "rich>=13.0"
+      ],
+      "version": "1.0.2",
+      "hash": "sha256:44e8c2df4922c1bc760f97e819c154c9b070b8b497ea2e3f9eb2710802572f06"
     },
     "cu122": {
       "description": "Install NVIDIA driver + CUDA 12.2.",
@@ -32,6 +41,22 @@
       ],
       "version": "1.0.3",
       "hash": "sha256:54411f466a7b9486b0aad2ec2263b681b45f583bd288e767eed9d09d49f7421a"
+    },
+    "azsync": {
+      "description": "Watch a directory and keep it synced to Azure Blob.",
+      "path": "azsync.py",
+      "modules": [
+        "usm_azure.py"
+      ],
+      "requirements": [
+        "click>=8.2.1",
+        "psutil>=7.1.3",
+        "pyyaml>=6.0.3",
+        "rich>=13.0",
+        "watchdog>=4.0.0"
+      ],
+      "version": "1.0.2",
+      "hash": "sha256:e3756fcd67cd7ccb046bfb6942fdd755d8ce5299314c0bc72fc7828089bdfdb0"
     },
     "check_py": {
       "description": "Show active Python/pip versions.",
@@ -51,8 +76,8 @@
       "requirements": [
         "click>=8.2.1"
       ],
-      "version": "1.0.0",
-      "hash": "sha256:294217d05bcfa5d8928288755d0fb64824724c164075ee1fd166482bff91b9c9"
+      "version": "1.0.1",
+      "hash": "sha256:d30376793f6b11309b98512c898a8ccce5c1bcbc42101f148f40649c251a2c8e"
     },
     "openai-proxy": {
       "description": "Local OpenAI + Anthropic compatible proxy for Microsoft TRAPI.",

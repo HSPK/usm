@@ -16,6 +16,21 @@ def compute_script_hash(path: Path) -> str:
     return constants.HASH_PREFIX + hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def compute_entry_hash(paths: Iterable[Path]) -> str:
+    """Hash a script together with the shared modules it declares.
+
+    Folding the modules in means editing a shared module bumps every script
+    that imports it, so cached installs actually pick the new code up.
+    """
+    paths = list(paths)
+    if len(paths) == 1:
+        return compute_script_hash(paths[0])
+    digest = hashlib.sha256()
+    for path in paths:
+        digest.update(hashlib.sha256(path.read_bytes()).digest())
+    return constants.HASH_PREFIX + digest.hexdigest()
+
+
 def _bump_version(version: str | None, level: str = "patch") -> str:
     """Bump *version* by *level* ('patch'/'minor'/'major').
 
@@ -84,8 +99,11 @@ def audit_manifest(
         target = scripts_dir / entry["path"]
         if not target.exists():
             continue
+        module_paths = [scripts_dir / m for m in (entry.get("modules") or [])]
+        if any(not p.exists() for p in module_paths):
+            continue
 
-        new_hash = compute_script_hash(target)
+        new_hash = compute_entry_hash([target, *module_paths])
         old_hash = entry.get("hash")
         old_version = entry.get("version")
         hash_matches = new_hash == old_hash

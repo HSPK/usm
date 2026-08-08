@@ -240,3 +240,107 @@ class TestBuildEnv:
         assert excinfo.value.name == "x"
         assert "tls handshake eof" in excinfo.value.detail
         assert not s.env_dir.exists()
+
+
+class TestSharedModules:
+    """Scripts can declare sibling .py modules that ship alongside them."""
+
+    def test_modules_parsed_and_defaulted(self):
+        assert Script.from_config("a", {"path": "a.py"}).modules == ()
+        script = Script.from_config(
+            "a", {"path": "a.py", "modules": ["shared.py", "other.py"]}
+        )
+        assert script.modules == ("shared.py", "other.py")
+
+    def test_files_lists_the_script_first(self):
+        script = Script.from_config("a", {"path": "a.py", "modules": ["m.py"]})
+        assert script.files == ("a.py", "m.py")
+
+    def test_files_without_modules(self):
+        assert Script.from_config("a", {"path": "a.sh"}).files == ("a.sh",)
+
+    def test_modules_land_next_to_the_script(self, tmp_cache, monkeypatch):
+        """Same directory, so Python's sys.path[0] makes the import work."""
+        from usmo.core import catalog
+
+        downloaded = []
+
+        def fake_download(filename, *, on_progress=None):
+            path = tmp_cache / "scripts" / filename
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("# stub\n")
+            downloaded.append(filename)
+            return path
+
+        monkeypatch.setattr(catalog, "download_file", fake_download)
+        script = Script.from_config("a", {"path": "a.py", "modules": ["shared.py"]})
+        resolved = catalog.ensure_script_file(script)
+        assert downloaded == ["shared.py", "a.py"]
+        assert resolved.parent == (tmp_cache / "scripts")
+        assert (resolved.parent / "shared.py").exists()
+
+    def test_cached_script_still_fetches_a_missing_module(self, tmp_cache, monkeypatch):
+        from usmo.core import catalog
+
+        scripts_dir = tmp_cache / "scripts"
+        scripts_dir.mkdir(parents=True, exist_ok=True)
+        (scripts_dir / "a.py").write_text("# cached\n")
+        downloaded = []
+
+        def fake_download(filename, *, on_progress=None):
+            path = scripts_dir / filename
+            path.write_text("# stub\n")
+            downloaded.append(filename)
+            return path
+
+        monkeypatch.setattr(catalog, "download_file", fake_download)
+        script = Script.from_config("a", {"path": "a.py", "modules": ["shared.py"]})
+        catalog.ensure_script_file(script)
+        assert downloaded == ["shared.py"]
+
+    def test_force_redownloads_everything(self, tmp_cache, monkeypatch):
+        from usmo.core import catalog
+
+        scripts_dir = tmp_cache / "scripts"
+        scripts_dir.mkdir(parents=True, exist_ok=True)
+        (scripts_dir / "a.py").write_text("# cached\n")
+        (scripts_dir / "shared.py").write_text("# cached\n")
+        downloaded = []
+
+        def fake_download(filename, *, on_progress=None):
+            path = scripts_dir / filename
+            path.write_text("# fresh\n")
+            downloaded.append(filename)
+            return path
+
+        monkeypatch.setattr(catalog, "download_file", fake_download)
+        script = Script.from_config("a", {"path": "a.py", "modules": ["shared.py"]})
+        catalog.ensure_script_file(script, force=True)
+        assert downloaded == ["shared.py", "a.py"]
+
+    def test_updates_refresh_modules_too(self, tmp_cache, monkeypatch):
+        from usmo.core import catalog
+
+        scripts_dir = tmp_cache / "scripts"
+        scripts_dir.mkdir(parents=True, exist_ok=True)
+        (scripts_dir / "a.py").write_text("# cached\n")
+        downloaded = []
+
+        def fake_download(filename, *, on_progress=None):
+            path = scripts_dir / filename
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("x")
+            downloaded.append(filename)
+            return path
+
+        monkeypatch.setattr(catalog, "download_file", fake_download)
+        monkeypatch.setattr(
+            catalog,
+            "load_scripts",
+            lambda **_kw: {
+                "a": Script.from_config("a", {"path": "a.py", "modules": ["shared.py"]})
+            },
+        )
+        results = list(catalog.iter_updates(refresh_config=False))
+        assert results == [("a", True)]
+        assert downloaded == ["a.py", "shared.py"]

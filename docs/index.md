@@ -61,8 +61,9 @@ you want from the [Commands](commands/index.md) section.
 | [`usm share`](commands/share.md) | Serve a file/dir over HTTP, optionally tunneled out |
 | [`usm serve`](commands/serve.md) | Full-featured file server (uploads, range, zip, auth) via miniserve |
 | [`usm init`](commands/init.md) | Bootstrap a fresh Ubuntu machine |
-| [`usm blobmount`](commands/blobmount.md) | Mount an Azure blob container locally |
+| [`usm blobmount`](commands/blobmount.md) | Mount an Azure blob container, keeping the SAS fresh |
 | [`usm cp`](commands/cp.md) | Copy across local + blobfuse mountpoints, delegating to azcopy |
+| [`usm azsync`](commands/azsync.md) | Watch a directory and keep it mirrored to Azure Blob |
 | [`usm cu122`](commands/cu122.md) | Install NVIDIA driver 535 + CUDA 12.2 on Ubuntu |
 | [`usm inject-alias`](commands/inject-alias.md) | Manage a marker-fenced alias block in your shell rc |
 | [`usm openai-proxy`](commands/openai-proxy.md) | Local OpenAI + Anthropic compatible proxy to Microsoft TRAPI |

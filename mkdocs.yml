@@ -85,8 +85,9 @@ nav:
       - share — File share over HTTP: commands/share.md
       - serve — Rich file server (uploads, range, zip): commands/serve.md
       - init — Machine bootstrap: commands/init.md
-      - blobmount — Mount Azure Blob: commands/blobmount.md
+      - blobmount — Mount Azure Blob (SAS refresh): commands/blobmount.md
       - cp — Copy with Azure support: commands/cp.md
+      - azsync — Watch and sync to Azure Blob: commands/azsync.md
       - cu122 — CUDA 12.2: commands/cu122.md
       - inject-alias — Shell aliases: commands/inject-alias.md
       - openai-proxy — TRAPI proxy: commands/openai-proxy.md

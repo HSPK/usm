@@ -30,8 +30,9 @@ Every subcommand of `usm` falls into one of two buckets:
 | `share` | [File share over HTTP](share.md) |
 | `serve` | [Rich file server (uploads, range, zip)](serve.md) |
 | `init` | [Machine bootstrap](init.md) |
-| `blobmount` | [Mount Azure blob](blobmount.md) |
+| `blobmount` | [Mount Azure blob, refreshing the SAS](blobmount.md) |
 | `cp` | [Copy with Azure support](cp.md) |
+| `azsync` | [Watch and sync to Azure Blob](azsync.md) |
 | `cu122` | [CUDA 12.2 install](cu122.md) |
 | `inject-alias` | [Shell alias injection](inject-alias.md) |
 | `openai-proxy` | [OpenAI + Anthropic → TRAPI proxy](openai-proxy.md) |

@@ -11,6 +11,7 @@ from usmo.core import (
     HASH_PREFIX,
     _bump_version,
     audit_manifest,
+    compute_entry_hash,
     compute_script_hash,
     sync_manifest,
 )
@@ -62,18 +63,25 @@ def manifest(tmp_path):
     (tmp_path / "foo.sh").write_text("echo foo\n")
     (tmp_path / "bar.py").write_text("print('bar')\n")
     cfg = tmp_path / "_config.json"
-    cfg.write_text(json.dumps({
-        "scripts": {
-            "foo": {
-                "path": "foo.sh", "version": "1.0.0",
-                "hash": compute_script_hash(tmp_path / "foo.sh"),
+    cfg.write_text(
+        json.dumps(
+            {
+                "scripts": {
+                    "foo": {
+                        "path": "foo.sh",
+                        "version": "1.0.0",
+                        "hash": compute_script_hash(tmp_path / "foo.sh"),
+                    },
+                    "bar": {
+                        "path": "bar.py",
+                        "version": "1.0.0",
+                        "hash": compute_script_hash(tmp_path / "bar.py"),
+                    },
+                }
             },
-            "bar": {
-                "path": "bar.py", "version": "1.0.0",
-                "hash": compute_script_hash(tmp_path / "bar.py"),
-            },
-        }
-    }, indent=2))
+            indent=2,
+        )
+    )
     return cfg
 
 
@@ -153,3 +161,80 @@ class TestAuditManifest:
         assert data["scripts"]["foo"]["version"] == "1.0.1"
         # File untouched.
         assert manifest.read_text() == original
+
+
+class TestSharedModules:
+    """A script may declare sibling .py modules it imports."""
+
+    @pytest.fixture
+    def shared(self, tmp_path):
+        (tmp_path / "shared.py").write_text("VALUE = 1\n")
+        (tmp_path / "a.py").write_text("import shared\n")
+        (tmp_path / "b.py").write_text("import shared\n")
+        entry_hash = compute_entry_hash([tmp_path / "a.py", tmp_path / "shared.py"])
+        cfg = tmp_path / "_config.json"
+        cfg.write_text(
+            json.dumps(
+                {
+                    "scripts": {
+                        "a": {
+                            "path": "a.py",
+                            "modules": ["shared.py"],
+                            "version": "1.0.0",
+                            "hash": entry_hash,
+                        },
+                        "b": {
+                            "path": "b.py",
+                            "modules": ["shared.py"],
+                            "version": "2.0.0",
+                            "hash": compute_entry_hash(
+                                [tmp_path / "b.py", tmp_path / "shared.py"]
+                            ),
+                        },
+                    }
+                },
+                indent=2,
+            )
+        )
+        return cfg
+
+    def test_entry_hash_of_one_file_matches_the_plain_hash(self, tmp_path):
+        path = tmp_path / "solo.py"
+        path.write_text("x = 1\n")
+        assert compute_entry_hash([path]) == compute_script_hash(path)
+
+    def test_entry_hash_covers_the_module(self, tmp_path):
+        script = tmp_path / "s.py"
+        module = tmp_path / "m.py"
+        script.write_text("import m\n")
+        module.write_text("A = 1\n")
+        first = compute_entry_hash([script, module])
+        module.write_text("A = 2\n")
+        assert compute_entry_hash([script, module]) != first
+
+    def test_entry_hash_is_order_sensitive_but_stable(self, tmp_path):
+        a = tmp_path / "a.py"
+        b = tmp_path / "b.py"
+        a.write_text("1")
+        b.write_text("2")
+        assert compute_entry_hash([a, b]) == compute_entry_hash([a, b])
+        assert compute_entry_hash([a, b]) != compute_entry_hash([b, a])
+
+    def test_manifest_in_sync_with_modules(self, shared):
+        assert sync_manifest(shared) == []
+
+    def test_editing_a_module_bumps_every_dependent(self, shared, tmp_path):
+        (tmp_path / "shared.py").write_text("VALUE = 2\n")
+        changes = sync_manifest(shared)
+        assert {c.name for c in changes} == {"a", "b"}
+        data = json.loads(shared.read_text())
+        assert data["scripts"]["a"]["version"] == "1.0.1"
+        assert data["scripts"]["b"]["version"] == "2.0.1"
+
+    def test_editing_one_script_leaves_the_sibling_alone(self, shared, tmp_path):
+        (tmp_path / "a.py").write_text("import shared  # tweak\n")
+        assert [c.name for c in sync_manifest(shared)] == ["a"]
+
+    def test_missing_module_is_skipped_not_crashed(self, shared, tmp_path):
+        (tmp_path / "shared.py").unlink()
+        assert sync_manifest(shared) == []

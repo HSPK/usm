@@ -44,7 +44,15 @@ def ensure_script_file(
     force: bool = False,
     on_progress: ProgressHook = _null_hook,
 ) -> Path:
-    """Return the cached script path, downloading on cache miss or ``force``."""
+    """Return the cached script path, downloading on cache miss or ``force``.
+
+    Any shared modules the script declares are fetched into the same
+    directory, so imports resolve without touching ``sys.path``.
+    """
+    for module in script.modules:
+        module_path = constants.CACHE_SCRIPT_DIR / module
+        if force or not module_path.exists():
+            download_file(module, on_progress=on_progress)
     if force or not script.cached_path.exists():
         return download_file(script.path, on_progress=on_progress)
     return script.cached_path
@@ -110,7 +118,8 @@ def iter_updates(
         force_missing = True
     for name, script in targets:
         if script.cached_path.exists() or force_missing:
-            download_file(script.path, on_progress=on_progress)
+            for filename in script.files:
+                download_file(filename, on_progress=on_progress)
             yield name, True
         else:
             yield name, False

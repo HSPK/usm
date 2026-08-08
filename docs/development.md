@@ -18,7 +18,9 @@ edits. Run the released version again with `uv tool install --force usmo`.
 uv run pytest -q
 ```
 
-620+ tests covering `usmo.core` and `scripts/openai_proxy.py`. Tests live
+1260+ tests covering `usmo.core`, `scripts/openai_proxy.py`,
+`scripts/azsync.py`, `scripts/usm_azure.py` and `scripts/blobmount.py`.
+Tests live
 under `tests/` and are wired up so scripts in `scripts/` can be imported
 directly (see `tests/conftest.py`).
 
@@ -56,6 +58,20 @@ pre-commit run --all-files
    ```
    Only `path` is required; `description` shows up in `usm list`;
    `requirements` are installed once into a persistent per-script venv.
+
+   A Python script can share code with another by declaring `modules`:
+
+   ```json
+   "myscript": {
+     "path": "myscript.py",
+     "modules": ["usm_azure.py"],
+     "requirements": ["click>=8.2.1"]
+   }
+   ```
+
+   Listed modules are downloaded into the same cache directory, so a plain
+   `import usm_azure` works. Their bytes are folded into the entry's hash, so
+   editing a shared module bumps every script that declares it.
 3. Commit. The pre-commit hook fills in `version` and `hash`.
 4. Test it: `usm --debug myscript`.
 5. Add a docs page under `docs/commands/myscript.md` and link it from

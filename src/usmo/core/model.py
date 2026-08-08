@@ -18,6 +18,7 @@ class Script:
     path: str
     description: str = ""
     requirements: tuple[str, ...] = ()
+    modules: tuple[str, ...] = ()
     python: str | None = None
     version: str | None = None
     hash: str | None = None
@@ -29,6 +30,7 @@ class Script:
             path=raw["path"],
             description=raw.get("description", ""),
             requirements=tuple(raw.get("requirements") or ()),
+            modules=tuple(raw.get("modules") or ()),
             python=raw.get("python"),
             version=raw.get("version"),
             hash=raw.get("hash"),
@@ -41,6 +43,16 @@ class Script:
     @property
     def uses_uv(self) -> bool:
         return self.is_python and bool(self.requirements)
+
+    @property
+    def files(self) -> tuple[str, ...]:
+        """Every file this script needs on disk: itself plus shared modules.
+
+        Modules are plain ``.py`` files fetched into the same cache directory,
+        so the script can import them directly (Python puts a script's own
+        directory on ``sys.path``).
+        """
+        return (self.path, *self.modules)
 
     @property
     def cached_path(self) -> Path:
