@@ -93,6 +93,7 @@ nav:
       - openai-proxy — TRAPI proxy: commands/openai-proxy.md
       - sysinfo / check_py: commands/sysinfo.md
       - Built-in helpers: commands/builtin.md
+  - Design system: design-system.md
   - Architecture: architecture.md
   - Development: development.md
 

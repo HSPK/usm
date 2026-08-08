@@ -11,15 +11,17 @@ What lives here is the part both commands need and neither owns:
   expiry taken from the token itself, an ``0600`` cache, and a freshness
   check. Neither azcopy nor blobfuse2 can rotate a credential that is
   already in flight, so both commands refresh *before* they need one.
-* **Blob URL handling** — parsing, SAS splicing, redaction, and resolving a
-  path inside a live blobfuse2 mount back to its ``https://`` URL.
+* **Blob URL handling** — parsing, SAS splicing, and resolving a path inside
+  a live blobfuse2 mount back to its ``https://`` URL.
 * **Process plumbing** — liveness that isn't fooled by zombies, an advisory
   lock, atomic writes.
 * **Service management** — systemd user units and launchd agents, so both
   commands get identical ``enable``/``disable``/``start`` semantics.
 
-Command-specific machinery (azsync's trigger policy and azcopy engine,
-blobmount's blobfuse2 handling) deliberately stays in the command.
+Presentation is deliberately *not* here. Tables, status glyphs, durations
+and redaction come from :mod:`usmo.ui`, the design system every usm command
+shares; this module re-exports the pieces both scripts use so they need one
+import rather than two.
 """
 
 from __future__ import annotations
@@ -36,6 +38,35 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 
+from usmo.ui import (
+    SECTION,
+    Column,
+    compact_duration,
+    elide,
+    human_bytes,
+    human_duration,
+    redact,
+    short_blob_target,
+    shorten_path,
+)
+from usmo.ui import detail as kv_table
+from usmo.ui import table as new_table
+
+# Re-exported so azsync/blobmount can `from usm_azure import ...` once.
+__all__ = [
+    "SECTION",
+    "Column",
+    "compact_duration",
+    "elide",
+    "human_bytes",
+    "human_duration",
+    "kv_table",
+    "new_table",
+    "redact",
+    "short_blob_target",
+    "shorten_path",
+]
+
 USM_CACHE_DIR = Path.home() / ".cache" / "usm"
 LOCAL_BIN_DIR = USM_CACHE_DIR / "bin"
 
@@ -48,160 +79,16 @@ SAS_PERMISSIONS = "racwdl"
 
 
 # ==========================================================================
-# Formatting, redaction, small IO
+# Small utilities
+#
+# Presentation (tables, status glyphs, durations, redaction) comes from
+# usmo.ui -- the design system every usm command shares -- and is
+# re-exported above so the two scripts need a single import.
 # ==========================================================================
-
-_SIG_RE = re.compile(r"(sig=)[^&\s\"']+", re.I)
-
-
-def redact(text: str) -> str:
-    """Blank out the signature of any SAS token in *text*.
-
-    Everything printed or logged goes through here; the token itself only
-    ever lives in an ``0600`` file.
-    """
-    return _SIG_RE.sub(r"\1***", text or "")
 
 
 def slugify(value: str) -> str:
     return re.sub(r"[^a-zA-Z0-9]+", "-", value or "").strip("-").lower()
-
-
-def human_bytes(n: float) -> str:
-    for unit in ("B", "KiB", "MiB", "GiB"):
-        if abs(n) < 1024:
-            return f"{n:.0f}{unit}" if unit == "B" else f"{n:.1f}{unit}"
-        n /= 1024
-    return f"{n:.1f}TiB"
-
-
-def human_duration(secs: float | None) -> str:
-    if secs is None:
-        return "-"
-    secs = max(0, int(secs))
-    if secs < 60:
-        return f"{secs}s"
-    if secs < 3600:
-        return f"{secs // 60}m{secs % 60:02d}s"
-    if secs < 86400:
-        return f"{secs // 3600}h{(secs % 3600) // 60:02d}m"
-    return f"{secs // 86400}d{(secs % 86400) // 3600:02d}h"
-
-
-def compact_duration(secs: float | None) -> str:
-    """One unit, at most four characters — for table columns.
-
-    ``human_duration`` is precise but variable width, which is what makes a
-    Rich column wrap to three lines. This never exceeds ``999d``.
-    """
-    if secs is None:
-        return "-"
-    secs = max(0, int(secs))
-    if secs < 60:
-        return f"{secs}s"
-    if secs < 3600:
-        return f"{secs // 60}m"
-    if secs < 86400:
-        return f"{secs // 3600}h"
-    return f"{secs // 86400}d"
-
-
-def shorten_path(path) -> str:
-    """Replace the home prefix with ``~``.
-
-    Worth doing everywhere: a home directory like
-    ``/home/first.last@example.com`` otherwise eats half an 80-column table.
-    """
-    text = str(path)
-    home = str(Path.home())
-    if text == home:
-        return "~"
-    if text.startswith(home + os.sep):
-        return "~" + text[len(home) :]
-    return text
-
-
-def short_blob_target(url: str) -> str:
-    """``https://acct.blob.core.windows.net/c/a/b?sas`` → ``acct/c/a/b``.
-
-    The scheme and endpoint are identical for every row, so showing them just
-    pushes the part that differs off the edge.
-    """
-    base, _ = split_sas(url or "")
-    parts = urllib.parse.urlsplit(base)
-    if not parts.netloc:
-        return base
-    account = parts.netloc.split(":")[0].split(".")[0]
-    path = parts.path.strip("/")
-    return f"{account}/{path}" if path else account
-
-
-def elide(text: str, width: int, *, keep: str = "tail") -> str:
-    """Trim *text* to *width*, keeping whichever end carries the meaning.
-
-    Paths and blob targets are distinguished by their tail, so that is what
-    survives by default.
-    """
-    text = str(text)
-    if width <= 0 or len(text) <= width:
-        return text
-    if width == 1:
-        return "…"
-    if keep == "tail":
-        return "…" + text[-(width - 1) :]
-    return text[: width - 1] + "…"
-
-
-# -- tables ----------------------------------------------------------------
-
-
-def new_table(*columns, **kwargs):
-    """A table that stays inside the terminal instead of wrapping.
-
-    Every column defaults to ``no_wrap`` with ellipsis overflow: one row is
-    one line, always. Pass ``(header, {...})`` to override per column.
-    """
-    from rich import box
-    from rich.table import Table
-
-    kwargs.setdefault("box", box.SIMPLE_HEAD)
-    kwargs.setdefault("header_style", "bold")
-    kwargs.setdefault("pad_edge", False)
-    kwargs.setdefault("expand", False)
-    table = Table(**kwargs)
-    for column in columns:
-        header, opts = column if isinstance(column, tuple) else (column, {})
-        opts = dict(opts)
-        opts.setdefault("no_wrap", True)
-        opts.setdefault("overflow", "ellipsis")
-        table.add_column(header, **opts)
-    return table
-
-
-SECTION = object()  # marker: insert a blank line between kv_table groups
-
-
-def kv_table(rows, **kwargs):
-    """Key/value detail view. Use ``SECTION`` in *rows* to group.
-
-    Values wrap rather than truncate here — unlike a list, a detail view has
-    room, and silently cutting a path off is worse than a second line.
-    """
-    from rich.table import Table
-
-    kwargs.setdefault("box", None)
-    kwargs.setdefault("show_header", False)
-    kwargs.setdefault("pad_edge", False)
-    table = Table(**kwargs)
-    table.add_column(style="dim", no_wrap=True)
-    table.add_column(overflow="fold")
-    for row in rows:
-        if row is SECTION:
-            table.add_row("", "")
-            continue
-        key, value = row
-        table.add_row(key, "" if value is None else str(value))
-    return table
 
 
 def atomic_write(path: Path, data: str, *, mode: int = 0o644) -> None:

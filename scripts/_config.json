@@ -20,10 +20,11 @@
         "click>=8.2.1",
         "psutil>=7.1.3",
         "pyyaml>=6.0.3",
-        "rich>=13.0"
+        "rich>=13.0",
+        "usmo>=0.11.0"
       ],
-      "version": "1.0.2",
-      "hash": "sha256:44e8c2df4922c1bc760f97e819c154c9b070b8b497ea2e3f9eb2710802572f06"
+      "version": "1.0.3",
+      "hash": "sha256:ce6b976540991aa1191b443e54460a79ffa15db76996f8a372ea8398f200bad6"
     },
     "cu122": {
       "description": "Install NVIDIA driver + CUDA 12.2.",
@@ -53,10 +54,11 @@
         "psutil>=7.1.3",
         "pyyaml>=6.0.3",
         "rich>=13.0",
+        "usmo>=0.11.0",
         "watchdog>=4.0.0"
       ],
-      "version": "1.0.2",
-      "hash": "sha256:e3756fcd67cd7ccb046bfb6942fdd755d8ce5299314c0bc72fc7828089bdfdb0"
+      "version": "1.0.3",
+      "hash": "sha256:498df95327c791e1556c0c926ec111d0a043292c05408857ed57513e71368e53"
     },
     "check_py": {
       "description": "Show active Python/pip versions.",

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -179,7 +180,7 @@ class TestEnsureEnv:
         monkeypatch.setattr(
             core.environments,
             "_build_env",
-            lambda s, on_progress=core._null_hook: (
+            lambda s, debug=False, on_progress=core._null_hook: (
                 built.append(s) or Path("/envs/x/bin/python")
             ),
         )
@@ -200,7 +201,7 @@ class TestEnsureEnv:
         monkeypatch.setattr(
             core.environments,
             "_build_env",
-            lambda s, on_progress=core._null_hook: (
+            lambda s, debug=False, on_progress=core._null_hook: (
                 built.append(s) or Path("/new/python")
             ),
         )
@@ -344,3 +345,74 @@ class TestSharedModules:
         results = list(catalog.iter_updates(refresh_config=False))
         assert results == [("a", True)]
         assert downloaded == ["a.py", "shared.py"]
+
+
+class TestDebugUsesTheLocalCheckout:
+    """`--debug` must exercise the code being edited, not the released wheel.
+
+    Scripts depend on ``usmo`` for :mod:`usmo.ui`; without this, changing the
+    shared UI would need a release before any script could see it.
+    """
+
+    def _script(self, *requirements):
+        return Script(name="x", path="x.py", requirements=tuple(requirements))
+
+    def test_requirements_are_untouched_normally(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        script = self._script("click>=8", "usmo>=0.11")
+        assert core.environments.resolve_requirements(script) == [
+            "click>=8",
+            "usmo>=0.11",
+        ]
+
+    def test_usmo_is_redirected_to_the_checkout_in_debug(self, tmp_path, monkeypatch):
+        (tmp_path / "pyproject.toml").write_text('[project]\nname = "usmo"\n')
+        monkeypatch.chdir(tmp_path)
+        resolved = core.environments.resolve_requirements(
+            self._script("click>=8", "usmo>=0.11"), debug=True
+        )
+        assert resolved == ["click>=8", "--editable", str(tmp_path)]
+
+    def test_other_requirements_are_left_alone(self, tmp_path, monkeypatch):
+        (tmp_path / "pyproject.toml").write_text('[project]\nname = "usmo"\n')
+        monkeypatch.chdir(tmp_path)
+        resolved = core.environments.resolve_requirements(
+            self._script("usmocket>=1", "rich>=13"), debug=True
+        )
+        assert resolved == ["usmocket>=1", "rich>=13"]
+
+    def test_outside_the_checkout_nothing_changes(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        script = self._script("usmo>=0.11")
+        assert core.environments.resolve_requirements(script, debug=True) == [
+            "usmo>=0.11"
+        ]
+
+    def test_a_different_project_is_not_mistaken_for_usmo(self, tmp_path, monkeypatch):
+        (tmp_path / "pyproject.toml").write_text('[project]\nname = "other"\n')
+        monkeypatch.chdir(tmp_path)
+        assert core.environments._local_usmo_root() is None
+
+    def test_env_marker_distinguishes_debug(self, tmp_path, monkeypatch):
+        """Switching modes must rebuild, not reuse a venv with the wrong usmo."""
+        (tmp_path / "pyproject.toml").write_text('[project]\nname = "usmo"\n')
+        monkeypatch.chdir(tmp_path)
+        script = self._script("usmo>=0.11")
+        assert core.environments._env_spec(script) != core.environments._env_spec(
+            script, debug=True
+        )
+
+    def test_env_ready_is_false_after_switching_modes(
+        self, tmp_cache, tmp_path, monkeypatch
+    ):
+        (tmp_path / "pyproject.toml").write_text('[project]\nname = "usmo"\n')
+        monkeypatch.chdir(tmp_path)
+        script = self._script("usmo>=0.11")
+        py = core._env_python(script.env_dir)
+        py.parent.mkdir(parents=True)
+        py.write_text("")
+        (script.env_dir / core.ENV_MARKER_NAME).write_text(
+            json.dumps(core.environments._env_spec(script))
+        )
+        assert core.environments.env_ready(script) is True
+        assert core.environments.env_ready(script, debug=True) is False

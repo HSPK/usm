@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from .output import console, get_console
+from usmo import ui
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from usmo.core import CatalogChange, Script, Scripts
@@ -33,23 +33,6 @@ BUILTIN_HELP: list[tuple[str, str]] = [
     ("version", "Show the usm version."),
 ]
 
-CACHED_GLYPH = "[green]●[/green]"
-MISSING_GLYPH = "[dim]○[/dim]"
-
-
-def _table(**kwargs):
-    from rich import box
-    from rich.table import Table
-
-    kwargs.setdefault("box", box.SIMPLE_HEAD)
-    kwargs.setdefault("header_style", "dim")
-    kwargs.setdefault("pad_edge", False)
-    kwargs.setdefault("padding", (0, 2, 0, 0))
-    kwargs.setdefault("expand", False)
-    kwargs.setdefault("title_justify", "left")
-    kwargs.setdefault("title_style", "bold")
-    return Table(**kwargs)
-
 
 # -- landing page -----------------------------------------------------------
 
@@ -65,10 +48,11 @@ LANDING: list[tuple[str, str]] = [
 def print_landing(version: str) -> None:
     """The bare ``usm`` page: what this is, and where to go next.
 
-    Rendered with click rather than rich: this is the most common invocation
+    Rendered with click rather than rich — this is the most common invocation
     and a fixed four-row layout does not need a table engine, which roughly
-    halves the time to first paint. It also never touches the catalog, so it
-    is instant on a cold machine with no network.
+    halves the time to first paint. It follows the same palette as everything
+    else (cyan identifier, dim context), it just gets there cheaply. It also
+    never touches the catalog, so it is instant on a cold machine.
     """
     import click
 
@@ -77,11 +61,11 @@ def print_landing(version: str) -> None:
     )
     click.echo(click.style("Run cached utility scripts from one CLI.", dim=True))
     click.echo()
-    width = max(len(cmd) for cmd, _ in LANDING)
+    pad = max(len(cmd) for cmd, _ in LANDING)
     for cmd, blurb in LANDING:
         click.echo(
             "  "
-            + click.style(cmd.ljust(width), bold=True)
+            + click.style(cmd.ljust(pad), bold=True)
             + "   "
             + click.style(blurb, dim=True)
         )
@@ -95,22 +79,27 @@ def scripts_table(
     *,
     title: str = "Commands",
     highlight: str | None = None,
-) -> "object":
-    table = _table(title=title)
-    table.add_column("", no_wrap=True, justify="center")
-    table.add_column("name", style="bold cyan", no_wrap=True)
-    table.add_column("version", style="dim", no_wrap=True)
-    table.add_column("description", overflow="fold", min_width=24, ratio=1)
-
+    terminal_width: int | None = None,
+):
+    built = ui.table(
+        ui.Column("", justify="center", min_width=1),
+        ui.Column("name", style=ui.STYLE_ID, min_width=6),
+        ui.Column("version", style=ui.STYLE_MUTED, min_width=6, hide_below=60),
+        ui.Column("description", min_width=24, ratio=1),
+        title=title,
+        terminal_width=terminal_width,
+    )
+    narrow = (terminal_width or ui.width()) < 60
     for name in sorted(scripts):
         script = scripts[name]
-        table.add_row(
-            CACHED_GLYPH if script.cached_path.exists() else MISSING_GLYPH,
+        row = [
+            ui.state(script.cached_path.exists()),
             _mark(name, highlight),
             f"v{script.version}" if script.version else "v?",
             _mark(script.description, highlight),
-        )
-    return table
+        ]
+        built.add_row(*(row[:2] + row[3:] if narrow else row))
+    return built
 
 
 def _mark(text: str, needle: str | None) -> str:
@@ -132,66 +121,67 @@ def print_scripts(
     highlight: str | None = None,
     footer: bool = True,
 ) -> None:
-    console = get_console()
-    console.print(scripts_table(scripts, title=title, highlight=highlight))
+    ui.print(scripts_table(scripts, title=title, highlight=highlight))
     if footer:
         cached = sum(1 for s in scripts.values() if s.cached_path.exists())
-        console.print(
-            f"[dim]{CACHED_GLYPH} cached[/dim]  [dim]{MISSING_GLYPH} not yet "
-            f"downloaded[/dim]  [dim]· {cached}/{len(scripts)} cached · "
-            f"usm <name> --help for details[/dim]"
+        ui.hint(
+            ui.joined(
+                ui.legend((ui.CACHED, "cached"), (ui.MISSING, "not yet downloaded")),
+                f"{cached}/{len(scripts)} cached",
+                "usm <name> --help for details",
+            )
         )
 
 
 def print_builtins() -> None:
-    table = _table(title="Built-in", show_header=False)
-    table.add_column("name", style="bold cyan", no_wrap=True)
-    table.add_column("help", overflow="fold", min_width=24, ratio=1)
+    built = ui.table(
+        ui.Column("name", style=ui.STYLE_ID, min_width=6),
+        ui.Column("help", min_width=24, ratio=1),
+        title="Built-in",
+    )
+    built.show_header = False
     for name, help_text in BUILTIN_HELP:
-        table.add_row(name, help_text)
-    get_console().print(table)
+        built.add_row(name, help_text)
+    ui.print(built)
 
 
 def print_no_matches(query: str, scripts: "Scripts") -> None:
-    console = get_console()
-    console.print(f"[yellow]No command matches[/yellow] [bold]{query}[/bold].")
+    ui.warn(f"No command matches {query}.")
     close = _core().closest_names(query, scripts)
     if close:
-        console.print(f"[dim]Did you mean: {', '.join(close)}?[/dim]")
+        ui.hint(f"Did you mean: {', '.join(close)}?")
     else:
-        console.print("[dim]Run [bold]usm list[/bold] to see everything.[/dim]")
+        ui.hint("Run usm list to see everything.")
 
 
 def print_unknown_command(command: str, scripts: "Scripts") -> None:
-    console = get_console()
-    console.print(f"[bold red]Error:[/bold red] Unknown command '{command}'.")
+    ui.fail(f"Unknown command '{command}'.")
     close = _core().closest_names(command, scripts)
     if close:
-        console.print(f"[dim]Did you mean: {', '.join(close)}?[/dim]")
-    console.print(
-        "[dim]Run [bold]usm list[/bold] to see every command, or "
-        "[bold]usm search <query>[/bold] to look one up.[/dim]"
-    )
+        ui.hint(f"Did you mean: {', '.join(close)}?")
+    ui.hint("Run usm list to see every command, or usm search <query> to look one up.")
 
 
 def print_script_help(script: "Script") -> None:
-    console = get_console()
-    header = f"[bold cyan]{script.name}[/bold cyan]"
-    if script.version:
-        header += f" [dim]v{script.version}[/dim]"
-    console.print(f"{header}  {script.description}")
-    console.print(f"\n[bold]Usage[/bold]\n  usm {script.name} [ARGS...]")
+    ui.title(script.name, subtitle=script.description)
+    rows = [("usage", f"usm {script.name} [ARGS...]")]
     if script.requirements:
-        console.print(
-            "\n[bold]Requirements[/bold] [dim](installed on first run via "
-            "uv)[/dim]\n  " + ", ".join(script.requirements)
-        )
+        rows.append(("requirements", ", ".join(script.requirements)))
     if script.modules:
-        console.print("\n[bold]Shared modules[/bold]\n  " + ", ".join(script.modules))
+        rows.append(("shared modules", ", ".join(script.modules)))
     if script.python:
-        console.print(f"\n[bold]Python[/bold]\n  {script.python}")
-    state = "cached" if script.cached_path.exists() else "not downloaded yet"
-    console.print(f"\n[dim]{state} · {script.cached_path}[/dim]")
+        rows.append(("python", script.python))
+    rows.append(
+        (
+            "state",
+            ui.joined(
+                "cached" if script.cached_path.exists() else "not downloaded yet",
+                ui.shorten_path(script.cached_path),
+            ),
+        )
+    )
+    ui.print()
+    ui.print_detail(rows)
 
 
 # -- update diffs -----------------------------------------------------------
@@ -219,26 +209,25 @@ def change_row(c: "CatalogChange") -> tuple[str, str, str]:
 
 
 def changes_table(title: str):
-    table = _table(title=title)
-    table.add_column("script", style="bold cyan", no_wrap=True)
-    table.add_column("version")
-    table.add_column("hash")
-    return table
+    return ui.table(
+        ui.Column("script", style=ui.STYLE_ID, min_width=6),
+        ui.Column("version", min_width=12),
+        ui.Column("hash", min_width=10, hide_below=70),
+        title=title,
+    )
 
 
 def print_catalog_changes(changes: "list[CatalogChange]", *, cold: bool) -> None:
     if not changes:
-        console.print("[green]✓[/green] Catalog is up to date.")
+        ui.ok("Catalog is up to date.")
         return
     if cold:
-        console.print(
-            f"[green]✓[/green] Fetched catalog ([bold]{len(changes)}[/bold] scripts)."
-        )
+        ui.ok(f"Fetched catalog ({ui.plural(len(changes), 'script')}).")
         return
     table = changes_table(f"Catalog changes ({len(changes)})")
     for c in changes:
         table.add_row(*change_row(c))
-    get_console().print(table)
+    ui.print(table)
 
 
 def print_named_update(names: tuple[str, ...], changes: "list[CatalogChange]") -> None:
@@ -251,4 +240,4 @@ def print_named_update(names: tuple[str, ...], changes: "list[CatalogChange]") -
         else:
             version, h = meta.get(name, (None, None))
             table.add_row(name, version or "?", _core().short_hash(h))
-    get_console().print(table)
+    ui.print(table)

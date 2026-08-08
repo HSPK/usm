@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -40,14 +41,54 @@ def _env_python(env_dir: Path) -> Path:
     return env_dir / "bin" / "python"
 
 
-def _env_spec(script: Script) -> dict:
+def _local_usmo_root() -> Path | None:
+    """The usmo checkout we are running inside, if the cwd is one.
+
+    Used by ``--debug`` so a script that depends on ``usmo`` (for
+    :mod:`usmo.ui`) picks up the code being edited rather than the released
+    wheel — otherwise iterating on the shared UI would require a release.
+    """
+    root = Path.cwd()
+    pyproject = root / "pyproject.toml"
+    if not pyproject.exists():
+        return None
+    try:
+        text = pyproject.read_text()
+    except OSError:  # pragma: no cover - unreadable cwd
+        return None
+    return root if 'name = "usmo"' in text else None
+
+
+def resolve_requirements(script: Script, *, debug: bool = False) -> list[str]:
+    """Install arguments for this script's requirements.
+
+    In ``--debug`` a dependency on ``usmo`` becomes an *editable* install of
+    the checkout we are running inside, so edits to the shared UI take effect
+    without rebuilding the venv (or cutting a release).
+    """
+    requirements = list(script.requirements)
+    if not debug:
+        return requirements
+    root = _local_usmo_root()
+    if root is None:
+        return requirements
+    args: list[str] = []
+    for spec in requirements:
+        if re.match(r"usmo(\W|$)", spec):
+            args += ["--editable", str(root)]
+        else:
+            args.append(spec)
+    return args
+
+
+def _env_spec(script: Script, *, debug: bool = False) -> dict:
     return {
-        "requirements": list(script.requirements),
+        "requirements": resolve_requirements(script, debug=debug),
         "python": script.interpreter_version(),
     }
 
 
-def env_ready(script: Script) -> bool:
+def env_ready(script: Script, *, debug: bool = False) -> bool:
     """True if the script's venv exists and matches its current requirements."""
     if not script.uses_uv:
         return True
@@ -58,10 +99,12 @@ def env_ready(script: Script) -> bool:
         marker = json.loads((script.env_dir / ENV_MARKER_NAME).read_text())
     except (OSError, json.JSONDecodeError):
         return False
-    return marker == _env_spec(script)
+    return marker == _env_spec(script, debug=debug)
 
 
-def _build_env(script: Script, *, on_progress: ProgressHook = _null_hook) -> Path:
+def _build_env(
+    script: Script, *, debug: bool = False, on_progress: ProgressHook = _null_hook
+) -> Path:
     """Create the script's venv and install its requirements (needs network once)."""
     env_dir = script.env_dir
     on_progress(script.name)
@@ -82,7 +125,7 @@ def _build_env(script: Script, *, on_progress: ProgressHook = _null_hook) -> Pat
                 "install",
                 "--python",
                 str(_env_python(env_dir)),
-                *script.requirements,
+                *resolve_requirements(script, debug=debug),
             ],
             check=True,
             capture_output=True,
@@ -92,7 +135,7 @@ def _build_env(script: Script, *, on_progress: ProgressHook = _null_hook) -> Pat
         shutil.rmtree(env_dir, ignore_errors=True)
         detail = (exc.stderr or exc.stdout or str(exc)).strip()
         raise EnvBuildError(script.name, detail) from exc
-    (env_dir / ENV_MARKER_NAME).write_text(json.dumps(_env_spec(script)))
+    (env_dir / ENV_MARKER_NAME).write_text(json.dumps(_env_spec(script, debug=debug)))
     return _env_python(env_dir)
 
 
@@ -100,6 +143,7 @@ def ensure_env(
     script: Script,
     *,
     upgrade: bool = False,
+    debug: bool = False,
     on_progress: ProgressHook = _null_hook,
 ) -> str:
     """Return a Python executable that satisfies *script*'s requirements.
@@ -116,9 +160,9 @@ def ensure_env(
         return sys.executable
     if not shutil.which("uv"):
         raise MissingUv(script.requirements)
-    if not upgrade and env_ready(script):
+    if not upgrade and env_ready(script, debug=debug):
         return str(_env_python(script.env_dir))
-    return str(_build_env(script, on_progress=on_progress))
+    return str(_build_env(script, debug=debug, on_progress=on_progress))
 
 
 def run_script(
@@ -139,6 +183,6 @@ def run_script(
     script_path = resolve_script_path(
         script, debug=debug, upgrade=upgrade, on_progress=on_progress
     )
-    python = ensure_env(script, upgrade=upgrade, on_progress=on_setup)
+    python = ensure_env(script, upgrade=upgrade, debug=debug, on_progress=on_setup)
     argv = script.build_argv(script_path, args, python=python)
     subprocess.run(argv, check=True, text=True)

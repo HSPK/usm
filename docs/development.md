@@ -59,6 +59,11 @@ pre-commit run --all-files
    Only `path` is required; `description` shows up in `usm list`;
    `requirements` are installed once into a persistent per-script venv.
 
+   Add `usmo` to `requirements` to use the shared
+   [design system](design-system.md) (`from usmo.ui import ok, table, ...`)
+   so the command matches the rest of the family. In `--debug`, usm installs
+   the checkout you're standing in *editably*, so UI changes are live.
+
    A Python script can share code with another by declaring `modules`:
 
    ```json

@@ -1,50 +1,38 @@
-"""Shared console and progress hooks for the CLI (the only output sink).
+"""Progress hooks for the CLI.
 
-``rich`` costs ~16ms to import, a large slice of a CLI that should feel
-instant, so the console is built on first use rather than at import time.
-An invocation that only *runs* a script never pays for it.
+Rendering lives in :mod:`usmo.ui`, the design system shared with every script;
+this module only holds the two catalog progress callbacks and the legacy
+``console`` name.
 """
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
-if TYPE_CHECKING:  # pragma: no cover - typing only
-    from rich.console import Console as RichConsole
-
-_console: Any = None
+from usmo import ui
 
 
-def get_console() -> "RichConsole":
-    """Return the shared console, importing rich on first use."""
-    global _console
-    if _console is None:
-        from rich.console import Console
-
-        _console = Console()
-    return _console
+def get_console():
+    """The shared console (rich is imported on first use)."""
+    return ui.console()
 
 
 class _LazyConsole:
-    """Forwards to the real console the first time something is printed.
-
-    Lets callers keep ``console.print(...)`` at module scope without dragging
-    rich into every ``usm`` invocation.
-    """
+    """Forwards to the real console the first time something is printed."""
 
     def __getattr__(self, name: str) -> Any:
-        return getattr(get_console(), name)
+        return getattr(ui.console(), name)
 
 
 console = _LazyConsole()
 
 
 def on_download(filename: str) -> None:
-    get_console().print(f"[bold green]Downloading:[/bold green] {filename}")
+    ui.step(f"downloading {ui.identifier(filename)}")
 
 
 def on_env_build(name: str) -> None:
-    get_console().print(
-        f"[bold yellow]usm:[/bold yellow] preparing environment for "
-        f"[bold]{name}[/bold] (one-time; needs network)…"
+    ui.step(
+        f"preparing environment for {ui.identifier(name)} "
+        f"{ui.muted('(one-time; needs network)')}"
     )

@@ -10,7 +10,9 @@ from __future__ import annotations
 
 import click
 
-from .output import console, on_download
+from usmo import ui
+
+from .output import on_download
 
 CONTEXT = {"help_option_names": ["-h", "--help"]}
 
@@ -127,8 +129,8 @@ def cmd_update(ctx, names, all_scripts):
                 )
             )
         except core.UnknownCommand as exc:
-            console.print(f"[bold red]Error:[/bold red] Unknown command '{exc.name}'.")
-            console.print(f"Available: {', '.join(exc.available)}")
+            ui.fail(f"Unknown command '{exc.name}'.")
+            ui.hint(f"Available: {', '.join(exc.available)}")
             raise click.ClickException(str(exc)) from exc
         except core.DownloadError as exc:
             raise click.ClickException(str(exc)) from exc
@@ -138,9 +140,7 @@ def cmd_update(ctx, names, all_scripts):
     presenters.print_catalog_changes(changes, cold=not had_cache)
     if not all_scripts:
         if changes and had_cache:
-            console.print(
-                "[dim]Run [bold]usm update --all[/bold] to pull the new scripts.[/dim]"
-            )
+            ui.hint("Run usm update --all to pull the new scripts.")
         return
 
     try:
@@ -151,11 +151,9 @@ def cmd_update(ctx, names, all_scripts):
         raise click.ClickException(str(exc)) from exc
     pulled = [n for n, updated in results if updated]
     if pulled:
-        console.print(
-            f"[green]✓[/green] Pulled [bold]{len(pulled)}[/bold] cached script(s)."
-        )
+        ui.ok(f"Pulled {ui.plural(len(pulled), 'cached script')}.")
     else:
-        console.print("[dim]No cached scripts to pull.[/dim]")
+        ui.hint("No cached scripts to pull.")
 
 
 @click.command(
@@ -172,33 +170,33 @@ def cmd_install(ctx, script, alias):
     core, _ = _core(), None
     scripts = load_scripts(**_flags(ctx))
     if script not in scripts:
-        console.print(f"[bold red]Error:[/bold red] Unknown script '{script}'.")
+        ui.fail(f"Unknown script '{script}'.")
         close = core.closest_names(script, scripts)
         if close:
-            console.print(f"[dim]Did you mean: {', '.join(close)}?[/dim]")
+            ui.hint(f"Did you mean: {', '.join(close)}?")
         raise click.ClickException(f"Unknown script '{script}'.")
 
     path, status = core.alias_status(alias)
     if status == "foreign":
-        console.print(f"[yellow]{path} already exists and is not a usm alias.[/yellow]")
+        ui.warn(f"{path} already exists and is not a usm alias.")
         if not click.confirm("Overwrite it?", default=False):
             raise click.ClickException("aborted.")
 
     usm_bin = shutil.which("usm") or sys.argv[0]
     core.install_alias(script, alias, usm_bin=usm_bin)
     verb = "Updated" if status == "ours" else "Installed"
-    console.print(
-        f"[bold green]{verb}:[/bold green] [bold]{alias}[/bold] → usm {script}  "
-        f"[dim]({path})[/dim]"
+    ui.ok(
+        f"{verb} {ui.identifier(alias)} {ui.STEP} usm {script}  "
+        f"{ui.muted(ui.shorten_path(path))}"
     )
     if not core.local_bin_in_path():
-        console.print(
-            f"[yellow]note:[/yellow] {core.LOCAL_BIN_DIR} is not on your PATH. "
+        ui.warn(
+            f"{ui.shorten_path(core.LOCAL_BIN_DIR)} is not on your PATH. "
             "Add it so the alias is found:"
         )
-        console.print(
-            '  [bold]export PATH="$HOME/.local/bin:$PATH"[/bold] '
-            "[dim](append to ~/.bashrc or ~/.zshrc, then restart the shell)[/dim]"
+        ui.hint(
+            '  export PATH="$HOME/.local/bin:$PATH"   '
+            "(append to ~/.bashrc or ~/.zshrc, then restart the shell)"
         )
 
 
@@ -216,11 +214,9 @@ def cmd_uninstall(alias):
             f"{exc.path} is not a usm-managed alias; not removing it."
         ) from exc
     if removed is None:
-        console.print(f"[dim]No usm alias '{alias}' in {core.LOCAL_BIN_DIR}.[/dim]")
+        ui.hint(f"No usm alias '{alias}' in {ui.shorten_path(core.LOCAL_BIN_DIR)}.")
     else:
-        console.print(
-            f"[bold green]Removed:[/bold green] {alias} [dim]({removed})[/dim]"
-        )
+        ui.ok(f"Removed {ui.identifier(alias)}  {ui.muted(ui.shorten_path(removed))}")
 
 
 @click.command("clean", context_settings=CONTEXT, short_help="Remove the script cache.")
@@ -228,19 +224,15 @@ def cmd_clean():
     """Delete cached scripts and their virtualenvs."""
     removed = _core().clean_cache()
     if removed:
-        console.print(
-            "[bold green]Removed[/bold green] cached scripts and environments."
-        )
+        ui.ok("Removed cached scripts and environments.")
     else:
-        console.print(
-            "[dim]Nothing to clean – no cached scripts or environments.[/dim]"
-        )
+        ui.hint("Nothing to clean - no cached scripts or environments.")
 
 
 @click.command("version", context_settings=CONTEXT, short_help="Show the usm version.")
 def cmd_version():
     """Print the installed usm version."""
-    console.print(f"[bold]usm[/bold] version {_core().resolve_version()}")
+    ui.print(f"usm version {_core().resolve_version()}")
 
 
 COMMANDS: dict[str, click.Command] = {
