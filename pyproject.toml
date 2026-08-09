@@ -36,6 +36,7 @@ dev = [
     "starlette>=0.36.0",
     "uvicorn>=0.30.0",
     "watchdog>=4.0.0",
+    "websockets>=14.0",
 ]
 docs = [
     "mkdocs>=1.6",

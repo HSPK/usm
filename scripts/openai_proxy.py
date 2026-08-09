@@ -9,9 +9,10 @@ Endpoints
 ---------
 * GET  /health          liveness probe (no auth)
 * GET  /status          configured upstream + api-version + api-key state
-* POST /v1/responses    OpenAI Responses API, emulated over chat completions
+* POST /v1/responses    OpenAI Responses API, auto-routed native/translated
 * POST /v1/messages     Anthropic Messages API, emulated over chat completions
-* *    /v1/<...>        proxied to TRAPI (all OpenAI-compatible paths)
+* WS   /v1/realtime     OpenAI Realtime API, bidirectionally proxied
+* *    /v1/<...>        OpenAI-compatible HTTP paths proxied to TRAPI
 * OPT  /<...>           CORS preflight
 """
 
@@ -19,23 +20,32 @@ from __future__ import annotations
 
 import asyncio
 import json
+import random
 import re
 import sys
 import time
 import urllib.parse
 import uuid
+from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
-from typing import Any, Awaitable, Callable
+from email import policy
+from email.message import Message
+from email.parser import BytesHeaderParser
+from email.utils import parsedate_to_datetime
+from typing import Any
 
 import click
 import httpx
 import uvicorn
+import websockets
 from starlette.applications import Starlette
 from starlette.background import BackgroundTask
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response, StreamingResponse
-from starlette.routing import Route
+from starlette.routing import Route, WebSocketRoute
+from starlette.websockets import WebSocket
+from websockets.exceptions import InvalidStatus
 
 SCOPE = "api://trapi/.default"
 
@@ -64,10 +74,28 @@ HOP_RES = {
     "trailer",
     "upgrade",
 }
+HOP_WS_REQ = HOP_REQ | {
+    "origin",
+    "sec-websocket-extensions",
+    "sec-websocket-key",
+    "sec-websocket-protocol",
+    "sec-websocket-version",
+    "user-agent",
+}
 # OpenAI paths that map directly under /openai/... (no deployment segment).
 NO_DEPLOY = ("/models", "/files", "/fine_tuning", "/batches", "/threads", "/assistants")
+# TRAPI routes these APIs from the model in the body/query rather than from
+# an Azure-style deployment path.
+NATIVE_V1 = ("/audio/speech", "/images/edits", "/videos")
+MAX_MULTIPART_HEADER = 64 * 1024
+MAX_MODEL_LENGTH = 1024
+MAX_VIDEO_MODELS = 1024
+DEFAULT_429_RETRIES = 2
+DEFAULT_429_MAX_WAIT = 30.0
+MODEL_CAPABILITY_TTL = 300.0
 
 AsyncTokenProvider = Callable[[], Awaitable[str]]
+AsyncSleeper = Callable[[float], Awaitable[None]]
 
 
 # Pure helpers (unit-tested) -----------------------------------------------
@@ -105,6 +133,240 @@ def resolve_url(
         return None
     query.setdefault("api-version", api_version)
     return url + "?" + urllib.parse.urlencode(query)
+
+
+def resolve_native_responses_url(path_qs: str, base: str) -> str | None:
+    """Map a proxied Responses path to TRAPI's native OpenAI-v1 endpoint.
+
+    TRAPI's native Responses API is model-routed by the JSON body:
+
+        <instance>/openai/v1/responses
+
+    It is not an Azure deployment-scoped endpoint.  Sending it through
+    :func:`resolve_url` would incorrectly produce
+    ``/deployments/<model>/responses?api-version=...`` and return 404.
+    Both root-style and ``/v1`` client base URLs are accepted.
+    """
+    parts = urllib.parse.urlsplit(path_qs)
+    path = parts.path or "/"
+    decoded_parts = urllib.parse.unquote(path).split("/")
+    if ".." in decoded_parts:
+        return None
+    if path == "/responses" or path.startswith("/responses/"):
+        path = "/v1" + path
+    elif path != "/v1/responses" and not path.startswith("/v1/responses/"):
+        return None
+    query = f"?{parts.query}" if parts.query else ""
+    return f"{base}{path}{query}"
+
+
+def resolve_native_api_url(path_qs: str, base: str) -> str | None:
+    """Map TRAPI's body-routed media APIs to their native OpenAI-v1 URL."""
+    parts = urllib.parse.urlsplit(path_qs)
+    path = parts.path or "/"
+    if ".." in urllib.parse.unquote(path).split("/"):
+        return None
+    if path.startswith("/v1/"):
+        path = path[3:]
+    if not any(path == prefix or path.startswith(prefix + "/") for prefix in NATIVE_V1):
+        return None
+    query = f"?{parts.query}" if parts.query else ""
+    return f"{base}/v1{path}{query}"
+
+
+def resolve_realtime_url(
+    path_qs: str, base: str, default_dep: str | None
+) -> str | None:
+    """Build the native TRAPI WebSocket URL for an OpenAI realtime client."""
+    parts = urllib.parse.urlsplit(path_qs)
+    path = parts.path or "/"
+    if ".." in urllib.parse.unquote(path).split("/"):
+        return None
+    if path == "/realtime":
+        path = "/v1/realtime"
+    elif path != "/v1/realtime":
+        return None
+    query = dict(urllib.parse.parse_qsl(parts.query, keep_blank_values=True))
+    model = query.get("model") or query.get("deployment") or default_dep
+    if not model:
+        return None
+    query.setdefault("model", model)
+    target = urllib.parse.urlsplit(base)
+    scheme = "wss" if target.scheme == "https" else "ws"
+    return urllib.parse.urlunsplit(
+        (
+            scheme,
+            target.netloc,
+            target.path.rstrip("/") + path,
+            urllib.parse.urlencode(query),
+            "",
+        )
+    )
+
+
+def resolve_chat_url(
+    payload: Any, base: str, api_version: str, default_dep: str | None
+) -> str | None:
+    """Resolve a translated chat request to the usable TRAPI route.
+
+    Deployment-scoped URLs cannot represent catalogue ids containing ``/``
+    (for example ``Qwen/Qwen3.5-27B``): percent-encoding the slash still
+    reaches TRAPI as a path separator and returns 404.  Those models use the
+    native body-routed OpenAI-v1 endpoint instead.  Existing deployment ids
+    keep the established Azure-style route.
+    """
+    model = payload.get("model") if isinstance(payload, dict) else None
+    model = model if isinstance(model, str) else default_dep
+    if isinstance(model, str) and "/" in model:
+        return f"{base}/v1/chat/completions"
+    return resolve_url("/v1/chat/completions", payload, base, api_version, default_dep)
+
+
+def _multipart_model(raw: bytes, content_type: str) -> str | None:
+    """Read only the small ``model`` field from a multipart request body."""
+    mime = Message()
+    mime["content-type"] = content_type
+    boundary = mime.get_boundary()
+    if not boundary or len(boundary) > 200:
+        return None
+    try:
+        marker = b"--" + boundary.encode("ascii")
+    except UnicodeEncodeError:
+        return None
+
+    cursor = 0
+    while True:
+        part = raw.find(marker, cursor)
+        if part < 0:
+            return None
+        part += len(marker)
+        if raw[part : part + 2] == b"--":
+            return None
+        if raw[part : part + 2] == b"\r\n":
+            part += 2
+        header_end = raw.find(b"\r\n\r\n", part)
+        if header_end < 0:
+            return None
+        if header_end - part > MAX_MULTIPART_HEADER:
+            cursor = header_end + 4
+            continue
+
+        headers = BytesHeaderParser(policy=policy.default).parsebytes(
+            raw[part:header_end] + b"\r\n\r\n"
+        )
+        value_start = header_end + 4
+        next_part = raw.find(b"\r\n" + marker, value_start)
+        if next_part < 0:
+            return None
+        if (
+            headers.get_content_disposition() == "form-data"
+            and headers.get_param("name", header="content-disposition") == "model"
+        ):
+            value = raw[value_start:next_part]
+            if not value or len(value) > MAX_MODEL_LENGTH:
+                return None
+            try:
+                model = value.decode("utf-8").strip()
+            except UnicodeDecodeError:
+                return None
+            return model or None
+        cursor = next_part + 2
+
+
+def parse_body_metadata(raw: bytes, content_type: str) -> Any:
+    """Parse routing fields without decoding uploaded audio/image files."""
+    if not raw:
+        return None
+    try:
+        return json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        pass
+
+    media_type = content_type.partition(";")[0].strip().lower()
+    model = None
+    if media_type == "application/x-www-form-urlencoded":
+        try:
+            fields = urllib.parse.parse_qs(
+                raw.decode("utf-8"), keep_blank_values=True, strict_parsing=False
+            )
+        except UnicodeDecodeError:
+            return None
+        values = fields.get("model")
+        model = values[0] if values else None
+    elif media_type == "multipart/form-data":
+        model = _multipart_model(raw, content_type)
+    return {"model": model} if model else None
+
+
+def retry_after_seconds(
+    headers: Any,
+    body: bytes | str = b"",
+    *,
+    retry_number: int = 1,
+    now: float | None = None,
+) -> float:
+    """Return the upstream-requested delay, or bounded exponential fallback."""
+    values = {str(key).lower(): str(value).strip() for key, value in headers.items()}
+    current_time = time.time() if now is None else now
+
+    retry_after = values.get("retry-after")
+    if retry_after:
+        try:
+            return max(0.0, float(retry_after))
+        except ValueError:
+            try:
+                return max(
+                    0.0, parsedate_to_datetime(retry_after).timestamp() - current_time
+                )
+            except (TypeError, ValueError, OverflowError):
+                pass
+
+    retry_ms = values.get("x-ms-retry-after-ms") or values.get("retry-after-ms")
+    if retry_ms:
+        try:
+            return max(0.0, float(retry_ms) / 1000.0)
+        except ValueError:
+            pass
+
+    resets = []
+    for name in ("x-ratelimit-reset-requests", "x-ratelimit-reset-tokens"):
+        value = values.get(name)
+        if value:
+            delay = _duration_seconds(value, current_time)
+            if delay is not None:
+                resets.append(delay)
+    if resets:
+        return max(resets)
+
+    text = body.decode(errors="replace") if isinstance(body, bytes) else body
+    match = re.search(
+        r"retry\s+after\s+(\d+(?:\.\d+)?)\s*(milliseconds?|ms|seconds?|s)?",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if match:
+        delay = float(match.group(1))
+        if (match.group(2) or "").lower().startswith(("milli", "ms")):
+            delay /= 1000.0
+        return max(0.0, delay)
+
+    return min(2.0 ** max(0, retry_number - 1), 8.0)
+
+
+def _duration_seconds(value: str, now: float) -> float | None:
+    value = value.strip().lower()
+    try:
+        number = float(value)
+    except ValueError:
+        number = None
+    if number is not None:
+        return max(0.0, number - now) if number > 1_000_000_000 else max(0.0, number)
+
+    units = {"ms": 0.001, "s": 1.0, "m": 60.0, "h": 3600.0}
+    matches = list(re.finditer(r"(\d+(?:\.\d+)?)(ms|s|m|h)", value))
+    if not matches or "".join(match.group(0) for match in matches) != value:
+        return None
+    return sum(float(match.group(1)) * units[match.group(2)] for match in matches)
 
 
 def check_api_key(headers, expected: str | None) -> bool:
@@ -297,11 +559,13 @@ def token_limit_field(model: str | None, override: str | None = None) -> str:
 
 # -- upstream parameter negotiation ----------------------------------------
 
-_USE_INSTEAD_RE = re.compile(r"use\s+['\"]?([a-z_][a-z0-9_]*)['\"]?\s+instead", re.I)
+_USE_INSTEAD_RE = re.compile(
+    r"use\s+['\"]?([a-z_][a-z0-9_]*)['\"]?\s+instead", re.IGNORECASE
+)
 _BAD_PARAM_RE = re.compile(
     r"(?:unsupported|unrecognized|unknown|invalid|not\s+supported)"
     r"[^:]{0,60}[:\s]\s*['\"]?([a-z_][a-z0-9_.]*)['\"]?",
-    re.I,
+    re.IGNORECASE,
 )
 
 
@@ -1844,7 +2108,12 @@ def openai_models_to_anthropic(payload: Any) -> dict:
 
 
 def _json_error(
-    status: int, code: str, message: str, *, param: str | None = None
+    status: int,
+    code: str,
+    message: str,
+    *,
+    param: str | None = None,
+    headers: dict | None = None,
 ) -> JSONResponse:
     return JSONResponse(
         {
@@ -1856,6 +2125,7 @@ def _json_error(
             }
         },
         status_code=status,
+        headers=headers,
     )
 
 
@@ -1872,9 +2142,11 @@ async def status_endpoint(request: Request) -> JSONResponse:
             "api_version": cfg["api_version"],
             "default_deployment": cfg["default_dep"],
             "api_key_required": cfg["api_key"] is not None,
-            "responses_mode": cfg.get("responses_mode", "translate"),
+            "responses_mode": cfg.get("responses_mode", "auto"),
             "anthropic_mode": cfg.get("anthropic_mode", "translate"),
             "token_limit_field": cfg.get("token_field") or "auto",
+            "retry_429": cfg.get("retry_429", DEFAULT_429_RETRIES),
+            "retry_max_wait": cfg.get("retry_max_wait", DEFAULT_429_MAX_WAIT),
         }
     )
 
@@ -1892,6 +2164,30 @@ async def options_preflight(request: Request) -> Response:
     )
 
 
+def _video_resource_id(path: str) -> str | None:
+    if path.startswith("/v1/"):
+        path = path[3:]
+    parts = path.strip("/").split("/")
+    return parts[1] if len(parts) > 1 and parts[0] == "videos" else None
+
+
+def _with_query_model(path_qs: str, model: str) -> str:
+    parts = urllib.parse.urlsplit(path_qs)
+    query = dict(urllib.parse.parse_qsl(parts.query, keep_blank_values=True))
+    query.setdefault("model", model)
+    return urllib.parse.urlunsplit(
+        ("", "", parts.path, urllib.parse.urlencode(query), "")
+    )
+
+
+def _remember_video_model(state: Any, video_id: str, model: str) -> None:
+    models = state.video_models
+    models.pop(video_id, None)
+    models[video_id] = model
+    if len(models) > MAX_VIDEO_MODELS:
+        models.pop(next(iter(models)))
+
+
 async def proxy(request: Request) -> Response:
     state = request.app.state
     cfg = state.cfg
@@ -1900,17 +2196,47 @@ async def proxy(request: Request) -> Response:
     if not check_api_key(request.headers, cfg["api_key"]):
         return _json_error(401, "invalid_api_key", "Missing or invalid API key.")
 
-    try:
-        body_obj = json.loads(raw) if raw else None
-    except (UnicodeDecodeError, json.JSONDecodeError):
-        body_obj = None
+    body_obj = parse_body_metadata(raw, request.headers.get("content-type", ""))
 
     path_qs = request.url.path + (
         ("?" + request.url.query) if request.url.query else ""
     )
-    url = resolve_url(
-        path_qs, body_obj, cfg["base"], cfg["api_version"], cfg["default_dep"]
-    )
+    video_id = _video_resource_id(request.url.path)
+    query = dict(urllib.parse.parse_qsl(request.url.query, keep_blank_values=True))
+    video_model = query.get("model") or query.get("deployment")
+    if video_id and not video_model:
+        video_model = state.video_models.get(video_id) or cfg["default_dep"]
+        if not video_model:
+            return _json_error(
+                400,
+                "missing_model",
+                "Video retrieval requires the creating proxy process, a "
+                "'model' query parameter, or --deployment.",
+                param="model",
+            )
+        path_qs = _with_query_model(path_qs, video_model)
+    if video_id and video_model:
+        _remember_video_model(state, video_id, video_model)
+
+    url = None
+    if cfg.get("responses_mode", "auto") in ("auto", "passthrough"):
+        url = resolve_native_responses_url(path_qs, cfg["base"])
+        if (
+            url is not None
+            and request.method == "POST"
+            and request.url.path.rstrip("/") in ("/responses", "/v1/responses")
+            and isinstance(body_obj, dict)
+            and not body_obj.get("model")
+            and cfg["default_dep"]
+        ):
+            body_obj = {**body_obj, "model": cfg["default_dep"]}
+            raw = json.dumps(body_obj, ensure_ascii=False).encode()
+    if url is None:
+        url = resolve_native_api_url(path_qs, cfg["base"])
+    if url is None:
+        url = resolve_url(
+            path_qs, body_obj, cfg["base"], cfg["api_version"], cfg["default_dep"]
+        )
     if url is None:
         return _json_error(
             400,
@@ -1921,26 +2247,49 @@ async def proxy(request: Request) -> Response:
     headers = {k: v for k, v in request.headers.items() if k.lower() not in HOP_REQ}
     try:
         headers["Authorization"] = "Bearer " + await state.token_provider()
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001
         return _json_error(500, "auth_failed", f"Token error: {exc}")
 
     try:
-        upstream_req = state.client.build_request(
+        upstream_resp = await _send_http_with_retry(
+            state,
             request.method,
             url,
             content=raw or None,
             headers=headers,
         )
-        upstream_resp = await state.client.send(upstream_req, stream=True)
     except httpx.HTTPError as exc:
         return _json_error(502, "upstream_unreachable", str(exc))
 
-    response_headers = {
-        k: v for k, v in upstream_resp.headers.items() if k.lower() not in HOP_RES
-    }
+    response_headers = _response_headers(upstream_resp)
     if "text/event-stream" in (upstream_resp.headers.get("content-type") or "").lower():
         response_headers["Cache-Control"] = "no-cache"
         response_headers["X-Accel-Buffering"] = "no"
+
+    if request.method == "POST" and request.url.path.rstrip("/") in (
+        "/videos",
+        "/v1/videos",
+    ):
+        body = await _drain(upstream_resp)
+        if upstream_resp.status_code < 300:
+            try:
+                video = json.loads(body)
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                video = None
+            model = video.get("model") if isinstance(video, dict) else None
+            video_id = video.get("id") if isinstance(video, dict) else None
+            if not isinstance(model, str) and isinstance(body_obj, dict):
+                model = body_obj.get("model")
+            if isinstance(video_id, str) and isinstance(model, str):
+                _remember_video_model(state, video_id, model)
+        return Response(
+            content=body,
+            status_code=upstream_resp.status_code,
+            headers=response_headers,
+        )
+
+    if request.method == "DELETE" and video_id and upstream_resp.status_code < 300:
+        state.video_models.pop(video_id, None)
 
     return StreamingResponse(
         upstream_resp.aiter_raw(),
@@ -1953,6 +2302,11 @@ async def proxy(request: Request) -> Response:
 # Shared transport for the translating endpoints ---------------------------
 
 
+def _response_headers(resp: httpx.Response) -> dict[str, str]:
+    """Headers safe to relay from an upstream response."""
+    return {k: v for k, v in resp.headers.items() if k.lower() not in HOP_RES}
+
+
 async def _drain(resp: httpx.Response) -> bytes:
     try:
         return await resp.aread()
@@ -1960,23 +2314,189 @@ async def _drain(resp: httpx.Response) -> bytes:
         await resp.aclose()
 
 
+class _ReplayStream(httpx.AsyncByteStream):
+    def __init__(self, body: bytes) -> None:
+        self.body = body
+
+    async def __aiter__(self):
+        yield self.body
+
+
+def _buffered_response(resp: httpx.Response, body: bytes) -> httpx.Response:
+    return httpx.Response(
+        status_code=resp.status_code,
+        headers=resp.headers,
+        stream=_ReplayStream(body),
+        request=resp.request,
+        extensions=resp.extensions,
+    )
+
+
+async def _wait_for_rate_limit(
+    state: Any,
+    headers: Any,
+    body: bytes,
+    *,
+    retry_number: int,
+    waited: float,
+) -> float | None:
+    cfg = state.cfg
+    delay = retry_after_seconds(
+        headers,
+        body,
+        retry_number=retry_number,
+        now=state.retry_now(),
+    )
+    delay += min(1.0, delay * 0.1) * state.retry_random()
+    max_wait = max(0.0, float(cfg.get("retry_max_wait", DEFAULT_429_MAX_WAIT)))
+    if waited + delay > max_wait:
+        return None
+    click.echo(
+        f"upstream returned 429; retrying in {delay:.3g}s "
+        f"({retry_number}/{cfg.get('retry_429', DEFAULT_429_RETRIES)})",
+        err=True,
+    )
+    await state.retry_sleep(delay)
+    return waited + delay
+
+
+async def _send_http_with_retry(
+    state: Any,
+    method: str,
+    url: str,
+    *,
+    content: bytes | None = None,
+    headers: dict | None = None,
+) -> httpx.Response:
+    """Send a replayable HTTP request and retry explicit 429 responses."""
+    retries = max(0, int(state.cfg.get("retry_429", DEFAULT_429_RETRIES)))
+    waited = 0.0
+    for attempt in range(retries + 1):
+        request = state.client.build_request(
+            method,
+            url,
+            content=content,
+            headers=headers,
+        )
+        response = await state.client.send(request, stream=True)
+        if response.status_code != 429 or attempt >= retries:
+            return response
+
+        body = await _drain(response)
+        new_waited = await _wait_for_rate_limit(
+            state,
+            response.headers,
+            body,
+            retry_number=attempt + 1,
+            waited=waited,
+        )
+        if new_waited is None:
+            return _buffered_response(response, body)
+        waited = new_waited
+
+    raise RuntimeError("unreachable")  # pragma: no cover
+
+
+def _catalogue_responses_capabilities(payload: Any) -> dict[str, bool]:
+    entries = payload.get("data") if isinstance(payload, dict) else None
+    capabilities = {}
+    for entry in entries or []:
+        if not isinstance(entry, dict) or not isinstance(entry.get("id"), str):
+            continue
+        model_capabilities = entry.get("capabilities")
+        value = (
+            model_capabilities.get("responses")
+            if isinstance(model_capabilities, dict)
+            else False
+        )
+        capabilities[entry["id"]] = value is True or (
+            isinstance(value, str) and value.lower() == "true"
+        )
+    return capabilities
+
+
+async def _model_supports_responses(state: Any, model: str) -> bool:
+    """Read a model's native Responses capability from a short-lived cache."""
+    now = state.models_now()
+    if (
+        state.responses_capabilities is not None
+        and now < state.responses_capabilities_expires
+    ):
+        return state.responses_capabilities.get(model, False)
+
+    async with state.responses_capabilities_lock:
+        now = state.models_now()
+        if (
+            state.responses_capabilities is not None
+            and now < state.responses_capabilities_expires
+        ):
+            return state.responses_capabilities.get(model, False)
+
+        cfg = state.cfg
+        try:
+            token = await state.token_provider()
+            url = resolve_url(
+                "/v1/models",
+                None,
+                cfg["base"],
+                cfg["api_version"],
+                cfg["default_dep"],
+            )
+            upstream = await _send_http_with_retry(
+                state,
+                "GET",
+                url,
+                headers={"Authorization": "Bearer " + token},
+            )
+            body = await _drain(upstream)
+        except (httpx.HTTPError, OSError) as exc:
+            click.echo(
+                f"model capability refresh failed; using translate: {exc}", err=True
+            )
+            return False
+        except Exception as exc:  # noqa: BLE001
+            click.echo(
+                f"model capability refresh failed; using translate: {exc}", err=True
+            )
+            return False
+
+        if upstream.status_code >= 400:
+            click.echo(
+                f"model capability refresh returned HTTP {upstream.status_code}; "
+                "using translate",
+                err=True,
+            )
+            return False
+        try:
+            payload = json.loads(body)
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            click.echo(
+                "model capability refresh returned invalid JSON; using translate",
+                err=True,
+            )
+            return False
+
+        state.responses_capabilities = _catalogue_responses_capabilities(payload)
+        state.responses_capabilities_expires = now + MODEL_CAPABILITY_TTL
+        return state.responses_capabilities.get(model, False)
+
+
 async def _send_chat(state: Any, payload: dict, headers: dict) -> httpx.Response:
     """POST a translated chat-completions payload upstream (streaming read)."""
     cfg = state.cfg
-    url = resolve_url(
-        "/v1/chat/completions",
+    url = resolve_chat_url(
         payload,
         cfg["base"],
         cfg["api_version"],
         cfg["default_dep"],
     )
-    request = state.client.build_request(
+    return await _send_http_with_retry(
+        state,
         "POST",
         url,
         content=json.dumps(payload, ensure_ascii=False).encode(),
         headers=headers,
     )
-    return await state.client.send(request, stream=True)
 
 
 def _upstream_headers(
@@ -1999,6 +2519,7 @@ class UpstreamFailure:
     status: int
     body: bytes
     content_type: str
+    headers: dict[str, str] = field(default_factory=dict)
 
 
 async def _call_chat_with_retry(
@@ -2016,19 +2537,24 @@ async def _call_chat_with_retry(
         except httpx.HTTPError as exc:
             return None, UpstreamFailure(502, str(exc).encode(), "text/plain")
         if upstream.status_code == 400:
+            failure_headers = _response_headers(upstream)
             error_body = await _drain(upstream)
             retry = plan_retry(400, error_body.decode(errors="replace"), payload)
             if retry is None or attempt + 1 >= MAX_PARAM_RETRIES:
-                return None, UpstreamFailure(400, error_body, "application/json")
+                return None, UpstreamFailure(
+                    400, error_body, "application/json", failure_headers
+                )
             payload, note = retry
             click.echo(f"retrying chat completion with {note}", err=True)
             continue
         if upstream.status_code >= 400:
+            failure_headers = _response_headers(upstream)
             error_body = await _drain(upstream)
             return None, UpstreamFailure(
                 upstream.status_code,
                 error_body,
                 upstream.headers.get("content-type", "application/json"),
+                failure_headers,
             )
         return upstream, None
     # pragma: no cover - the loop always returns
@@ -2052,16 +2578,40 @@ async def _relay_translated_stream(upstream: httpx.Response, translator: Any):
         await upstream.aclose()
 
 
-def _sse_response(body: Any) -> StreamingResponse:
+def _sse_response(
+    body: Any, *, upstream_headers: dict[str, str] | None = None
+) -> StreamingResponse:
+    headers = dict(upstream_headers or {})
+    headers["Cache-Control"] = "no-cache"
+    headers["X-Accel-Buffering"] = "no"
     return StreamingResponse(
         body,
         status_code=200,
         media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        headers=headers,
     )
 
 
 # Responses API endpoint ---------------------------------------------------
+
+
+async def responses_auto(request: Request) -> Response:
+    """Use native Responses when the model catalogue advertises support."""
+    raw = await request.body()
+    cfg = request.app.state.cfg
+    if not check_api_key(request.headers, cfg["api_key"]):
+        return _json_error(401, "invalid_api_key", "Missing or invalid API key.")
+    try:
+        body = json.loads(raw) if raw else None
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return await responses(request)
+    model = body.get("model") if isinstance(body, dict) else None
+    model = model if isinstance(model, str) and model else cfg["default_dep"]
+    if isinstance(model, str) and await _model_supports_responses(
+        request.app.state, model
+    ):
+        return await proxy(request)
+    return await responses(request)
 
 
 async def responses(request: Request) -> Response:
@@ -2091,24 +2641,30 @@ async def responses(request: Request) -> Response:
 
     try:
         headers = _upstream_headers(request, await state.token_provider())
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001
         return _json_error(500, "auth_failed", f"Token error: {exc}")
 
     upstream, failure = await _call_chat_with_retry(state, plan.payload, headers)
     if failure is not None:
         if failure.status == 502:
             return _json_error(
-                502, "upstream_unreachable", failure.body.decode(errors="replace")
+                502,
+                "upstream_unreachable",
+                failure.body.decode(errors="replace"),
+                headers=failure.headers,
             )
         return Response(
             content=failure.body,
             status_code=failure.status,
             media_type=failure.content_type,
+            headers=failure.headers,
         )
 
+    response_headers = _response_headers(upstream)
     if plan.stream:
         return _sse_response(
-            _relay_translated_stream(upstream, ResponsesStreamTranslator(plan.echo))
+            _relay_translated_stream(upstream, ResponsesStreamTranslator(plan.echo)),
+            upstream_headers=response_headers,
         )
 
     completion = await _drain(upstream)
@@ -2119,7 +2675,9 @@ async def responses(request: Request) -> Response:
             502, "upstream_invalid_response", "Upstream returned non-JSON content."
         )
     try:
-        return JSONResponse(chat_to_responses(chat_obj, plan.echo))
+        return JSONResponse(
+            chat_to_responses(chat_obj, plan.echo), headers=response_headers
+        )
     except TranslationError as exc:
         return _json_error(502, "upstream_invalid_response", exc.message)
 
@@ -2147,7 +2705,11 @@ ANTHROPIC_DROP_HEADERS = frozenset(
 
 
 def _anthropic_error(
-    status: int, message: str, *, error_type: str | None = None
+    status: int,
+    message: str,
+    *,
+    error_type: str | None = None,
+    headers: dict | None = None,
 ) -> JSONResponse:
     return JSONResponse(
         {
@@ -2158,13 +2720,18 @@ def _anthropic_error(
             },
         },
         status_code=status,
+        headers=headers,
     )
 
 
 def _anthropic_upstream_error(failure: UpstreamFailure) -> Response:
     """Relay an upstream chat-completions failure in Anthropic's error shape."""
     _, message = _error_param(failure.body.decode(errors="replace"))
-    return _anthropic_error(failure.status, message or "Upstream request failed.")
+    return _anthropic_error(
+        failure.status,
+        message or "Upstream request failed.",
+        headers=failure.headers,
+    )
 
 
 async def _anthropic_prepare(
@@ -2194,7 +2761,7 @@ async def _anthropic_prepare(
         headers = _upstream_headers(
             request, await state.token_provider(), drop=ANTHROPIC_DROP_HEADERS
         )
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001
         return None, None, _anthropic_error(500, f"Token error: {exc}")
     return plan, headers, None
 
@@ -2211,9 +2778,11 @@ async def anthropic_messages(request: Request) -> Response:
     if failure is not None:
         return _anthropic_upstream_error(failure)
 
+    response_headers = _response_headers(upstream)
     if plan.stream:
         return _sse_response(
-            _relay_translated_stream(upstream, AnthropicStreamTranslator(plan.echo))
+            _relay_translated_stream(upstream, AnthropicStreamTranslator(plan.echo)),
+            upstream_headers=response_headers,
         )
 
     completion = await _drain(upstream)
@@ -2222,7 +2791,9 @@ async def anthropic_messages(request: Request) -> Response:
     except (UnicodeDecodeError, json.JSONDecodeError):
         return _anthropic_error(502, "Upstream returned non-JSON content.")
     try:
-        return JSONResponse(chat_to_anthropic_message(chat_obj, plan.echo))
+        return JSONResponse(
+            chat_to_anthropic_message(chat_obj, plan.echo), headers=response_headers
+        )
     except TranslationError as exc:
         return _anthropic_error(502, exc.message)
 
@@ -2248,12 +2819,15 @@ async def anthropic_count_tokens(request: Request) -> Response:
     if failure is not None:
         return _anthropic_upstream_error(failure)
 
+    response_headers = _response_headers(upstream)
     completion = await _drain(upstream)
     try:
         chat_obj = json.loads(completion)
     except (UnicodeDecodeError, json.JSONDecodeError):
         return _anthropic_error(502, "Upstream returned non-JSON content.")
-    return JSONResponse({"input_tokens": chat_usage(chat_obj)["prompt"]})
+    return JSONResponse(
+        {"input_tokens": chat_usage(chat_obj)["prompt"]}, headers=response_headers
+    )
 
 
 async def anthropic_models(request: Request) -> Response:
@@ -2266,22 +2840,25 @@ async def anthropic_models(request: Request) -> Response:
         headers = _upstream_headers(
             request, await state.token_provider(), drop=ANTHROPIC_DROP_HEADERS
         )
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001
         return _anthropic_error(500, f"Token error: {exc}")
 
     url = resolve_url(
         "/v1/models", None, cfg["base"], cfg["api_version"], cfg["default_dep"]
     )
     try:
-        upstream = await state.client.send(
-            state.client.build_request("GET", url, headers=headers), stream=True
-        )
+        upstream = await _send_http_with_retry(state, "GET", url, headers=headers)
     except httpx.HTTPError as exc:
         return _anthropic_error(502, str(exc))
+    response_headers = _response_headers(upstream)
     body = await _drain(upstream)
     if upstream.status_code >= 400:
         _, message = _error_param(body.decode(errors="replace"))
-        return _anthropic_error(upstream.status_code, message or "Upstream error.")
+        return _anthropic_error(
+            upstream.status_code,
+            message or "Upstream error.",
+            headers=response_headers,
+        )
     try:
         catalogue = openai_models_to_anthropic(json.loads(body))
     except (UnicodeDecodeError, json.JSONDecodeError):
@@ -2291,9 +2868,159 @@ async def anthropic_models(request: Request) -> Response:
     if model_id:
         for model in catalogue["data"]:
             if model["id"] == model_id:
-                return JSONResponse(model)
+                return JSONResponse(model, headers=response_headers)
         return _anthropic_error(404, f"Model {model_id!r} not found.")
-    return JSONResponse(catalogue)
+    return JSONResponse(catalogue, headers=response_headers)
+
+
+async def _close_websocket_error(
+    websocket: WebSocket, code: str, message: str, *, close_code: int = 1011
+) -> None:
+    await websocket.accept()
+    await websocket.send_json(
+        {
+            "type": "error",
+            "error": {
+                "type": "server_error",
+                "code": code,
+                "message": message,
+            },
+        }
+    )
+    await websocket.close(code=close_code)
+
+
+async def realtime_proxy(websocket: WebSocket) -> None:
+    """Bridge an OpenAI realtime WebSocket to TRAPI with AAD authentication."""
+    state = websocket.app.state
+    cfg = state.cfg
+    if not check_api_key(websocket.headers, cfg["api_key"]):
+        await websocket.close(code=1008, reason="Missing or invalid API key.")
+        return
+
+    path_qs = websocket.url.path + (
+        ("?" + websocket.url.query) if websocket.url.query else ""
+    )
+    url = resolve_realtime_url(path_qs, cfg["base"], cfg["default_dep"])
+    if url is None:
+        await _close_websocket_error(
+            websocket,
+            "missing_model",
+            "Realtime connections require a 'model' query parameter or --deployment.",
+            close_code=1008,
+        )
+        return
+
+    try:
+        token = await state.token_provider()
+    except Exception as exc:  # noqa: BLE001
+        await _close_websocket_error(websocket, "auth_failed", f"Token error: {exc}")
+        return
+
+    headers = {
+        key: value
+        for key, value in websocket.headers.items()
+        if key.lower() not in HOP_WS_REQ
+    }
+    headers["Authorization"] = "Bearer " + token
+    protocols = [
+        item.strip()
+        for item in websocket.headers.get("sec-websocket-protocol", "").split(",")
+        if item.strip()
+    ]
+
+    retries = max(0, int(cfg.get("retry_429", DEFAULT_429_RETRIES)))
+    waited = 0.0
+    upstream = None
+    for attempt in range(retries + 1):
+        try:
+            upstream = await websockets.connect(
+                url,
+                additional_headers=headers,
+                subprotocols=protocols or None,
+                open_timeout=min(float(cfg.get("timeout", 600.0)), 30.0),
+                close_timeout=5,
+                max_size=None,
+            )
+            break
+        except InvalidStatus as exc:
+            status = exc.response.status_code
+            body = exc.response.body or b""
+            if isinstance(body, str):
+                body = body.encode()
+            if status == 429 and attempt < retries:
+                new_waited = await _wait_for_rate_limit(
+                    state,
+                    exc.response.headers,
+                    body,
+                    retry_number=attempt + 1,
+                    waited=waited,
+                )
+                if new_waited is not None:
+                    waited = new_waited
+                    continue
+
+            retry_after = exc.response.headers.get("Retry-After")
+            message = None
+            try:
+                error = json.loads(body).get("error")
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                error = None
+            if isinstance(error, dict) and isinstance(error.get("message"), str):
+                message = error["message"]
+            if not message:
+                message = f"Upstream WebSocket handshake failed with HTTP {status}."
+            if retry_after:
+                message += f" Retry after {retry_after} seconds."
+            await _close_websocket_error(
+                websocket,
+                "upstream_rejected",
+                message,
+                close_code=1013 if status == 429 else 1011,
+            )
+            return
+        except (OSError, TimeoutError, websockets.WebSocketException) as exc:
+            await _close_websocket_error(websocket, "upstream_unreachable", str(exc))
+            return
+
+    if upstream is None:  # pragma: no cover - every loop path breaks or returns
+        return
+
+    await websocket.accept(subprotocol=upstream.subprotocol)
+
+    async def client_to_upstream() -> None:
+        while True:
+            message = await websocket.receive()
+            if message["type"] == "websocket.disconnect":
+                await upstream.close(code=message.get("code", 1000))
+                return
+            if message.get("text") is not None:
+                await upstream.send(message["text"])
+            elif message.get("bytes") is not None:
+                await upstream.send(message["bytes"])
+
+    async def upstream_to_client() -> None:
+        async for message in upstream:
+            if isinstance(message, str):
+                await websocket.send_text(message)
+            else:
+                await websocket.send_bytes(message)
+
+    pumps = {
+        asyncio.create_task(client_to_upstream()),
+        asyncio.create_task(upstream_to_client()),
+    }
+    try:
+        _, pending = await asyncio.wait(pumps, return_when=asyncio.FIRST_COMPLETED)
+        for task in pending:
+            task.cancel()
+        await asyncio.gather(*pumps, return_exceptions=True)
+    finally:
+        await upstream.close()
+        try:
+            await websocket.close(code=upstream.close_code or 1000)
+        except RuntimeError:
+            pass
 
 
 # App factory --------------------------------------------------------------
@@ -2304,6 +3031,9 @@ def build_app(
     *,
     token_provider: AsyncTokenProvider | None = None,
     client: httpx.AsyncClient | None = None,
+    retry_sleep: AsyncSleeper | None = None,
+    retry_random: Callable[[], float] | None = None,
+    retry_now: Callable[[], float] | None = None,
 ) -> Starlette:
     """Build the ASGI app.
 
@@ -2320,11 +3050,19 @@ def build_app(
             follow_redirects=True,
         )
         app.state.token_provider = token_provider or make_token_provider()
+        app.state.video_models = {}
+        app.state.retry_sleep = retry_sleep or asyncio.sleep
+        app.state.retry_random = retry_random or random.random
+        app.state.retry_now = retry_now or time.time
+        app.state.models_now = time.monotonic
+        app.state.responses_capabilities = None
+        app.state.responses_capabilities_expires = 0.0
+        app.state.responses_capabilities_lock = asyncio.Lock()
 
         if not cfg.get("skip_warmup"):
             try:
                 await app.state.token_provider()
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001
                 click.echo(
                     f"Failed to acquire Azure AD token: {exc}\n"
                     f"Try: az login --scope {SCOPE}",
@@ -2341,19 +3079,24 @@ def build_app(
     routes = [
         Route("/health", health, methods=["GET"]),
         Route("/status", status_endpoint, methods=["GET"]),
+        WebSocketRoute("/v1/realtime", realtime_proxy),
+        WebSocketRoute("/realtime", realtime_proxy),
     ]
-    # Registered ahead of the catch-all so translation wins; in "passthrough"
-    # mode the routes are simply absent and the path is proxied as-is.
-    if cfg.get("responses_mode", "translate") == "translate":
+    # Registered ahead of the catch-all so translation/auto selection wins;
+    # passthrough leaves all Responses paths to the generic native proxy.
+    responses_mode = cfg.get("responses_mode", "auto")
+    if responses_mode in ("auto", "translate"):
         for prefix in ("/v1", ""):
-            routes.append(Route(f"{prefix}/responses", responses, methods=["POST"]))
-            routes.append(
-                Route(
-                    f"{prefix}/responses/{{rest:path}}",
-                    responses_unsupported,
-                    methods=["GET", "POST", "DELETE"],
+            handler = responses_auto if responses_mode == "auto" else responses
+            routes.append(Route(f"{prefix}/responses", handler, methods=["POST"]))
+            if responses_mode == "translate":
+                routes.append(
+                    Route(
+                        f"{prefix}/responses/{{rest:path}}",
+                        responses_unsupported,
+                        methods=["GET", "POST", "DELETE"],
+                    )
                 )
-            )
     if cfg.get("anthropic_mode", "translate") == "translate":
         # Mounted at the root and under /anthropic so a client can point an
         # Anthropic SDK at either base URL; the /anthropic prefix additionally
@@ -2429,11 +3172,12 @@ def build_app(
 @click.option("--skip-token-warmup", is_flag=True, help="Skip the upfront token fetch.")
 @click.option(
     "--responses-mode",
-    type=click.Choice(["translate", "passthrough"]),
-    default="translate",
+    type=click.Choice(["auto", "translate", "passthrough"]),
+    default="auto",
     envvar="TRAPI_PROXY_RESPONSES_MODE",
-    help="'translate' emulates /v1/responses over /v1/chat/completions; "
-    "'passthrough' forwards it to the upstream unchanged.",
+    help="'auto' translates ordinary creates and uses native Responses for "
+    "server-side features; 'translate' always emulates over chat completions; "
+    "'passthrough' always forwards unchanged.",
 )
 @click.option(
     "--anthropic-mode",
@@ -2455,6 +3199,20 @@ def build_app(
     "retries with the other name if the upstream rejects it.",
 )
 @click.option(
+    "--retry-429",
+    type=click.IntRange(min=0),
+    default=DEFAULT_429_RETRIES,
+    envvar="TRAPI_PROXY_RETRY_429",
+    help="Additional attempts after an upstream HTTP 429. Set 0 to disable.",
+)
+@click.option(
+    "--retry-max-wait",
+    type=click.FloatRange(min=0.0),
+    default=DEFAULT_429_MAX_WAIT,
+    envvar="TRAPI_PROXY_RETRY_MAX_WAIT",
+    help="Maximum cumulative seconds spent waiting on 429 retries.",
+)
+@click.option(
     "--log-level",
     default="info",
     envvar="TRAPI_PROXY_LOG_LEVEL",
@@ -2473,6 +3231,8 @@ def cli(
     responses_mode,
     anthropic_mode,
     token_limit_field,
+    retry_429,
+    retry_max_wait,
     log_level,
 ):
     base = f"{endpoint.rstrip('/')}/{instance.strip('/')}/openai"
@@ -2488,10 +3248,10 @@ def cli(
         "responses_mode": responses_mode,
         "anthropic_mode": anthropic_mode,
         "token_field": None if token_limit_field == "auto" else token_limit_field,
+        "retry_429": retry_429,
+        "retry_max_wait": retry_max_wait,
     }
-    apis = ["/v1/chat/completions"]
-    if responses_mode == "translate":
-        apis.append("/v1/responses")
+    apis = ["/v1/chat/completions", f"/v1/responses ({responses_mode})"]
     if anthropic_mode == "translate":
         apis.append("/v1/messages")
     click.echo(
@@ -2499,7 +3259,8 @@ def cli(
         f"  upstream:    {base}\n"
         f"  api-version: {api_version}\n"
         f"  endpoints:   /health, /status, /v1/*\n"
-        f"  apis:        {', '.join(apis)}",
+        f"  apis:        {', '.join(apis)}\n"
+        f"  429 retries: {retry_429} (max wait {retry_max_wait:g}s)",
         err=True,
     )
     uvicorn.run(build_app(cfg), host=host, port=port, log_level=log_level)

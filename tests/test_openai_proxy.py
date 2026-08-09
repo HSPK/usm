@@ -14,14 +14,15 @@ import socket
 import socketserver
 import threading
 import time
+from collections.abc import Callable
 from http.server import BaseHTTPRequestHandler, HTTPServer
-from typing import Callable
+from typing import ClassVar
 
 import httpx
 import pytest
 import uvicorn
+import websockets
 from asgi_lifespan import LifespanManager
-
 from openai_proxy import (
     AnthropicError,
     AnthropicStreamTranslator,
@@ -38,29 +39,36 @@ from openai_proxy import (
     check_api_key,
     is_reasoning_model,
     openai_models_to_anthropic,
+    parse_body_metadata,
     plan_retry,
+    resolve_chat_url,
+    resolve_native_api_url,
+    resolve_native_responses_url,
+    resolve_realtime_url,
     resolve_url,
     responses_input_to_messages,
     responses_text_to_chat,
     responses_tool_choice_to_chat,
     responses_tools_to_chat,
+    retry_after_seconds,
     thinking_to_reasoning_effort,
     token_limit_field,
 )
-
+from websockets.datastructures import Headers
+from websockets.http11 import Response as WebSocketResponse
 
 # --- Unit: resolve_url -----------------------------------------------------
 
 
 class TestResolveUrl:
     def _u(self, **kwargs):
-        d = dict(
-            path_qs="/v1/chat/completions",
-            body_obj={"model": "gpt-4"},
-            base="https://x/openai",
-            api_version="2024-10-21",
-            default_dep=None,
-        )
+        d = {
+            "path_qs": "/v1/chat/completions",
+            "body_obj": {"model": "gpt-4"},
+            "base": "https://x/openai",
+            "api_version": "2024-10-21",
+            "default_dep": None,
+        }
         d.update(kwargs)
         return resolve_url(**d)
 
@@ -142,6 +150,215 @@ class TestResolveUrl:
         assert self._u(path_qs=evil_path) is None
 
 
+class TestResolveNativeResponsesUrl:
+    BASE = "https://x/instance/openai"
+
+    def test_v1_collection(self):
+        assert resolve_native_responses_url("/v1/responses", self.BASE) == (
+            "https://x/instance/openai/v1/responses"
+        )
+
+    def test_root_collection_is_normalized_to_v1(self):
+        assert resolve_native_responses_url("/responses", self.BASE) == (
+            "https://x/instance/openai/v1/responses"
+        )
+
+    def test_stored_response_path_and_query_are_preserved(self):
+        assert (
+            resolve_native_responses_url(
+                "/v1/responses/resp_1?include=output", self.BASE
+            )
+            == "https://x/instance/openai/v1/responses/resp_1?include=output"
+        )
+
+    @pytest.mark.parametrize(
+        "path",
+        [
+            "/v1/chat/completions",
+            "/models",
+            "/v1/responses/../models",
+            "/responses/%2e%2e/models",
+        ],
+    )
+    def test_unrelated_or_traversal_paths_are_rejected(self, path):
+        assert resolve_native_responses_url(path, self.BASE) is None
+
+
+class TestResolveNativeApiUrl:
+    BASE = "https://x/instance/openai"
+
+    @pytest.mark.parametrize(
+        ("path", "expected"),
+        [
+            (
+                "/v1/audio/speech",
+                "https://x/instance/openai/v1/audio/speech",
+            ),
+            (
+                "/videos?limit=10",
+                "https://x/instance/openai/v1/videos?limit=10",
+            ),
+            (
+                "/v1/images/edits",
+                "https://x/instance/openai/v1/images/edits",
+            ),
+            (
+                "/v1/videos/video_1/content?model=sora",
+                "https://x/instance/openai/v1/videos/video_1/content?model=sora",
+            ),
+        ],
+    )
+    def test_native_media_paths(self, path, expected):
+        assert resolve_native_api_url(path, self.BASE) == expected
+
+    @pytest.mark.parametrize(
+        "path",
+        [
+            "/v1/audio/transcriptions",
+            "/v1/images/generations",
+            "/v1/videos/../models",
+        ],
+    )
+    def test_other_or_traversal_paths_rejected(self, path):
+        assert resolve_native_api_url(path, self.BASE) is None
+
+
+class TestResolveRealtimeUrl:
+    BASE = "https://x/instance/openai"
+
+    def test_v1_path_and_query(self):
+        assert resolve_realtime_url(
+            "/v1/realtime?model=gpt-realtime&intent=transcription",
+            self.BASE,
+            None,
+        ) == (
+            "wss://x/instance/openai/v1/realtime"
+            "?model=gpt-realtime&intent=transcription"
+        )
+
+    def test_root_path_and_default_model(self):
+        assert resolve_realtime_url("/realtime", self.BASE, "realtime-default") == (
+            "wss://x/instance/openai/v1/realtime?model=realtime-default"
+        )
+
+    @pytest.mark.parametrize(
+        "path",
+        ["/v1/realtime", "/v1/chat/completions?model=m", "/v1/../realtime?model=m"],
+    )
+    def test_missing_model_unrelated_or_traversal_rejected(self, path):
+        assert resolve_realtime_url(path, self.BASE, None) is None
+
+
+class TestParseBodyMetadata:
+    def test_json_body(self):
+        assert parse_body_metadata(
+            b'{"model":"gpt-4o","input":"hi"}', "application/json"
+        ) == {"model": "gpt-4o", "input": "hi"}
+
+    def test_urlencoded_body(self):
+        assert parse_body_metadata(
+            b"model=whisper_001&response_format=json",
+            "application/x-www-form-urlencoded",
+        ) == {"model": "whisper_001"}
+
+    def test_multipart_body_ignores_file_contents(self):
+        boundary = "test-boundary"
+        raw = (
+            b"--test-boundary\r\n"
+            b'Content-Disposition: form-data; name="file"; filename="a.wav"\r\n'
+            b"Content-Type: audio/wav\r\n\r\n"
+            b"RIFF-not-json\r\n"
+            b"--test-boundary\r\n"
+            b'Content-Disposition: form-data; name="model"\r\n\r\n'
+            b"whisper_001\r\n"
+            b"--test-boundary--\r\n"
+        )
+        assert parse_body_metadata(
+            raw, f'multipart/form-data; boundary="{boundary}"'
+        ) == {"model": "whisper_001"}
+
+    @pytest.mark.parametrize(
+        ("raw", "content_type"),
+        [
+            (b"{bad", "application/json"),
+            (b"file=data", "application/x-www-form-urlencoded"),
+            (b"--bad", "multipart/form-data; boundary=missing"),
+        ],
+    )
+    def test_missing_or_malformed_model(self, raw, content_type):
+        assert parse_body_metadata(raw, content_type) is None
+
+
+class TestRetryAfterSeconds:
+    def test_retry_after_seconds(self):
+        assert retry_after_seconds({"Retry-After": "2.5"}) == 2.5
+
+    def test_retry_after_http_date(self):
+        assert (
+            retry_after_seconds(
+                {"Retry-After": "Tue, 14 Nov 2023 22:13:32 GMT"},
+                now=1_700_000_000,
+            )
+            == 12
+        )
+
+    def test_millisecond_header(self):
+        assert retry_after_seconds({"x-ms-retry-after-ms": "750"}) == 0.75
+
+    def test_uses_longest_reset_duration(self):
+        assert (
+            retry_after_seconds(
+                {
+                    "x-ratelimit-reset-requests": "1m30s",
+                    "x-ratelimit-reset-tokens": "500ms",
+                }
+            )
+            == 90
+        )
+
+    def test_parses_error_body(self):
+        assert (
+            retry_after_seconds({}, b"Rate Limit Exceeded, retry after 7 seconds") == 7
+        )
+
+    def test_exponential_fallback_is_bounded(self):
+        assert retry_after_seconds({}, retry_number=1) == 1
+        assert retry_after_seconds({}, retry_number=4) == 8
+        assert retry_after_seconds({}, retry_number=8) == 8
+
+
+class TestResolveChatUrl:
+    def test_regular_deployment_keeps_azure_style_route(self):
+        assert resolve_chat_url(
+            {"model": "gpt-4o"}, "https://x/openai", "2024-10-21", None
+        ) == (
+            "https://x/openai/deployments/gpt-4o/chat/completions"
+            "?api-version=2024-10-21"
+        )
+
+    def test_slash_model_uses_native_body_routing(self):
+        assert (
+            resolve_chat_url(
+                {"model": "Qwen/Qwen3.5-27B"},
+                "https://x/openai",
+                "2024-10-21",
+                None,
+            )
+            == "https://x/openai/v1/chat/completions"
+        )
+
+    def test_slash_default_deployment_uses_native_body_routing(self):
+        assert (
+            resolve_chat_url(
+                {}, "https://x/openai", "2024-10-21", "unsloth/gemma-3-4b-it"
+            )
+            == "https://x/openai/v1/chat/completions"
+        )
+
+    def test_missing_model_still_fails(self):
+        assert resolve_chat_url({}, "https://x/openai", "2024-10-21", None) is None
+
+
 # --- Unit: check_api_key ---------------------------------------------------
 
 
@@ -179,8 +396,8 @@ class TestCheckApiKey:
 
 
 class _Upstream(BaseHTTPRequestHandler):
-    captured: list[dict] = []
-    responses: dict[str, Callable] = {}
+    captured: ClassVar[list[dict]] = []
+    responses: ClassVar[dict[str, Callable]] = {}
 
     def log_message(self, *a, **k):
         return
@@ -252,6 +469,9 @@ def _build_for(
     responses_mode: str = "translate",
     anthropic_mode: str = "translate",
     token_field: str | None = None,
+    retry_429: int = 0,
+    retry_max_wait: float = 30.0,
+    retry_sleep=None,
 ) -> tuple[object, dict]:
     """Return (app, cfg) wired against *upstream_url*."""
     cfg = {
@@ -266,21 +486,73 @@ def _build_for(
         "responses_mode": responses_mode,
         "anthropic_mode": anthropic_mode,
         "token_field": token_field,
+        "retry_429": retry_429,
+        "retry_max_wait": retry_max_wait,
     }
-    return build_app(cfg, token_provider=_fake_token), cfg
+    return (
+        build_app(
+            cfg,
+            token_provider=_fake_token,
+            retry_sleep=retry_sleep,
+            retry_random=lambda: 0.0,
+        ),
+        cfg,
+    )
 
 
 @pytest.fixture
 async def client(upstream):
     upstream_url, _, _ = upstream
     app, _ = _build_for(upstream_url)
-    async with LifespanManager(app):
-        async with httpx.AsyncClient(
+    async with (
+        LifespanManager(app),
+        httpx.AsyncClient(
             transport=httpx.ASGITransport(app),
             base_url="http://test",
             timeout=10,
-        ) as ac:
-            yield ac
+        ) as ac,
+    ):
+        yield ac
+
+
+@pytest.fixture
+async def auto_client(upstream):
+    upstream_url, _, _ = upstream
+    app, _ = _build_for(upstream_url, responses_mode="auto")
+    async with (
+        LifespanManager(app),
+        httpx.AsyncClient(
+            transport=httpx.ASGITransport(app),
+            base_url="http://test",
+            timeout=10,
+        ) as ac,
+    ):
+        yield ac
+
+
+@pytest.fixture
+async def retry_client(upstream):
+    upstream_url, _, _ = upstream
+    sleeps = []
+
+    async def fake_sleep(delay):
+        sleeps.append(delay)
+
+    app, _ = _build_for(
+        upstream_url,
+        retry_429=2,
+        retry_max_wait=30,
+        retry_sleep=fake_sleep,
+    )
+    async with (
+        LifespanManager(app),
+        httpx.AsyncClient(
+            transport=httpx.ASGITransport(app),
+            base_url="http://test",
+            timeout=10,
+        ) as ac,
+    ):
+        yield ac, sleeps
 
 
 @pytest.fixture
@@ -313,6 +585,105 @@ async def live_proxy(upstream):
     finally:
         server.should_exit = True
         await task
+
+
+@pytest.fixture
+async def realtime_pair():
+    captured = {}
+
+    async def realtime_upstream(ws):
+        captured["path"] = ws.request.path
+        captured["authorization"] = ws.request.headers["authorization"]
+        await ws.send(json.dumps({"type": "session.created"}))
+        async for message in ws:
+            await ws.send(message)
+
+    upstream_port = _free_port()
+    async with websockets.serve(realtime_upstream, "127.0.0.1", upstream_port):
+        app, _ = _build_for(f"http://127.0.0.1:{upstream_port}")
+        proxy_port = _free_port()
+        server = uvicorn.Server(
+            uvicorn.Config(
+                app,
+                host="127.0.0.1",
+                port=proxy_port,
+                log_level="error",
+                lifespan="on",
+                access_log=False,
+            )
+        )
+        task = asyncio.create_task(server.serve())
+        for _ in range(100):
+            if server.started:
+                break
+            await asyncio.sleep(0.02)
+        try:
+            yield f"ws://127.0.0.1:{proxy_port}", captured
+        finally:
+            server.should_exit = True
+            await task
+
+
+@pytest.fixture
+async def realtime_retry_pair():
+    attempts = {"count": 0}
+    sleeps = []
+
+    async def process_request(_connection, _request):
+        attempts["count"] += 1
+        if attempts["count"] <= 2:
+            return WebSocketResponse(
+                429,
+                "Too Many Requests",
+                Headers(
+                    {
+                        "Content-Type": "application/json",
+                        "Retry-After": "0.05",
+                    }
+                ),
+                b'{"error":{"message":"busy"}}',
+            )
+        return None
+
+    async def realtime_upstream(ws):
+        await ws.send(json.dumps({"type": "session.created"}))
+
+    async def fake_sleep(delay):
+        sleeps.append(delay)
+
+    upstream_port = _free_port()
+    async with websockets.serve(
+        realtime_upstream,
+        "127.0.0.1",
+        upstream_port,
+        process_request=process_request,
+    ):
+        app, _ = _build_for(
+            f"http://127.0.0.1:{upstream_port}",
+            retry_429=2,
+            retry_sleep=fake_sleep,
+        )
+        proxy_port = _free_port()
+        server = uvicorn.Server(
+            uvicorn.Config(
+                app,
+                host="127.0.0.1",
+                port=proxy_port,
+                log_level="error",
+                lifespan="on",
+                access_log=False,
+            )
+        )
+        task = asyncio.create_task(server.serve())
+        for _ in range(100):
+            if server.started:
+                break
+            await asyncio.sleep(0.02)
+        try:
+            yield f"ws://127.0.0.1:{proxy_port}", attempts, sleeps
+        finally:
+            server.should_exit = True
+            await task
 
 
 # --- Built-in endpoints ---------------------------------------------------
@@ -396,6 +767,106 @@ class TestEndToEnd:
         assert r.status_code == 400
         assert r.json()["error"]["code"] == "missing_model"
 
+    async def test_generic_proxy_preserves_rate_limit_headers(self, client, upstream):
+        _, _, responses = upstream
+        responses["/openai/deployments/embed/embeddings"] = _error_reply(
+            429,
+            {"error": {"message": "retry later"}},
+            headers={
+                "Retry-After": "11",
+                "X-APIM-Remaining-Requests": "0",
+            },
+        )
+
+        r = await client.post(
+            "/v1/embeddings", json={"model": "embed", "input": "hello"}
+        )
+
+        assert r.status_code == 429
+        assert r.headers["retry-after"] == "11"
+        assert r.headers["x-apim-remaining-requests"] == "0"
+
+    async def test_multipart_model_routes_audio_upload(self, client, upstream):
+        _, captured, responses = upstream
+        responses["/openai/deployments/whisper_001/audio/transcriptions"] = _json_reply(
+            {"text": "hello"}
+        )
+
+        r = await client.post(
+            "/v1/audio/transcriptions",
+            data={"model": "whisper_001", "response_format": "json"},
+            files={"file": ("sample.wav", b"RIFF-audio", "audio/wav")},
+        )
+
+        assert r.status_code == 200
+        assert r.json() == {"text": "hello"}
+        assert captured[-1]["path"].startswith(
+            "/openai/deployments/whisper_001/audio/transcriptions?"
+        )
+        assert b"RIFF-audio" in captured[-1]["body"]
+
+    async def test_speech_uses_native_body_routing(self, client, upstream):
+        _, captured, responses = upstream
+        responses["/openai/v1/audio/speech"] = _json_reply({"audio": "ok"})
+
+        r = await client.post(
+            "/v1/audio/speech",
+            json={"model": "gpt-4o-mini-tts", "voice": "alloy", "input": "hi"},
+        )
+
+        assert r.status_code == 200
+        assert captured[-1]["path"] == "/openai/v1/audio/speech"
+
+    async def test_image_edit_uses_native_body_routing(self, client, upstream):
+        _, captured, responses = upstream
+        responses["/openai/v1/images/edits"] = _json_reply(
+            {"data": [{"b64_json": "image"}]}
+        )
+
+        r = await client.post(
+            "/v1/images/edits",
+            data={"model": "gpt-image-1", "prompt": "make it blue"},
+            files={"image": ("input.png", b"PNG-image", "image/png")},
+        )
+
+        assert r.status_code == 200
+        assert captured[-1]["path"] == "/openai/v1/images/edits"
+
+    async def test_video_lifecycle_remembers_model(self, client, upstream):
+        _, captured, responses = upstream
+        responses["/openai/v1/videos"] = _json_reply(
+            {"id": "video_1", "object": "video", "model": "sora-2"}
+        )
+        responses["/openai/v1/videos/video_1"] = _json_reply(
+            {"id": "video_1", "status": "completed", "model": "sora-2"}
+        )
+
+        created = await client.post(
+            "/v1/videos", json={"model": "sora-2", "prompt": "blue circle"}
+        )
+        retrieved = await client.get("/v1/videos/video_1")
+
+        assert created.status_code == 200
+        assert retrieved.status_code == 200
+        assert captured[-2]["path"] == "/openai/v1/videos"
+        assert captured[-1]["path"] == "/openai/v1/videos/video_1?model=sora-2"
+
+    async def test_video_query_model_works_without_cache(self, client, upstream):
+        _, captured, responses = upstream
+        responses["/openai/v1/videos/video_old/content"] = _json_reply({"ok": True})
+
+        r = await client.get("/v1/videos/video_old/content", params={"model": "sora-2"})
+
+        assert r.status_code == 200
+        assert captured[-1]["path"] == (
+            "/openai/v1/videos/video_old/content?model=sora-2"
+        )
+
+    async def test_video_resource_without_model_returns_clear_error(self, client):
+        r = await client.get("/v1/videos/video_unknown")
+        assert r.status_code == 400
+        assert r.json()["error"]["code"] == "missing_model"
+
     async def test_client_auth_headers_stripped(self, client, upstream):
         _, captured, responses = upstream
 
@@ -428,15 +899,55 @@ class TestEndToEnd:
             "skip_warmup": True,
         }
         app = build_app(cfg, token_provider=_fake_token)
-        async with LifespanManager(app):
-            async with httpx.AsyncClient(
+        async with (
+            LifespanManager(app),
+            httpx.AsyncClient(
                 transport=httpx.ASGITransport(app),
                 base_url="http://test",
                 timeout=5,
-            ) as c:
-                r = await c.post("/v1/chat/completions", json={"model": "m"})
+            ) as c,
+        ):
+            r = await c.post("/v1/chat/completions", json={"model": "m"})
         assert r.status_code == 502
         assert r.json()["error"]["code"] == "upstream_unreachable"
+
+
+class TestRealtimeWebSocket:
+    async def test_bidirectional_relay_and_aad_auth(self, realtime_pair):
+        base, captured = realtime_pair
+        async with websockets.connect(
+            f"{base}/v1/realtime?model=gpt-realtime-mini"
+        ) as ws:
+            created = json.loads(await ws.recv())
+            assert created["type"] == "session.created"
+            await ws.send(json.dumps({"type": "session.update", "session": {}}))
+            echoed = json.loads(await ws.recv())
+
+        assert echoed["type"] == "session.update"
+        assert captured["path"] == "/openai/v1/realtime?model=gpt-realtime-mini"
+        assert captured["authorization"] == "Bearer " + await _fake_token()
+
+    async def test_missing_model_returns_error_event(self, realtime_pair):
+        base, _ = realtime_pair
+        async with websockets.connect(f"{base}/v1/realtime") as ws:
+            error = json.loads(await ws.recv())
+            assert error["type"] == "error"
+            assert error["error"]["code"] == "missing_model"
+            with pytest.raises(websockets.ConnectionClosed) as closed:
+                await ws.recv()
+        assert closed.value.rcvd.code == 1008
+
+    async def test_handshake_retries_429(self, realtime_retry_pair):
+        base, attempts, sleeps = realtime_retry_pair
+
+        async with websockets.connect(
+            f"{base}/v1/realtime?model=gpt-realtime-mini"
+        ) as ws:
+            created = json.loads(await ws.recv())
+
+        assert created["type"] == "session.created"
+        assert attempts["count"] == 3
+        assert sleeps == [0.05, 0.05]
 
 
 # --- API-key gate ---------------------------------------------------------
@@ -447,13 +958,15 @@ class TestApiKeyGate:
     async def gated(self, upstream):
         upstream_url, _, _ = upstream
         app, _ = _build_for(upstream_url, api_key="sekret")
-        async with LifespanManager(app):
-            async with httpx.AsyncClient(
+        async with (
+            LifespanManager(app),
+            httpx.AsyncClient(
                 transport=httpx.ASGITransport(app),
                 base_url="http://test",
                 timeout=10,
-            ) as ac:
-                yield ac
+            ) as ac,
+        ):
+            yield ac
 
     async def test_no_key_401(self, gated):
         r = await gated.post("/v1/chat/completions", json={})
@@ -543,14 +1056,16 @@ class TestStreaming:
         base, responses = live_proxy
         responses["/openai/deployments/m/chat/completions"] = self._sse_handler(3, 0.1)
         ts: list[float] = []
-        async with httpx.AsyncClient(timeout=10) as c:
-            async with c.stream(
+        async with (
+            httpx.AsyncClient(timeout=10) as c,
+            c.stream(
                 "POST",
                 f"{base}/v1/chat/completions",
                 json={"model": "m", "stream": True},
-            ) as r:
-                async for _ in r.aiter_raw():
-                    ts.append(time.time())
+            ) as r,
+        ):
+            async for _ in r.aiter_raw():
+                ts.append(time.time())
         span = ts[-1] - ts[0]
         assert span >= 0.18, f"chunks appear buffered (span={span:.3f}s)"
 
@@ -1043,7 +1558,7 @@ class TestPlanRetry:
 
 
 class TestChatToResponses:
-    ECHO = {"model": "gpt-4o", "tools": [], "store": False}
+    ECHO: ClassVar = {"model": "gpt-4o", "tools": [], "store": False}
 
     def _chat(self, **overrides):
         chat = {
@@ -1186,7 +1701,7 @@ class TestChatToResponses:
 
 
 class TestResponsesStreamTranslator:
-    ECHO = {"model": "gpt-4o", "tools": [], "store": False}
+    ECHO: ClassVar = {"model": "gpt-4o", "tools": [], "store": False}
 
     def _run(self, chunks: list[dict]) -> list[dict]:
         t = ResponsesStreamTranslator(self.ECHO, id_factory=_ids())
@@ -1391,12 +1906,14 @@ class TestResponsesStreamTranslator:
 # --- End-to-end: /v1/responses -------------------------------------------
 
 
-def _json_reply(payload: dict):
+def _json_reply(payload: dict, headers: dict[str, str] | None = None):
     raw = json.dumps(payload).encode()
 
     def handler(h, _body):
         h.send_response(200)
         h.send_header("Content-Type", "application/json")
+        for key, value in (headers or {}).items():
+            h.send_header(key, value)
         h.send_header("Content-Length", str(len(raw)))
         h.send_header("Connection", "close")
         h.end_headers()
@@ -1405,7 +1922,12 @@ def _json_reply(payload: dict):
     return handler
 
 
-def _error_reply(status: int, payload: dict, counter: list | None = None):
+def _error_reply(
+    status: int,
+    payload: dict,
+    counter: list | None = None,
+    headers: dict[str, str] | None = None,
+):
     raw = json.dumps(payload).encode()
 
     def handler(h, _body):
@@ -1413,12 +1935,25 @@ def _error_reply(status: int, payload: dict, counter: list | None = None):
             counter.append(1)
         h.send_response(status)
         h.send_header("Content-Type", "application/json")
+        for key, value in (headers or {}).items():
+            h.send_header(key, value)
         h.send_header("Content-Length", str(len(raw)))
         h.send_header("Connection", "close")
         h.end_headers()
         h.wfile.write(raw)
 
     return handler
+
+
+def _sequence_replies(*handlers):
+    state = {"calls": 0}
+
+    def handler(h, body):
+        index = min(state["calls"], len(handlers) - 1)
+        state["calls"] += 1
+        handlers[index](h, body)
+
+    return handler, state
 
 
 CHAT_OK = {
@@ -1435,6 +1970,184 @@ CHAT_OK = {
     ],
     "usage": {"prompt_tokens": 3, "completion_tokens": 1, "total_tokens": 4},
 }
+
+
+class TestRateLimitRetry:
+    async def test_generic_proxy_retries_then_succeeds(self, retry_client, upstream):
+        client, sleeps = retry_client
+        _, captured, responses_map = upstream
+        handler, state = _sequence_replies(
+            _error_reply(
+                429,
+                {"error": {"message": "slow down"}},
+                headers={"Retry-After": "0.5"},
+            ),
+            _error_reply(
+                429,
+                {"error": {"message": "still busy"}},
+                headers={"x-ms-retry-after-ms": "250"},
+            ),
+            _json_reply({"object": "list", "data": [{"embedding": [1.0]}]}),
+        )
+        responses_map["/openai/deployments/embed/embeddings"] = handler
+
+        r = await client.post(
+            "/v1/embeddings", json={"model": "embed", "input": "hello"}
+        )
+
+        assert r.status_code == 200
+        assert state["calls"] == 3
+        assert sleeps == [0.5, 0.25]
+        assert len(captured) == 3
+
+    async def test_translated_responses_retries_from_error_body(
+        self, retry_client, upstream
+    ):
+        client, sleeps = retry_client
+        _, _, responses_map = upstream
+        handler, state = _sequence_replies(
+            _error_reply(
+                429,
+                {"error": {"message": "Rate Limit Exceeded, retry after 3 seconds"}},
+            ),
+            _json_reply(CHAT_OK),
+        )
+        responses_map["/openai/deployments/gpt-4o/chat/completions"] = handler
+
+        r = await client.post("/v1/responses", json={"model": "gpt-4o", "input": "hi"})
+
+        assert r.status_code == 200
+        assert state["calls"] == 2
+        assert sleeps == [3]
+
+    async def test_anthropic_retries_before_translating_response(
+        self, retry_client, upstream
+    ):
+        client, sleeps = retry_client
+        _, _, responses_map = upstream
+        handler, state = _sequence_replies(
+            _error_reply(
+                429,
+                {"error": {"message": "busy"}},
+                headers={"Retry-After": "1"},
+            ),
+            _json_reply(
+                {
+                    **CHAT_OK,
+                    "usage": {
+                        "prompt_tokens": 3,
+                        "completion_tokens": 1,
+                        "total_tokens": 4,
+                    },
+                }
+            ),
+        )
+        responses_map["/openai/deployments/gpt-4o/chat/completions"] = handler
+
+        r = await client.post(
+            "/v1/messages",
+            json={
+                "model": "gpt-4o",
+                "max_tokens": 16,
+                "messages": [{"role": "user", "content": "hi"}],
+            },
+        )
+
+        assert r.status_code == 200
+        assert state["calls"] == 2
+        assert sleeps == [1]
+
+    async def test_stream_retries_before_first_event(self, retry_client, upstream):
+        client, sleeps = retry_client
+        _, _, responses_map = upstream
+
+        def sse(h, _body):
+            frame = b'data: {"choices":[{"delta":{"content":"ok"}}]}\n\n'
+            h.send_response(200)
+            h.send_header("Content-Type", "text/event-stream")
+            h.send_header("Content-Length", str(len(frame)))
+            h.send_header("Connection", "close")
+            h.end_headers()
+            h.wfile.write(frame)
+
+        handler, state = _sequence_replies(
+            _error_reply(
+                429,
+                {"error": {"message": "busy"}},
+                headers={"Retry-After": "0.1"},
+            ),
+            sse,
+        )
+        responses_map["/openai/deployments/m/chat/completions"] = handler
+
+        async with client.stream(
+            "POST",
+            "/v1/chat/completions",
+            json={"model": "m", "messages": [], "stream": True},
+        ) as r:
+            body = await r.aread()
+
+        assert r.status_code == 200
+        assert state["calls"] == 2
+        assert sleeps == [0.1]
+        assert b'"content":"ok"' in body
+
+    async def test_exhaustion_returns_final_429_headers(self, retry_client, upstream):
+        client, sleeps = retry_client
+        _, _, responses_map = upstream
+        calls = []
+        responses_map["/openai/deployments/embed/embeddings"] = _error_reply(
+            429,
+            {"error": {"message": "busy"}},
+            calls,
+            headers={"Retry-After": "1", "X-APIM-Remaining-Requests": "0"},
+        )
+
+        r = await client.post(
+            "/v1/embeddings", json={"model": "embed", "input": "hello"}
+        )
+
+        assert r.status_code == 429
+        assert len(calls) == 3
+        assert sleeps == [1, 1]
+        assert r.headers["retry-after"] == "1"
+        assert r.headers["x-apim-remaining-requests"] == "0"
+
+    async def test_wait_over_budget_does_not_retry(self, upstream):
+        upstream_url, _, responses_map = upstream
+        calls = []
+        sleeps = []
+
+        async def fake_sleep(delay):
+            sleeps.append(delay)
+
+        responses_map["/openai/deployments/embed/embeddings"] = _error_reply(
+            429,
+            {"error": {"message": "busy"}},
+            calls,
+            headers={"Retry-After": "2"},
+        )
+        app, _ = _build_for(
+            upstream_url,
+            retry_429=2,
+            retry_max_wait=0.5,
+            retry_sleep=fake_sleep,
+        )
+        async with (
+            LifespanManager(app),
+            httpx.AsyncClient(
+                transport=httpx.ASGITransport(app),
+                base_url="http://test",
+                timeout=10,
+            ) as client,
+        ):
+            r = await client.post(
+                "/v1/embeddings", json={"model": "embed", "input": "hello"}
+            )
+
+        assert r.status_code == 429
+        assert len(calls) == 1
+        assert sleeps == []
 
 
 class TestResponsesEndpoint:
@@ -1592,11 +2305,13 @@ class TestResponsesEndpoint:
             CHAT_OK
         )
         app, _ = _build_for(upstream_url, default_dep="dep-x")
-        async with LifespanManager(app):
-            async with httpx.AsyncClient(
+        async with (
+            LifespanManager(app),
+            httpx.AsyncClient(
                 transport=httpx.ASGITransport(app), base_url="http://test", timeout=10
-            ) as c:
-                r = await c.post("/v1/responses", json={"input": "hi"})
+            ) as c,
+        ):
+            r = await c.post("/v1/responses", json={"input": "hi"})
         assert r.status_code == 200
         assert "/deployments/dep-x/" in captured[-1]["path"]
 
@@ -1606,14 +2321,16 @@ class TestResponsesEndpoint:
             CHAT_OK
         )
         app, _ = _build_for(upstream_url, token_field="max_completion_tokens")
-        async with LifespanManager(app):
-            async with httpx.AsyncClient(
+        async with (
+            LifespanManager(app),
+            httpx.AsyncClient(
                 transport=httpx.ASGITransport(app), base_url="http://test", timeout=10
-            ) as c:
-                r = await c.post(
-                    "/v1/responses",
-                    json={"model": "gpt-4o", "input": "hi", "max_output_tokens": 5},
-                )
+            ) as c,
+        ):
+            r = await c.post(
+                "/v1/responses",
+                json={"model": "gpt-4o", "input": "hi", "max_output_tokens": 5},
+            )
         assert r.status_code == 200
         assert json.loads(captured[-1]["body"])["max_completion_tokens"] == 5
 
@@ -1632,11 +2349,13 @@ class TestResponsesEndpoint:
     async def test_api_key_gate_applies(self, upstream):
         upstream_url, _, _ = upstream
         app, _ = _build_for(upstream_url, api_key="sekret")
-        async with LifespanManager(app):
-            async with httpx.AsyncClient(
+        async with (
+            LifespanManager(app),
+            httpx.AsyncClient(
                 transport=httpx.ASGITransport(app), base_url="http://test", timeout=10
-            ) as c:
-                r = await c.post("/v1/responses", json={"model": "m", "input": "hi"})
+            ) as c,
+        ):
+            r = await c.post("/v1/responses", json={"model": "m", "input": "hi"})
         assert r.status_code == 401
 
     async def test_stored_response_operations_404(self, client):
@@ -1656,26 +2375,407 @@ class TestResponsesEndpoint:
 
     async def test_passthrough_mode_forwards_verbatim(self, upstream):
         upstream_url, captured, responses_map = upstream
-        responses_map["/openai/deployments/gpt-4o/responses"] = _json_reply({"ok": 1})
+        responses_map["/openai/v1/responses"] = _json_reply({"ok": 1})
         app, _ = _build_for(upstream_url, responses_mode="passthrough")
-        async with LifespanManager(app):
-            async with httpx.AsyncClient(
+        async with (
+            LifespanManager(app),
+            httpx.AsyncClient(
                 transport=httpx.ASGITransport(app), base_url="http://test", timeout=10
-            ) as c:
-                r = await c.post(
-                    "/v1/responses", json={"model": "gpt-4o", "input": "hi"}
-                )
+            ) as c,
+        ):
+            r = await c.post("/v1/responses", json={"model": "gpt-4o", "input": "hi"})
         assert r.status_code == 200
         assert r.json() == {"ok": 1}
-        assert "/deployments/gpt-4o/responses" in captured[-1]["path"]
+        assert captured[-1]["path"] == "/openai/v1/responses"
         assert json.loads(captured[-1]["body"]) == {"model": "gpt-4o", "input": "hi"}
+
+    async def test_passthrough_root_path_normalizes_to_native_v1(self, upstream):
+        upstream_url, captured, responses_map = upstream
+        responses_map["/openai/v1/responses"] = _json_reply({"ok": 1})
+        app, _ = _build_for(upstream_url, responses_mode="passthrough")
+        async with (
+            LifespanManager(app),
+            httpx.AsyncClient(
+                transport=httpx.ASGITransport(app), base_url="http://test", timeout=10
+            ) as c,
+        ):
+            r = await c.post(
+                "/responses?trace=yes", json={"model": "gpt-4o", "input": "hi"}
+            )
+        assert r.status_code == 200
+        assert captured[-1]["path"] == "/openai/v1/responses?trace=yes"
+
+    async def test_passthrough_stored_response_get_needs_no_model(self, upstream):
+        upstream_url, captured, responses_map = upstream
+        responses_map["/openai/v1/responses/resp_1"] = _json_reply({"id": "resp_1"})
+        app, _ = _build_for(upstream_url, responses_mode="passthrough")
+        async with (
+            LifespanManager(app),
+            httpx.AsyncClient(
+                transport=httpx.ASGITransport(app), base_url="http://test", timeout=10
+            ) as c,
+        ):
+            r = await c.get("/v1/responses/resp_1")
+        assert r.status_code == 200
+        assert r.json() == {"id": "resp_1"}
+        assert captured[-1]["path"] == "/openai/v1/responses/resp_1"
+
+    async def test_passthrough_stream_is_relayed_verbatim(self, upstream):
+        upstream_url, captured, responses_map = upstream
+
+        def native_sse(h, _body):
+            frames = [
+                b'event: response.created\ndata: {"type":"response.created"}\n\n',
+                b'event: response.completed\ndata: {"type":"response.completed"}\n\n',
+            ]
+            h.send_response(200)
+            h.send_header("Content-Type", "text/event-stream")
+            h.send_header("Transfer-Encoding", "chunked")
+            h.end_headers()
+            for frame in frames:
+                h.wfile.write(f"{len(frame):x}\r\n".encode() + frame + b"\r\n")
+            h.wfile.write(b"0\r\n\r\n")
+            h.wfile.flush()
+
+        responses_map["/openai/v1/responses"] = native_sse
+        app, _ = _build_for(upstream_url, responses_mode="passthrough")
+        async with (
+            LifespanManager(app),
+            httpx.AsyncClient(
+                transport=httpx.ASGITransport(app), base_url="http://test", timeout=10
+            ) as c,
+            c.stream(
+                "POST",
+                "/v1/responses",
+                json={"model": "gpt-4o", "input": "hi", "stream": True},
+            ) as r,
+        ):
+            body = "".join([part async for part in r.aiter_text()])
+        assert r.status_code == 200
+        assert "text/event-stream" in r.headers["content-type"]
+        assert r.headers["cache-control"] == "no-cache"
+        assert "event: response.created" in body
+        assert "event: response.completed" in body
+        assert captured[-1]["path"] == "/openai/v1/responses"
+
+    async def test_translate_preserves_upstream_rate_limit_headers(self, upstream):
+        upstream_url, _, responses_map = upstream
+        responses_map["/openai/deployments/gpt-4o/chat/completions"] = _error_reply(
+            429,
+            {"error": {"message": "retry after 7 seconds"}},
+            headers={
+                "Retry-After": "7",
+                "X-RateLimit-Reset-Requests": "7",
+                "X-APIM-Remaining-Requests": "0",
+            },
+        )
+        app, _ = _build_for(upstream_url)
+        async with (
+            LifespanManager(app),
+            httpx.AsyncClient(
+                transport=httpx.ASGITransport(app), base_url="http://test", timeout=10
+            ) as c,
+        ):
+            r = await c.post("/v1/responses", json={"model": "gpt-4o", "input": "hi"})
+        assert r.status_code == 429
+        assert r.headers["retry-after"] == "7"
+        assert r.headers["x-ratelimit-reset-requests"] == "7"
+        assert r.headers["x-apim-remaining-requests"] == "0"
+
+    async def test_translate_preserves_success_rate_limit_headers(self, upstream):
+        upstream_url, _, responses_map = upstream
+        responses_map["/openai/deployments/gpt-4o/chat/completions"] = _json_reply(
+            CHAT_OK,
+            headers={
+                "X-RateLimit-Remaining-Requests": "41",
+                "X-RateLimit-Reset-Requests": "2",
+            },
+        )
+        app, _ = _build_for(upstream_url)
+        async with (
+            LifespanManager(app),
+            httpx.AsyncClient(
+                transport=httpx.ASGITransport(app), base_url="http://test", timeout=10
+            ) as c,
+        ):
+            r = await c.post("/v1/responses", json={"model": "gpt-4o", "input": "hi"})
+        assert r.status_code == 200
+        assert r.headers["x-ratelimit-remaining-requests"] == "41"
+        assert r.headers["x-ratelimit-reset-requests"] == "2"
+
+    async def test_translate_slash_model_uses_native_chat_route(self, upstream):
+        upstream_url, captured, responses_map = upstream
+        responses_map["/openai/v1/chat/completions"] = _json_reply(CHAT_OK)
+        app, _ = _build_for(upstream_url)
+        async with (
+            LifespanManager(app),
+            httpx.AsyncClient(
+                transport=httpx.ASGITransport(app), base_url="http://test", timeout=10
+            ) as c,
+        ):
+            r = await c.post(
+                "/v1/responses",
+                json={"model": "Qwen/Qwen3.5-27B", "input": "hi"},
+            )
+        assert r.status_code == 200
+        assert captured[-1]["path"] == "/openai/v1/chat/completions"
+        assert json.loads(captured[-1]["body"])["model"] == "Qwen/Qwen3.5-27B"
+
+
+class TestResponsesAutoMode:
+    @staticmethod
+    def _catalogue(model: str, responses):
+        return {
+            "object": "list",
+            "data": [
+                {
+                    "id": model,
+                    "capabilities": {"responses": responses},
+                }
+            ],
+        }
+
+    @pytest.mark.parametrize("capability", [True, "true", "TRUE"])
+    async def test_supported_model_uses_native(self, auto_client, upstream, capability):
+        _, captured, responses_map = upstream
+        responses_map["/openai/models"] = _json_reply(
+            self._catalogue("gpt-native", capability)
+        )
+        responses_map["/openai/v1/responses"] = _json_reply(
+            {"id": "resp_native", "status": "completed"}
+        )
+
+        r = await auto_client.post(
+            "/v1/responses", json={"model": "gpt-native", "input": "hi"}
+        )
+
+        assert r.status_code == 200
+        assert captured[-1]["path"] == "/openai/v1/responses"
+
+    @pytest.mark.parametrize(
+        "capability",
+        [
+            False,
+            "false",
+            None,
+        ],
+    )
+    async def test_unsupported_model_uses_translation(
+        self, auto_client, upstream, capability
+    ):
+        _, captured, responses_map = upstream
+        responses_map["/openai/models"] = _json_reply(
+            self._catalogue("gpt-chat", capability)
+        )
+        responses_map["/openai/deployments/gpt-chat/chat/completions"] = _json_reply(
+            CHAT_OK
+        )
+
+        r = await auto_client.post(
+            "/v1/responses", json={"model": "gpt-chat", "input": "hi"}
+        )
+
+        assert r.status_code == 200
+        assert captured[-1]["path"].startswith(
+            "/openai/deployments/gpt-chat/chat/completions?"
+        )
+
+    async def test_unknown_model_uses_translation(self, auto_client, upstream):
+        _, captured, responses_map = upstream
+        responses_map["/openai/models"] = _json_reply(
+            self._catalogue("some-other-model", True)
+        )
+        responses_map["/openai/deployments/unknown/chat/completions"] = _json_reply(
+            CHAT_OK
+        )
+
+        r = await auto_client.post(
+            "/v1/responses", json={"model": "unknown", "input": "hi"}
+        )
+
+        assert r.status_code == 200
+        assert "/deployments/unknown/chat/completions" in captured[-1]["path"]
+
+    async def test_catalogue_failure_falls_back_to_translation(
+        self, auto_client, upstream
+    ):
+        _, captured, responses_map = upstream
+        responses_map["/openai/models"] = _error_reply(
+            503, {"error": {"message": "catalogue unavailable"}}
+        )
+        responses_map["/openai/deployments/gpt-chat/chat/completions"] = _json_reply(
+            CHAT_OK
+        )
+
+        r = await auto_client.post(
+            "/v1/responses", json={"model": "gpt-chat", "input": "hi"}
+        )
+
+        assert r.status_code == 200
+        assert [entry["path"].split("?")[0] for entry in captured] == [
+            "/openai/models",
+            "/openai/deployments/gpt-chat/chat/completions",
+        ]
+
+    async def test_catalogue_refresh_retries_429(self, upstream):
+        upstream_url, _, responses_map = upstream
+        sleeps = []
+
+        async def fake_sleep(delay):
+            sleeps.append(delay)
+
+        catalogue, state = _sequence_replies(
+            _error_reply(
+                429,
+                {"error": {"message": "busy"}},
+                headers={"Retry-After": "0.1"},
+            ),
+            _json_reply(self._catalogue("gpt-native", True)),
+        )
+        responses_map["/openai/models"] = catalogue
+        responses_map["/openai/v1/responses"] = _json_reply(
+            {"id": "resp_native", "status": "completed"}
+        )
+        app, _ = _build_for(
+            upstream_url,
+            responses_mode="auto",
+            retry_429=1,
+            retry_sleep=fake_sleep,
+        )
+        async with (
+            LifespanManager(app),
+            httpx.AsyncClient(
+                transport=httpx.ASGITransport(app),
+                base_url="http://test",
+                timeout=10,
+            ) as client,
+        ):
+            r = await client.post(
+                "/v1/responses", json={"model": "gpt-native", "input": "hi"}
+            )
+
+        assert r.status_code == 200
+        assert state["calls"] == 2
+        assert sleeps == [0.1]
+
+    async def test_catalogue_is_cached(self, auto_client, upstream):
+        _, captured, responses_map = upstream
+        responses_map["/openai/models"] = _json_reply(
+            self._catalogue("gpt-chat", False)
+        )
+        responses_map["/openai/deployments/gpt-chat/chat/completions"] = _json_reply(
+            CHAT_OK
+        )
+
+        for _ in range(2):
+            r = await auto_client.post(
+                "/v1/responses", json={"model": "gpt-chat", "input": "hi"}
+            )
+            assert r.status_code == 200
+
+        paths = [entry["path"].split("?")[0] for entry in captured]
+        assert paths.count("/openai/models") == 1
+        assert paths.count("/openai/deployments/gpt-chat/chat/completions") == 2
+
+    async def test_concurrent_requests_share_one_catalogue_refresh(
+        self, auto_client, upstream
+    ):
+        _, captured, responses_map = upstream
+        catalogue_reply = _json_reply(self._catalogue("gpt-chat", False))
+
+        def slow_catalogue(h, body):
+            time.sleep(0.05)
+            catalogue_reply(h, body)
+
+        responses_map["/openai/models"] = slow_catalogue
+        responses_map["/openai/deployments/gpt-chat/chat/completions"] = _json_reply(
+            CHAT_OK
+        )
+
+        replies = await asyncio.gather(
+            *[
+                auto_client.post(
+                    "/v1/responses", json={"model": "gpt-chat", "input": str(index)}
+                )
+                for index in range(10)
+            ]
+        )
+
+        assert all(reply.status_code == 200 for reply in replies)
+        paths = [entry["path"].split("?")[0] for entry in captured]
+        assert paths.count("/openai/models") == 1
+
+    async def test_default_deployment_is_injected_for_native_request(self, upstream):
+        upstream_url, captured, responses_map = upstream
+        responses_map["/openai/models"] = _json_reply(
+            self._catalogue("gpt-default", True)
+        )
+        responses_map["/openai/v1/responses"] = _json_reply(
+            {"id": "resp_native", "status": "completed"}
+        )
+        app, _ = _build_for(
+            upstream_url,
+            responses_mode="auto",
+            default_dep="gpt-default",
+        )
+        async with (
+            LifespanManager(app),
+            httpx.AsyncClient(
+                transport=httpx.ASGITransport(app),
+                base_url="http://test",
+                timeout=10,
+            ) as client,
+        ):
+            r = await client.post("/v1/responses", json={"input": "hi"})
+
+        assert r.status_code == 200
+        assert json.loads(captured[-1]["body"])["model"] == "gpt-default"
+
+    async def test_model_capability_wins_over_request_features(
+        self, auto_client, upstream
+    ):
+        _, captured, responses_map = upstream
+        responses_map["/openai/models"] = _json_reply(
+            self._catalogue("gpt-chat", False)
+        )
+        responses_map["/openai/deployments/gpt-chat/chat/completions"] = _json_reply(
+            CHAT_OK
+        )
+
+        r = await auto_client.post(
+            "/v1/responses",
+            json={"model": "gpt-chat", "input": "hi", "store": True},
+        )
+
+        assert r.status_code == 200
+        assert [entry["path"].split("?")[0] for entry in captured] == [
+            "/openai/models",
+            "/openai/deployments/gpt-chat/chat/completions",
+        ]
+
+    async def test_stored_operations_use_native_passthrough(
+        self, auto_client, upstream
+    ):
+        _, captured, responses_map = upstream
+        responses_map["/openai/v1/responses/resp_1"] = _json_reply({"id": "resp_1"})
+
+        r = await auto_client.get("/v1/responses/resp_1")
+
+        assert r.status_code == 200
+        assert captured[-1]["path"] == "/openai/v1/responses/resp_1"
+
+    async def test_status_reports_auto(self, auto_client):
+        status = (await auto_client.get("/status")).json()
+        assert status["responses_mode"] == "auto"
 
 
 class TestResponsesStreamingEndpoint:
-    def _chat_sse(self, chunks: list[str]):
+    def _chat_sse(self, chunks: list[str], headers: dict[str, str] | None = None):
         def handler(h, _body):
             h.send_response(200)
             h.send_header("Content-Type", "text/event-stream")
+            for key, value in (headers or {}).items():
+                h.send_header(key, value)
             h.send_header("Transfer-Encoding", "chunked")
             h.end_headers()
             for payload in chunks:
@@ -1736,7 +2836,8 @@ class TestResponsesStreamingEndpoint:
                     }
                 ),
                 "[DONE]",
-            ]
+            ],
+            headers={"X-RateLimit-Remaining-Tokens": "1234"},
         )
 
         async with client.stream(
@@ -1747,6 +2848,7 @@ class TestResponsesStreamingEndpoint:
             assert r.status_code == 200
             assert "text/event-stream" in r.headers["content-type"]
             assert r.headers["cache-control"] == "no-cache"
+            assert r.headers["x-ratelimit-remaining-tokens"] == "1234"
             text = "".join([piece async for piece in r.aiter_text()])
 
         events = self._parse(text)
@@ -1806,14 +2908,16 @@ class TestResponsesStreamingEndpoint:
         responses_map["/openai/deployments/gpt-4o/chat/completions"] = handler
 
         ts: list[float] = []
-        async with httpx.AsyncClient(timeout=10) as c:
-            async with c.stream(
+        async with (
+            httpx.AsyncClient(timeout=10) as c,
+            c.stream(
                 "POST",
                 f"{base}/v1/responses",
                 json={"model": "gpt-4o", "input": "hi", "stream": True},
-            ) as r:
-                async for _ in r.aiter_raw():
-                    ts.append(time.time())
+            ) as r,
+        ):
+            async for _ in r.aiter_raw():
+                ts.append(time.time())
         assert ts[-1] - ts[0] >= 0.15, "responses stream appears buffered"
 
 
@@ -2278,7 +3382,7 @@ class TestBuildChatRequestFromMessages:
 
 
 class TestChatToAnthropicMessage:
-    ECHO = {"model": "gpt-4o"}
+    ECHO: ClassVar = {"model": "gpt-4o"}
 
     def _chat(self, **overrides):
         chat = {
@@ -2435,7 +3539,7 @@ class TestChatToAnthropicMessage:
 
 
 class TestAnthropicStreamTranslator:
-    ECHO = {"model": "gpt-4o"}
+    ECHO: ClassVar = {"model": "gpt-4o"}
 
     def _run(self, chunks: list[dict]) -> list[dict]:
         t = AnthropicStreamTranslator(self.ECHO, id_factory=_ids())
@@ -2691,7 +3795,11 @@ class TestAnthropicMessagesEndpoint:
     async def test_non_streaming_roundtrip(self, client, upstream):
         _, captured, responses_map = upstream
         responses_map["/openai/deployments/gpt-4o/chat/completions"] = _json_reply(
-            ANTHROPIC_CHAT_OK
+            ANTHROPIC_CHAT_OK,
+            headers={
+                "X-RateLimit-Remaining-Requests": "55",
+                "X-RateLimit-Reset-Requests": "3",
+            },
         )
         r = await client.post(
             "/v1/messages",
@@ -2709,6 +3817,8 @@ class TestAnthropicMessagesEndpoint:
         assert body["content"] == [{"type": "text", "text": "pong"}]
         assert body["stop_reason"] == "end_turn"
         assert body["usage"]["input_tokens"] == 12
+        assert r.headers["x-ratelimit-remaining-requests"] == "55"
+        assert r.headers["x-ratelimit-reset-requests"] == "3"
 
         sent = json.loads(captured[-1]["body"])
         assert sent["messages"] == [
@@ -2791,7 +3901,9 @@ class TestAnthropicMessagesEndpoint:
     async def test_upstream_error_uses_anthropic_shape(self, client, upstream):
         _, _, responses_map = upstream
         responses_map["/openai/deployments/gpt-4o/chat/completions"] = _error_reply(
-            429, {"error": {"message": "slow down", "param": "prompt"}}
+            429,
+            {"error": {"message": "slow down", "param": "prompt"}},
+            headers={"Retry-After": "9", "X-RateLimit-Reset-Tokens": "9"},
         )
         r = await client.post(
             "/v1/messages",
@@ -2806,6 +3918,8 @@ class TestAnthropicMessagesEndpoint:
             "type": "error",
             "error": {"type": "rate_limit_error", "message": "slow down"},
         }
+        assert r.headers["retry-after"] == "9"
+        assert r.headers["x-ratelimit-reset-tokens"] == "9"
 
     async def test_invalid_json_400(self, client):
         r = await client.post(
@@ -2822,21 +3936,23 @@ class TestAnthropicMessagesEndpoint:
             ANTHROPIC_CHAT_OK
         )
         app, _ = _build_for(upstream_url, api_key="sekret")
-        async with LifespanManager(app):
-            async with httpx.AsyncClient(
+        async with (
+            LifespanManager(app),
+            httpx.AsyncClient(
                 transport=httpx.ASGITransport(app), base_url="http://test", timeout=10
-            ) as c:
-                payload = {
-                    "model": "gpt-4o",
-                    "max_tokens": 5,
-                    "messages": [{"role": "user", "content": "hi"}],
-                }
-                ok = await c.post(
-                    "/v1/messages", json=payload, headers={"x-api-key": "sekret"}
-                )
-                bad = await c.post(
-                    "/v1/messages", json=payload, headers={"x-api-key": "wrong"}
-                )
+            ) as c,
+        ):
+            payload = {
+                "model": "gpt-4o",
+                "max_tokens": 5,
+                "messages": [{"role": "user", "content": "hi"}],
+            }
+            ok = await c.post(
+                "/v1/messages", json=payload, headers={"x-api-key": "sekret"}
+            )
+            bad = await c.post(
+                "/v1/messages", json=payload, headers={"x-api-key": "wrong"}
+            )
         assert ok.status_code == 200
         assert bad.status_code == 401
         assert bad.json()["error"]["type"] == "authentication_error"
@@ -2885,17 +4001,19 @@ class TestAnthropicMessagesEndpoint:
             ANTHROPIC_CHAT_OK
         )
         app, _ = _build_for(upstream_url, default_dep="dep-y")
-        async with LifespanManager(app):
-            async with httpx.AsyncClient(
+        async with (
+            LifespanManager(app),
+            httpx.AsyncClient(
                 transport=httpx.ASGITransport(app), base_url="http://test", timeout=10
-            ) as c:
-                r = await c.post(
-                    "/v1/messages",
-                    json={
-                        "max_tokens": 5,
-                        "messages": [{"role": "user", "content": "hi"}],
-                    },
-                )
+            ) as c,
+        ):
+            r = await c.post(
+                "/v1/messages",
+                json={
+                    "max_tokens": 5,
+                    "messages": [{"role": "user", "content": "hi"}],
+                },
+            )
         assert r.status_code == 200
         assert "/deployments/dep-y/" in captured[-1]["path"]
 
@@ -2903,18 +4021,20 @@ class TestAnthropicMessagesEndpoint:
         upstream_url, captured, responses_map = upstream
         responses_map["/openai/deployments/gpt-4o/messages"] = _json_reply({"ok": 2})
         app, _ = _build_for(upstream_url, anthropic_mode="passthrough")
-        async with LifespanManager(app):
-            async with httpx.AsyncClient(
+        async with (
+            LifespanManager(app),
+            httpx.AsyncClient(
                 transport=httpx.ASGITransport(app), base_url="http://test", timeout=10
-            ) as c:
-                r = await c.post(
-                    "/v1/messages",
-                    json={
-                        "model": "gpt-4o",
-                        "max_tokens": 5,
-                        "messages": [{"role": "user", "content": "hi"}],
-                    },
-                )
+            ) as c,
+        ):
+            r = await c.post(
+                "/v1/messages",
+                json={
+                    "model": "gpt-4o",
+                    "max_tokens": 5,
+                    "messages": [{"role": "user", "content": "hi"}],
+                },
+            )
         assert r.status_code == 200
         assert r.json() == {"ok": 2}
         assert "/deployments/gpt-4o/messages" in captured[-1]["path"]
@@ -2982,7 +4102,7 @@ class TestAnthropicCountTokens:
 
 
 class TestAnthropicModels:
-    MODELS = {
+    MODELS: ClassVar = {
         "object": "list",
         "data": [
             {"id": "gpt-4o", "object": "model", "created": 1700000000},
@@ -3173,8 +4293,9 @@ class TestAnthropicStreamingEndpoint:
             chunks, sleep_s=0.1
         )
         ts: list[float] = []
-        async with httpx.AsyncClient(timeout=10) as c:
-            async with c.stream(
+        async with (
+            httpx.AsyncClient(timeout=10) as c,
+            c.stream(
                 "POST",
                 f"{base}/v1/messages",
                 json={
@@ -3183,9 +4304,10 @@ class TestAnthropicStreamingEndpoint:
                     "stream": True,
                     "messages": [{"role": "user", "content": "hi"}],
                 },
-            ) as r:
-                async for _ in r.aiter_raw():
-                    ts.append(time.time())
+            ) as r,
+        ):
+            async for _ in r.aiter_raw():
+                ts.append(time.time())
         assert ts[-1] - ts[0] >= 0.15, "anthropic stream appears buffered"
 
     async def test_many_concurrent_streams(self, client, upstream):
@@ -3370,36 +4492,33 @@ class TestTranslatedEndpointFailureModes:
 
         return build_app(cfg, token_provider=boom)
 
-    async def _client(self, app):
+    def _client(self, app):
         return httpx.AsyncClient(
             transport=httpx.ASGITransport(app), base_url="http://test", timeout=10
         )
 
     async def test_responses_token_failure_500(self, broken_token):
-        async with LifespanManager(broken_token):
-            async with await self._client(broken_token) as c:
-                r = await c.post("/v1/responses", json={"model": "m", "input": "hi"})
+        async with LifespanManager(broken_token), self._client(broken_token) as c:
+            r = await c.post("/v1/responses", json={"model": "m", "input": "hi"})
         assert r.status_code == 500
         assert r.json()["error"]["code"] == "auth_failed"
 
     async def test_messages_token_failure_500(self, broken_token):
-        async with LifespanManager(broken_token):
-            async with await self._client(broken_token) as c:
-                r = await c.post(
-                    "/v1/messages",
-                    json={
-                        "model": "m",
-                        "max_tokens": 1,
-                        "messages": [{"role": "user", "content": "hi"}],
-                    },
-                )
+        async with LifespanManager(broken_token), self._client(broken_token) as c:
+            r = await c.post(
+                "/v1/messages",
+                json={
+                    "model": "m",
+                    "max_tokens": 1,
+                    "messages": [{"role": "user", "content": "hi"}],
+                },
+            )
         assert r.status_code == 500
         assert r.json()["error"]["type"] == "api_error"
 
     async def test_models_token_failure_500(self, broken_token):
-        async with LifespanManager(broken_token):
-            async with await self._client(broken_token) as c:
-                r = await c.get("/anthropic/v1/models")
+        async with LifespanManager(broken_token), self._client(broken_token) as c:
+            r = await c.get("/anthropic/v1/models")
         assert r.status_code == 500
 
     @pytest.fixture
@@ -3420,39 +4539,35 @@ class TestTranslatedEndpointFailureModes:
         return build_app(cfg, token_provider=_fake_token)
 
     async def test_responses_upstream_unreachable_502(self, dead_upstream):
-        async with LifespanManager(dead_upstream):
-            async with await self._client(dead_upstream) as c:
-                r = await c.post("/v1/responses", json={"model": "m", "input": "hi"})
+        async with LifespanManager(dead_upstream), self._client(dead_upstream) as c:
+            r = await c.post("/v1/responses", json={"model": "m", "input": "hi"})
         assert r.status_code == 502
         assert r.json()["error"]["code"] == "upstream_unreachable"
 
     async def test_messages_upstream_unreachable_502(self, dead_upstream):
-        async with LifespanManager(dead_upstream):
-            async with await self._client(dead_upstream) as c:
-                r = await c.post(
-                    "/v1/messages",
-                    json={
-                        "model": "m",
-                        "max_tokens": 1,
-                        "messages": [{"role": "user", "content": "hi"}],
-                    },
-                )
+        async with LifespanManager(dead_upstream), self._client(dead_upstream) as c:
+            r = await c.post(
+                "/v1/messages",
+                json={
+                    "model": "m",
+                    "max_tokens": 1,
+                    "messages": [{"role": "user", "content": "hi"}],
+                },
+            )
         assert r.status_code == 502
         assert r.json()["error"]["type"] == "api_error"
 
     async def test_count_tokens_upstream_unreachable_502(self, dead_upstream):
-        async with LifespanManager(dead_upstream):
-            async with await self._client(dead_upstream) as c:
-                r = await c.post(
-                    "/v1/messages/count_tokens",
-                    json={"model": "m", "messages": [{"role": "user", "content": "x"}]},
-                )
+        async with LifespanManager(dead_upstream), self._client(dead_upstream) as c:
+            r = await c.post(
+                "/v1/messages/count_tokens",
+                json={"model": "m", "messages": [{"role": "user", "content": "x"}]},
+            )
         assert r.status_code == 502
 
     async def test_models_upstream_unreachable_502(self, dead_upstream):
-        async with LifespanManager(dead_upstream):
-            async with await self._client(dead_upstream) as c:
-                r = await c.get("/anthropic/v1/models")
+        async with LifespanManager(dead_upstream), self._client(dead_upstream) as c:
+            r = await c.get("/anthropic/v1/models")
         assert r.status_code == 502
 
     def _garbage(self):
@@ -3532,7 +4647,6 @@ class TestCli:
 
     def _run(self, monkeypatch, args):
         import click.testing
-
         import openai_proxy
 
         captured = {}
@@ -3553,9 +4667,11 @@ class TestCli:
 
     def test_defaults(self, monkeypatch):
         cfg = self._run(monkeypatch, [])["cfg"]
-        assert cfg["responses_mode"] == "translate"
+        assert cfg["responses_mode"] == "auto"
         assert cfg["anthropic_mode"] == "translate"
         assert cfg["token_field"] is None
+        assert cfg["retry_429"] == 2
+        assert cfg["retry_max_wait"] == 30
         assert cfg["base"].endswith("/gcr/shared/openai")
 
     def test_modes_and_token_field(self, monkeypatch):
@@ -3572,6 +4688,10 @@ class TestCli:
                 "dep",
                 "--api-key",
                 "k",
+                "--retry-429",
+                "4",
+                "--retry-max-wait",
+                "12.5",
             ],
         )["cfg"]
         assert cfg["responses_mode"] == "passthrough"
@@ -3579,6 +4699,8 @@ class TestCli:
         assert cfg["token_field"] == "max_completion_tokens"
         assert cfg["default_dep"] == "dep"
         assert cfg["api_key"] == "k"
+        assert cfg["retry_429"] == 4
+        assert cfg["retry_max_wait"] == 12.5
 
     def test_host_and_port_forwarded_to_uvicorn(self, monkeypatch):
         captured = self._run(monkeypatch, ["--host", "0.0.0.0", "--port", "9999"])
