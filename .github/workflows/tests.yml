@@ -62,7 +62,7 @@ jobs:
       - name: Check formatting and lints
         run: |
           uvx ruff@0.9.3 check src tests scripts
-          uvx ruff@0.9.3 format --check src tests
+          uvx ruff@0.9.3 format --check src tests scripts
 
   catalog:
     name: Catalog is in sync

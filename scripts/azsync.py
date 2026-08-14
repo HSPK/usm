@@ -1735,17 +1735,17 @@ def cmd_ls():
 
     columns = [("ID", {"min_width": 6})]
     if show_source:
-        columns.append(("Source", {"min_width": 10, "max_width": 26}))
+        columns.append(("source", {"min_width": 10, "max_width": 26}))
     columns += [
         # The only column allowed to take whatever is left over.
-        ("Destination", {"min_width": 14, "ratio": 1}),
-        ("Status", {"min_width": 8}),
-        ("Pending", {"justify": "right", "min_width": 10}),
-        ("Last sync", {"min_width": 9}),
+        ("destination", {"min_width": 14, "ratio": 1}),
+        ("status", {"min_width": 8}),
+        ("pending", {"justify": "right", "min_width": 10}),
+        ("last sync", {"min_width": 9}),
         ("SAS", {"justify": "right", "min_width": 4}),
     ]
     if show_boot:
-        columns.append(("Boot", {"justify": "center", "min_width": 4}))
+        columns.append(("boot", {"justify": "center", "min_width": 4}))
     table = new_table(*columns)
 
     now = time.time()

@@ -530,10 +530,10 @@ def _print_cache_table(
         ui.hint("No known reclaimable caches found.")
         return
     columns = [
-        ui.Column("Name", style="bold cyan"),
-        ui.Column("Size", justify="right"),
-        ui.Column("Reclaim", hide_below=72),
-        ui.Column("Path", ratio=1, hide_below=56),
+        ui.Column("name", style="bold cyan"),
+        ui.Column("size", justify="right"),
+        ui.Column("reclaim", hide_below=72),
+        ui.Column("path", ratio=1, hide_below=56),
     ]
     table = ui.table(*columns, title=title)
     for row in rows:
@@ -543,10 +543,10 @@ def _print_cache_table(
             *ui.row_for(
                 columns,
                 {
-                    "Name": row["name"],
-                    "Size": row["size"],
-                    "Reclaim": row["reclaim"],
-                    "Path": path_text,
+                    "name": row["name"],
+                    "size": row["size"],
+                    "reclaim": row["reclaim"],
+                    "path": path_text,
                 },
             )
         )
@@ -586,12 +586,12 @@ def _print_filesystems(rows: list[dict[str, object]]) -> None:
         ui.hint("No filesystems to show.")
         return
     columns = [
-        ui.Column("Mount", ratio=1),
-        ui.Column("Used", justify="right"),
-        ui.Column("Free", justify="right"),
+        ui.Column("mount", ratio=1),
+        ui.Column("used", justify="right"),
+        ui.Column("free", justify="right"),
         ui.Column("Use%", justify="right"),
         ui.Column("FS", hide_below=76),
-        ui.Column("Device", hide_below=92),
+        ui.Column("device", hide_below=92),
     ]
     table = ui.table(*columns, title="Filesystems")
     for row in rows:
@@ -599,12 +599,12 @@ def _print_filesystems(rows: list[dict[str, object]]) -> None:
             *ui.row_for(
                 columns,
                 {
-                    "Mount": ui.shorten_path(row["mount"]),
-                    "Used": ui.human_bytes(row["used"]),
-                    "Free": ui.human_bytes(row["free"]),
-                    "Use%": f"{row['percent']:.0f}%",
+                    "mount": ui.shorten_path(row["mount"]),
+                    "used": ui.human_bytes(row["used"]),
+                    "free": ui.human_bytes(row["free"]),
+                    "use%": f"{row['percent']:.0f}%",
                     "FS": row["fstype"],
-                    "Device": row["filesystem"],
+                    "device": row["filesystem"],
                 },
             )
         )
@@ -698,7 +698,7 @@ def cmd_top(path: Path, limit: int, depth: int) -> None:
     if not rows:
         ui.hint("No entries found.")
         return
-    columns = [ui.Column("Size", justify="right"), ui.Column("Path", ratio=1)]
+    columns = [ui.Column("size", justify="right"), ui.Column("path", ratio=1)]
     table = ui.table(*columns, title=f"Largest under {ui.shorten_path(path)}")
     for entry, size in rows:
         try:
@@ -707,7 +707,7 @@ def cmd_top(path: Path, limit: int, depth: int) -> None:
             shown = entry
         table.add_row(
             *ui.row_for(
-                columns, {"Size": ui.human_bytes(size), "Path": ui.shorten_path(shown)}
+                columns, {"size": ui.human_bytes(size), "path": ui.shorten_path(shown)}
             )
         )
     ui.print(table)

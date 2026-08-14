@@ -52,15 +52,20 @@ a log just because someone interpolated a URL into a message.
 
 ## Tables
 
+Headers are **lowercase**: they are dim context, not titles, and shouting
+them competes with the bold-cyan identifiers in the rows. Short acronyms
+(`SAS`, `TCP`, `SSH`) keep their case because lowercasing them makes them
+harder to read, not easier.
+
 A listing row is **one line**. Columns are dropped as the terminal narrows
 rather than every column being squeezed into uselessness — the detail view
 always has the full picture.
 
 ```python
 built = ui.table(
-    ui.Column("ID", min_width=6),
-    ui.Column("Source", hide_below=110),      # first to go
-    ui.Column("Destination", min_width=14, ratio=1),
+    ui.Column("id", min_width=6),
+    ui.Column("source", hide_below=110),      # first to go
+    ui.Column("destination", min_width=14, ratio=1),
     ui.Column("SAS", justify="right", hide_below=80),
     title="Syncs",
 )

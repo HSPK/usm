@@ -1106,15 +1106,15 @@ def cmd_ls(show_all):
 
     columns = [
         ("ID", {"min_width": 6}),
-        ("Mount", {"min_width": 12, "ratio": 1}),
-        ("Container", {"min_width": 12, "ratio": 1}),
-        ("Supervisor", {"min_width": 10}),
-        ("Health", {"min_width": 9}),
+        ("mount", {"min_width": 12, "ratio": 1}),
+        ("container", {"min_width": 12, "ratio": 1}),
+        ("supervisor", {"min_width": 10}),
+        ("health", {"min_width": 9}),
     ]
     if show_sas:
         columns.append(("SAS", {"justify": "right", "min_width": 4}))
     if show_boot:
-        columns.append(("Boot", {"justify": "center", "min_width": 4}))
+        columns.append(("boot", {"justify": "center", "min_width": 4}))
     table = new_table(*columns)
 
     managed_dirs = set()

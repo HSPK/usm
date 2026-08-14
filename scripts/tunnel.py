@@ -635,9 +635,7 @@ def _supervise(tid: str) -> int:
                 )
             except FileNotFoundError:
                 log.write(f"{argv[0]} not found on PATH.\n".encode())
-                _save_runtime(
-                    tid, pid=None, supervisor_pid=None, started_at=None
-                )
+                _save_runtime(tid, pid=None, supervisor_pid=None, started_at=None)
                 return 127
 
             _save_runtime(
@@ -945,8 +943,7 @@ def cmd_stop(target):
                 _clear_runtime(t)
                 t.save()
                 console.print(
-                    f"[green]✓[/green] {t.id}: stopped "
-                    f"({_service_target_name(t.id)})"
+                    f"[green]✓[/green] {t.id}: stopped ({_service_target_name(t.id)})"
                 )
             else:
                 console.print(

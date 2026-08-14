@@ -405,12 +405,12 @@ def dump_json(data: Any) -> None:
 
 def print_host_table(rows: Iterable[dict[str, Any]], *, title: str = "Hosts") -> None:
     columns = [
-        ui.Column("Alias", min_width=6, style="bold cyan"),
-        ui.Column("Target", min_width=12, ratio=1),
-        ui.Column("Port", hide_below=70),
-        ui.Column("Identity", ratio=1, hide_below=88),
-        ui.Column("Tags", hide_below=70),
-        ui.Column("Reach", hide_below=78),
+        ui.Column("alias", min_width=6, style="bold cyan"),
+        ui.Column("target", min_width=12, ratio=1),
+        ui.Column("port", hide_below=70),
+        ui.Column("identity", ratio=1, hide_below=88),
+        ui.Column("tags", hide_below=70),
+        ui.Column("reach", hide_below=78),
     ]
     table = ui.table(*columns, title=title)
     for row in rows:
@@ -748,10 +748,10 @@ def exec_cmd(
         dump_json(results)
         raise SystemExit(1 if any(not r["ok"] for r in results) else 0)
     columns = [
-        ui.Column("Host", style="bold cyan"),
-        ui.Column("State"),
-        ui.Column("Code", justify="right"),
-        ui.Column("Time", justify="right"),
+        ui.Column("host", style="bold cyan"),
+        ui.Column("state"),
+        ui.Column("code", justify="right"),
+        ui.Column("time", justify="right"),
     ]
     table = ui.table(*columns, title="Results")
     for result in results:
@@ -787,11 +787,11 @@ def check(aliases: tuple[str, ...], timeout: float, as_json: bool) -> None:
         dump_json(rows)
         return
     columns = [
-        ui.Column("Host", style="bold cyan"),
+        ui.Column("host", style="bold cyan"),
         ui.Column("TCP"),
         ui.Column("SSH"),
-        ui.Column("Time", justify="right"),
-        ui.Column("Message", ratio=1, hide_below=70),
+        ui.Column("time", justify="right"),
+        ui.Column("message", ratio=1, hide_below=70),
     ]
     table = ui.table(*columns, title="Reachability")
     for row in rows:

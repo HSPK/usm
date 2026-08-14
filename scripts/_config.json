@@ -15,8 +15,8 @@
         "usmo>=0.12.0",
         "watchdog>=4.0.0"
       ],
-      "version": "1.0.6",
-      "hash": "sha256:258016349b41dacedb51cbe7717b7e1399a30ff2db93fd7396deb3e389ef116b"
+      "version": "1.0.7",
+      "hash": "sha256:4bd559f7fac678e6d9f6fc6f601aa0c6ced2856be862a508bf255f1781b85991"
     },
     "bench": {
       "description": "Benchmark CPU / memory / disk / network / GPU.",
@@ -43,8 +43,8 @@
         "rich>=13.0",
         "usmo>=0.12.0"
       ],
-      "version": "1.0.6",
-      "hash": "sha256:f7027f94e815ecbfe9082f9ece485bd4941e676f5270cde29fe0a5f354d38489"
+      "version": "1.0.7",
+      "hash": "sha256:9749796151b1c729b35deb86d0b81792cff5c7550244ff3944100a0ca9b4b4c5"
     },
     "check_py": {
       "description": "Show active Python/pip versions.",
@@ -121,8 +121,8 @@
         "usmo>=0.12.0",
         "psutil>=7.1.3"
       ],
-      "version": "1.0.1",
-      "hash": "sha256:50a0654ee29a52f3a7f3c077e2c6a26c0f39160d35f0067a28bd61ecd555654f"
+      "version": "1.0.2",
+      "hash": "sha256:7814013560fcfcf4501808d9495a27f3cb80dbcbcac2403aa9371bde4876f307"
     },
     "git-auth": {
       "description": "Select Git identities and SSH keys by directory.",
@@ -130,8 +130,8 @@
       "requirements": [
         "click>=8.2.1"
       ],
-      "version": "1.0.3",
-      "hash": "sha256:d80beb40c42e8fc6b55884fdcd2390094c68463d46a36145242a50d3490cda87"
+      "version": "1.0.4",
+      "hash": "sha256:210a9f3b6f13cfb5d3ea444a6435dc0a30c2db73e1285756411a42f202a72f69"
     },
     "gpu": {
       "description": "GPU inventory, free-picker, watch, and kill.",
@@ -151,8 +151,8 @@
         "rich>=13.0",
         "usmo>=0.12.0"
       ],
-      "version": "1.0.0",
-      "hash": "sha256:cff4433dcdc2c641ae8094ae86c22ee46670ad95bc5fe5d1900c5ee1d4b23314"
+      "version": "1.0.1",
+      "hash": "sha256:1ceeed87c4313aad25d85fe1fe2ecd4059505cee77b1fb1fe68eb5d2bd5ef2db"
     },
     "init": {
       "description": "Bootstrap a machine with modern dev tools (cross-platform).",
@@ -292,8 +292,8 @@
         "usmo>=0.12.0",
         "psutil>=7.1.3"
       ],
-      "version": "1.0.0",
-      "hash": "sha256:64666dee9131f1cd1faabb778410378557428fe3d17413d1c260f23f3bbd9a15"
+      "version": "1.0.1",
+      "hash": "sha256:4edaffb19428b9b5bd7b846ed8351f2c793f6face36c0e0ae1a6f1e32ce1ec42"
     },
     "ssh": {
       "description": "ssh with auto-reconnect and terminal repair.",
@@ -332,8 +332,8 @@
         "click>=8.2.1",
         "rich>=13.0"
       ],
-      "version": "1.3.7",
-      "hash": "sha256:bdd370e833ad32ac9969a8ed029736d8bc54d3507c27b65db9e45e77b8fd9102"
+      "version": "1.3.8",
+      "hash": "sha256:88a586f351ff2516e4ade54872ccc7881b91dd7a758d61ee8f2b229c97723bf3"
     },
     "wait": {
       "description": "Block until host:port / TCP / HTTP is reachable.",

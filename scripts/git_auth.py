@@ -256,9 +256,7 @@ def _validate_string_settings(
         _validate_profile_value(path, key, key_validator)
 
 
-def _validate_loaded_profile(
-    alias: str, data: dict[str, Any], path: Path
-) -> None:
+def _validate_loaded_profile(alias: str, data: dict[str, Any], path: Path) -> None:
     if data.get("alias") != alias:
         raise _invalid_profile(path, f"alias does not match {alias!r}")
     for field, validator in (("name", _validate_name), ("email", _validate_email)):
@@ -271,9 +269,7 @@ def _validate_loaded_profile(
     if not isinstance(ssh, dict):
         raise _invalid_profile(path, "ssh must be an object")
     identity = ssh.get("identity_file")
-    if identity is not None and (
-        not isinstance(identity, str) or not identity.strip()
-    ):
+    if identity is not None and (not isinstance(identity, str) or not identity.strip()):
         raise _invalid_profile(
             path, "ssh.identity_file must be a non-empty string or null"
         )

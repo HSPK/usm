@@ -933,10 +933,10 @@ def cli(
 def ls_checks() -> None:
     table = ui.table(
         ui.Column("ID", min_width=8, style="bold cyan"),
-        ui.Column("Category", min_width=10),
-        ui.Column("Slow", justify="center"),
-        ui.Column("Online", justify="center"),
-        ui.Column("Title", min_width=20, ratio=1),
+        ui.Column("category", min_width=10),
+        ui.Column("slow", justify="center"),
+        ui.Column("online", justify="center"),
+        ui.Column("title", min_width=20, ratio=1),
     )
     for check in CHECKS:
         table.add_row(
