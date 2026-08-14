@@ -12,7 +12,7 @@
         "psutil>=7.1.3",
         "pyyaml>=6.0.3",
         "rich>=13.0",
-        "usmo>=0.11.0",
+        "usmo>=0.12.0",
         "watchdog>=4.0.0"
       ],
       "version": "1.0.6",
@@ -41,7 +41,7 @@
         "psutil>=7.1.3",
         "pyyaml>=6.0.3",
         "rich>=13.0",
-        "usmo>=0.11.0"
+        "usmo>=0.12.0"
       ],
       "version": "1.0.6",
       "hash": "sha256:f7027f94e815ecbfe9082f9ece485bd4941e676f5270cde29fe0a5f354d38489"
@@ -106,7 +106,7 @@
       "requirements": [
         "click>=8.2.1",
         "rich>=13.0",
-        "usmo>=0.11.2",
+        "usmo>=0.12.0",
         "requests>=2.32.4"
       ],
       "version": "1.0.0",
@@ -118,7 +118,7 @@
       "requirements": [
         "click>=8.2.1",
         "rich>=13.0",
-        "usmo>=0.11.2",
+        "usmo>=0.12.0",
         "psutil>=7.1.3"
       ],
       "version": "1.0.1",
@@ -149,7 +149,7 @@
       "requirements": [
         "click>=8.2.1",
         "rich>=13.0",
-        "usmo>=0.11.2"
+        "usmo>=0.12.0"
       ],
       "version": "1.0.0",
       "hash": "sha256:cff4433dcdc2c641ae8094ae86c22ee46670ad95bc5fe5d1900c5ee1d4b23314"
@@ -289,7 +289,7 @@
       "requirements": [
         "click>=8.2.1",
         "rich>=13.0",
-        "usmo>=0.11.2",
+        "usmo>=0.12.0",
         "psutil>=7.1.3"
       ],
       "version": "1.0.0",
@@ -314,7 +314,7 @@
       "requirements": [
         "click>=8.2.1",
         "rich>=13.0",
-        "usmo>=0.11.2"
+        "usmo>=0.12.0"
       ],
       "version": "1.0.0",
       "hash": "sha256:006b6eaa1de90026fb5232d1ad4347efa9dc035125f950b47750198e690dda3a"
@@ -355,7 +355,7 @@
       "requirements": [
         "click>=8.2.1",
         "rich>=13.0",
-        "usmo>=0.11.2",
+        "usmo>=0.12.0",
         "watchdog>=4.0.0"
       ],
       "version": "1.0.0",
