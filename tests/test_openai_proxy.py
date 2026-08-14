@@ -431,6 +431,11 @@ class _Upstream(BaseHTTPRequestHandler):
 class _ThreadedHTTP(socketserver.ThreadingMixIn, HTTPServer):
     daemon_threads = True
     allow_reuse_address = True
+    # The default listen backlog is 5. The concurrency tests open 20 sockets
+    # at once, and the accept loop is serial, so on a busy or slow machine
+    # (CI) the excess connections get refused and the test fails for reasons
+    # that have nothing to do with the proxy.
+    request_queue_size = 128
 
 
 def _free_port() -> int:

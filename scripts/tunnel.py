@@ -735,9 +735,14 @@ def _kill_pid(t: Tunnel) -> bool:
     if not _pid_alive(pid):
         return False
     if os.name == "posix":
-        term = lambda sig: os.killpg(pid, sig)
+        # Signal the whole process group: ssh spawns children we also want gone.
+        def term(sig: int) -> None:
+            os.killpg(pid, sig)
     else:
-        term = lambda sig: os.kill(pid, sig)
+
+        def term(sig: int) -> None:
+            os.kill(pid, sig)
+
     try:
         term(signal.SIGTERM)
     except OSError:

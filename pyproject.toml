@@ -1,9 +1,42 @@
 [project]
 name = "usmo"
 dynamic = ["version"]
-description = "Bootstrap machines and run cached utility scripts from one CLI."
+description = "One CLI for the boxes you SSH into: tunnels, proxies, GPUs, Azure storage, and machine bootstrap."
 readme = "README.md"
 requires-python = ">=3.10"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Hangxing Wei", email = "whxway@whu.edu.cn" }]
+keywords = [
+    "cli",
+    "devops",
+    "sysadmin",
+    "ssh",
+    "tunnel",
+    "proxy",
+    "gpu",
+    "azure",
+    "blobfuse",
+    "remote-development",
+    "bootstrap",
+    "uv",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Intended Audience :: System Administrators",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: System :: Systems Administration",
+    "Topic :: System :: Networking",
+    "Topic :: Utilities",
+]
 dependencies = [
     "click>=8.2.1",
     "requests>=2.32.4",
@@ -14,8 +47,10 @@ dependencies = [
 usm = "usmo.cli:cli"
 
 [project.urls]
-Homepage = "https://github.com/HSPK/usm"
+Homepage = "https://hspk.github.io/usm/"
+Documentation = "https://hspk.github.io/usm/commands/"
 Repository = "https://github.com/HSPK/usm"
+Changelog = "https://github.com/HSPK/usm/releases"
 Issues = "https://github.com/HSPK/usm/issues"
 
 [dependency-groups]
@@ -45,6 +80,10 @@ docs = [
 
 [tool.uv]
 package = true
+
+[tool.ruff]
+# Written by hatch-vcs at build time; not ours to format.
+extend-exclude = ["src/usmo/_version.py"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

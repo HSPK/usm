@@ -64,9 +64,7 @@ def test_add_writes_source_and_generated_profile(auth_home, runner):
 
 
 @pytest.mark.parametrize("alias", [".", "..", "1work", "_work", "-work"])
-def test_add_rejects_alias_that_does_not_start_with_letter(
-    auth_home, runner, alias
-):
+def test_add_rejects_alias_that_does_not_start_with_letter(auth_home, runner, alias):
     add_profile(runner, "work")
 
     result = runner.invoke(
@@ -647,9 +645,7 @@ def test_status_parses_git_origin_when_global_path_contains_spaces(
     add_profile(runner, "work")
     invoke_ok(runner, "use", "work", str(repo))
 
-    status_data = json.loads(
-        invoke_ok(runner, "status", str(repo), "--json").output
-    )
+    status_data = json.loads(invoke_ok(runner, "status", str(repo), "--json").output)
 
     actual = status_data["actual"]["user.name"]
     assert actual["value"] == "Space User"
@@ -863,9 +859,7 @@ def test_doctor_detects_and_repairs_stale_profile_render(auth_home, runner):
 
 
 @pytest.mark.parametrize("command", ["doctor", "sync"])
-def test_commands_report_invalid_persisted_git_key(
-    auth_home, runner, command
-):
+def test_commands_report_invalid_persisted_git_key(auth_home, runner, command):
     add_profile(runner, "work")
     profile_path = auth_home / "profiles" / "work" / "profile.json"
     profile = json.loads(profile_path.read_text())

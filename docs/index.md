@@ -47,11 +47,15 @@ you want from the [Commands](commands/index.md) section.
 
 | Command | What it does |
 | --- | --- |
+| [`usm ssh`](commands/ssh.md) | ssh with auto-reconnect and terminal repair |
 | [`usm tunnel`](commands/tunnel.md) | SSH tunnels (local / remote / SOCKS) with state + launchd/systemd autostart |
 | [`usm proxy`](commands/proxy.md) | Turn a box into an HTTP/SOCKS (+Shadowsocks) proxy, or a Clash client routing rule-matched traffic through one (mihomo) |
 | [`usm clash`](commands/clash.md) | ClashX-style CLI manager for mihomo: subscriptions, TUN, mode, node selection, system proxy, LAN, live logs, latency tests |
 | [`usm gpu`](commands/gpu.md) | GPU inventory, free-picker, watch, kill (nvidia-smi wrapper) |
+| [`usm net`](commands/net.md) | Inspect, diagnose, and monitor host networking |
 | [`usm port`](commands/port.md) | Show what's on a port; kill the holder |
+| [`usm session`](commands/session.md) | Inspect and manage logged-in user sessions |
+| [`usm disk`](commands/disk.md) | Inspect, partition, format, and mount disks |
 | [`usm notify`](commands/notify.md) | Wrap a command and ping ntfy.sh / Telegram / webhook when it exits |
 | [`usm secret`](commands/secret.md) | Encrypted local env store; inject into shells or processes |
 | [`usm git-auth`](commands/git-auth.md) | Automatically select Git identity and SSH key by directory |

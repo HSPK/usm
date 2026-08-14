@@ -192,7 +192,7 @@ own build to bypass the download entirely.
 `~/.config/systemd/user/usm-proxy-<id>.service`, runs `daemon-reload`, then
 `systemctl --user enable --now`. The unit runs `usm proxy up <id>` in the
 foreground, restarts on failure, and starts after `network-online.target` —
-exactly like [`usm tunnel`](tunnel.md#autostart-at-boot-systemd).
+exactly like [`usm tunnel`](tunnel.md#autostart-at-login-boot).
 
 !!! warning "Linger for actual boot-time start"
     User units only start at login unless linger is on:
