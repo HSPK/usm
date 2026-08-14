@@ -66,6 +66,10 @@ nav:
   - Installation: installation.md
   - Commands:
       - Overview: commands/index.md
+      - doctor — Machine health check: commands/doctor.md
+      - svc — Run anything as a service: commands/svc.md
+      - watch — Re-run on file change: commands/watch.md
+      - host — SSH inventory and fan-out: commands/host.md
       - session — Login sessions: commands/session.md
       - net — Network inspect/diagnose: commands/net.md
       - tunnel — SSH tunnels: commands/tunnel.md
@@ -75,10 +79,12 @@ nav:
       - gpu — GPU picker/watch: commands/gpu.md
       - port — Port discovery/kill: commands/port.md
       - disk — Disk partition/format/mount: commands/disk.md
+      - space — Find and reclaim disk: commands/space.md
       - notify — Long-task pings: commands/notify.md
       - secret — Encrypted env store: commands/secret.md
       - git-auth — Git identities and SSH keys: commands/git-auth.md
       - rsync — Smart rsync wrapper: commands/rsync.md
+      - dl — Resumable downloads: commands/dl.md
       - clip — Clipboard / OSC52: commands/clip.md
       - wait — wait-for-it: commands/wait.md
       - bench — Machine benchmark: commands/bench.md

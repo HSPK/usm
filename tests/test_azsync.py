@@ -20,6 +20,7 @@ import pytest
 
 import azsync
 import usm_azure
+import usm_daemon
 from usm_azure import (
     ExcludeSpec,
     SasError,
@@ -1760,7 +1761,7 @@ class TestDaemonLifecycle:
         finally:
             azsync.stop_daemon(job.id)
 
-        assert wait_until(lambda: not usm_azure.pid_alive(pid), timeout=15)
+        assert wait_until(lambda: not usm_daemon.pid_alive(pid), timeout=15)
         final = azsync.load_state(job.id)
         assert final.state == "stopped"
         assert final.last_result == OK
@@ -1785,7 +1786,7 @@ class TestDaemonLifecycle:
             assert azsync.load_state(job.id).total_syncs == baseline
         finally:
             azsync.stop_daemon(job.id)
-        wait_until(lambda: not usm_azure.pid_alive(pid), timeout=15)
+        wait_until(lambda: not usm_daemon.pid_alive(pid), timeout=15)
 
     def test_manual_trigger_reaches_a_running_daemon(
         self, tmp_path, state_dir, fake_azcopy
@@ -1803,7 +1804,7 @@ class TestDaemonLifecycle:
             )
         finally:
             azsync.stop_daemon(job.id)
-        wait_until(lambda: not usm_azure.pid_alive(pid), timeout=15)
+        wait_until(lambda: not usm_daemon.pid_alive(pid), timeout=15)
 
     def test_second_supervisor_refuses_to_start(self, tmp_path, state_dir, fake_azcopy):
         fake_azcopy.program(ok_step())
@@ -1814,7 +1815,7 @@ class TestDaemonLifecycle:
             assert azsync.run_supervisor(job.id) == 1  # lock held
         finally:
             azsync.stop_daemon(job.id)
-        wait_until(lambda: not usm_azure.pid_alive(pid), timeout=15)
+        wait_until(lambda: not usm_daemon.pid_alive(pid), timeout=15)
 
     def test_missing_source_directory_fails_fast(self, tmp_path, state_dir):
         job = make_job(tmp_path, id="ghost", source=tmp_path / "watched", auth="aad")
@@ -1833,7 +1834,7 @@ class TestDaemonLifecycle:
             assert wait_until(lambda: azsync.is_running(job.id))
         finally:
             azsync.stop_daemon(job.id)
-        assert wait_until(lambda: not usm_azure.pid_alive(pid), timeout=15)
+        assert wait_until(lambda: not usm_daemon.pid_alive(pid), timeout=15)
         assert azsync.is_running(job.id) is False
 
     def test_pid_alive_ignores_zombies(self):
@@ -1843,18 +1844,18 @@ class TestDaemonLifecycle:
         proc = sp.Popen([os.sys.executable, "-c", "pass"])
         try:
             deadline = time.time() + 10
-            while time.time() < deadline and usm_azure._is_zombie(proc.pid) is False:
+            while time.time() < deadline and usm_daemon._is_zombie(proc.pid) is False:
                 time.sleep(0.05)
-            assert usm_azure._is_zombie(proc.pid) is True, "expected a zombie"
-            assert usm_azure.pid_alive(proc.pid) is False
+            assert usm_daemon._is_zombie(proc.pid) is True, "expected a zombie"
+            assert usm_daemon.pid_alive(proc.pid) is False
         finally:
             proc.wait()
-        assert usm_azure.pid_alive(proc.pid) is False
+        assert usm_daemon.pid_alive(proc.pid) is False
 
     def test_pid_alive_for_self_and_missing(self):
-        assert usm_azure.pid_alive(os.getpid()) is True
-        assert usm_azure.pid_alive(None) is False
-        assert usm_azure.pid_alive(999_999_999) is False
+        assert usm_daemon.pid_alive(os.getpid()) is True
+        assert usm_daemon.pid_alive(None) is False
+        assert usm_daemon.pid_alive(999_999_999) is False
 
 
 # --- Binary resolution, destinations, service detection --------------------
@@ -1949,8 +1950,8 @@ class TestServiceDetection:
         launchd = tmp_path / "launchd"
         systemd.mkdir()
         launchd.mkdir()
-        monkeypatch.setattr(usm_azure, "SYSTEMD_USER_DIR", systemd)
-        monkeypatch.setattr(usm_azure, "LAUNCHD_USER_DIR", launchd)
+        monkeypatch.setattr(usm_daemon, "SYSTEMD_USER_DIR", systemd)
+        monkeypatch.setattr(usm_daemon, "LAUNCHD_USER_DIR", launchd)
         assert azsync.SERVICE.enabled_kind("alpha") is None
         (systemd / "usm-azsync-alpha.service").write_text("[Unit]")
         assert azsync.SERVICE.enabled_kind("alpha") == "systemd"

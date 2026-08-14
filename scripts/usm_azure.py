@@ -29,49 +29,85 @@ from __future__ import annotations
 import fnmatch
 import json
 import os
-import platform
 import re
 import subprocess
-import time
 import urllib.parse
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 
-from usmo.ui import (
+from usmo.ui import short_blob_target
+
+from usm_daemon import (
+    DEFAULT_EXCLUDES,
+    LAUNCHD_USER_DIR,
+    LOCAL_BIN_DIR,
     SECTION,
+    SYSTEMD_USER_DIR,
+    USM_CACHE_DIR,
     Column,
+    ExcludeSpec as _ExcludeSpec,
+    FileLock,
+    ServiceManager,
+    _glob_segment_to_regex,
+    _has_glob,
+    atomic_write,
     compact_duration,
+    default_service_kind,
     elide,
     human_bytes,
     human_duration,
+    kv_table,
+    launchctl,
+    new_table,
+    pid_alive,
+    read_json,
     redact,
-    short_blob_target,
+    run,
+    service_path_value,
     shorten_path,
+    sleep_until,
+    slugify,
+    systemctl,
+    usm_bin,
 )
-from usmo.ui import detail as kv_table
-from usmo.ui import table as new_table
 
-# Re-exported so azsync/blobmount can `from usm_azure import ...` once.
+# Re-exported so azsync/blobmount keep a single `from usm_azure import ...`;
+# the generic half now lives in usm_daemon and is shared with every other
+# long-running usm command.
 __all__ = [
+    "DEFAULT_EXCLUDES",
+    "LAUNCHD_USER_DIR",
+    "LOCAL_BIN_DIR",
     "SECTION",
+    "SYSTEMD_USER_DIR",
+    "USM_CACHE_DIR",
     "Column",
+    "ExcludeSpec",
+    "FileLock",
+    "ServiceManager",
+    "atomic_write",
     "compact_duration",
+    "default_service_kind",
     "elide",
     "human_bytes",
     "human_duration",
     "kv_table",
+    "launchctl",
     "new_table",
+    "pid_alive",
+    "read_json",
     "redact",
+    "run",
+    "service_path_value",
     "short_blob_target",
     "shorten_path",
+    "sleep_until",
+    "slugify",
+    "systemctl",
+    "usm_bin",
 ]
 
-USM_CACHE_DIR = Path.home() / ".cache" / "usm"
-LOCAL_BIN_DIR = USM_CACHE_DIR / "bin"
-
-SYSTEMD_USER_DIR = Path.home() / ".config" / "systemd" / "user"
-LAUNCHD_USER_DIR = Path.home() / "Library" / "LaunchAgents"
 
 DEFAULT_SAS_TTL_HOURS = 168  # 7 days
 DEFAULT_SAS_MIN_REMAINING = 1800.0  # refresh below 30 minutes remaining
@@ -87,111 +123,9 @@ SAS_PERMISSIONS = "racwdl"
 # ==========================================================================
 
 
-def slugify(value: str) -> str:
-    return re.sub(r"[^a-zA-Z0-9]+", "-", value or "").strip("-").lower()
-
-
-def atomic_write(path: Path, data: str, *, mode: int = 0o644) -> None:
-    """Write *data* so readers never observe a half-written file."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + f".tmp{os.getpid()}")
-    tmp.write_text(data)
-    os.chmod(tmp, mode)
-    tmp.replace(path)
-
-
-def read_json(path: Path, default=None):
-    try:
-        return json.loads(path.read_text())
-    except (OSError, json.JSONDecodeError):
-        return default
-
-
 # ==========================================================================
 # Process plumbing
 # ==========================================================================
-
-
-def _is_zombie(pid: int) -> bool:
-    """True for an exited-but-unreaped child (Linux; best effort elsewhere)."""
-    try:
-        with open(f"/proc/{pid}/stat") as fh:
-            data = fh.read()
-    except OSError:
-        return False
-    # The comm field is parenthesised and may itself contain spaces or ')',
-    # so the state character is the first field after the *last* ')'.
-    end = data.rfind(")")
-    if end == -1:
-        return False
-    rest = data[end + 1 :].split()
-    return bool(rest) and rest[0] == "Z"
-
-
-def pid_alive(pid: int | None) -> bool:
-    if not pid:
-        return False
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    except OSError:
-        return False
-    # signal 0 also succeeds for a zombie, which is not actually running.
-    return not _is_zombie(pid)
-
-
-class FileLock:
-    """Advisory lock so a manual command can't race a running daemon."""
-
-    def __init__(self, path: Path) -> None:
-        self.path = path
-        self._fh = None
-
-    def acquire(self, *, blocking: bool = False) -> bool:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._fh = open(self.path, "w")
-        try:
-            import fcntl
-
-            flags = fcntl.LOCK_EX if blocking else fcntl.LOCK_EX | fcntl.LOCK_NB
-            fcntl.flock(self._fh, flags)
-            return True
-        except ImportError:  # pragma: no cover - non-POSIX
-            return True
-        except OSError:
-            self._fh.close()
-            self._fh = None
-            return False
-
-    def release(self) -> None:
-        if self._fh is None:
-            return
-        try:
-            import fcntl
-
-            fcntl.flock(self._fh, fcntl.LOCK_UN)
-        except (ImportError, OSError):  # pragma: no cover
-            pass
-        self._fh.close()
-        self._fh = None
-
-    def __enter__(self):
-        self.acquire(blocking=True)
-        return self
-
-    def __exit__(self, *exc):
-        self.release()
-        return False
-
-
-def run(argv: list[str], **kwargs) -> subprocess.CompletedProcess:
-    """subprocess.run with the defaults every caller here wants."""
-    kwargs.setdefault("capture_output", True)
-    kwargs.setdefault("text", True)
-    return subprocess.run(argv, **kwargs)
 
 
 # ==========================================================================
@@ -742,274 +676,19 @@ class SasManager:
 # ==========================================================================
 
 
-def default_service_kind() -> str:
-    return "launchd" if platform.system().lower() == "darwin" else "systemd"
-
-
-def usm_bin() -> str:
-    import shutil
-
-    return shutil.which("usm") or "usm"
-
-
-def service_path_value(binary: str) -> str:
-    parts = [str(Path(binary).parent), str(LOCAL_BIN_DIR)]
-    for extra in ("/usr/local/bin", "/usr/bin", "/bin"):
-        parts.append(extra)
-    return ":".join(dict.fromkeys(p for p in parts if p))
-
-
-def systemctl(*args: str) -> subprocess.CompletedProcess:
-    return run(["systemctl", "--user", *args])
-
-
-def launchctl(*args: str) -> subprocess.CompletedProcess:
-    return run(["launchctl", *args])
-
-
-class ServiceManager:
-    """One boot-integration story for every usm daemon.
-
-    A command supplies its unit/label prefixes and the argv that should run;
-    everything else (enable, disable, is-active, start, stop) is identical.
-    """
-
-    def __init__(self, unit_prefix: str, label_prefix: str) -> None:
-        self.unit_prefix = unit_prefix
-        self.label_prefix = label_prefix
-
-    # -- naming ------------------------------------------------------------
-
-    def unit_name(self, ident: str) -> str:
-        return f"{self.unit_prefix}{ident}.service"
-
-    def unit_path(self, ident: str) -> Path:
-        return SYSTEMD_USER_DIR / self.unit_name(ident)
-
-    def label(self, ident: str) -> str:
-        return f"{self.label_prefix}{ident}"
-
-    def plist_path(self, ident: str) -> Path:
-        return LAUNCHD_USER_DIR / f"{self.label(ident)}.plist"
-
-    def _domain_target(self, ident: str) -> str:
-        return f"gui/{os.getuid()}/{self.label(ident)}"
-
-    # -- state -------------------------------------------------------------
-
-    def enabled_kind(self, ident: str) -> str | None:
-        if self.unit_path(ident).exists():
-            return "systemd"
-        if self.plist_path(ident).exists():
-            return "launchd"
-        return None
-
-    def is_active(self, ident: str) -> bool:
-        kind = self.enabled_kind(ident)
-        if kind == "systemd":
-            return (
-                systemctl("is-active", "--quiet", self.unit_name(ident)).returncode == 0
-            )
-        if kind == "launchd":
-            proc = launchctl("print", self._domain_target(ident))
-            return proc.returncode == 0 and "state = running" in proc.stdout
-        return False
-
-    # -- rendering ---------------------------------------------------------
-
-    def render_unit(
-        self, description: str, exec_start: str, binary: str, *, restart_sec: int = 10
-    ) -> str:
-        return (
-            "[Unit]\n"
-            f"Description={description}\n"
-            "After=network-online.target\n"
-            "Wants=network-online.target\n"
-            "\n"
-            "[Service]\n"
-            "Type=simple\n"
-            f'Environment="PATH={service_path_value(binary)}"\n'
-            f"ExecStart={exec_start}\n"
-            "Restart=always\n"
-            f"RestartSec={restart_sec}\n"
-            "\n"
-            "[Install]\n"
-            "WantedBy=default.target\n"
-        )
-
-    def render_plist(
-        self,
-        ident: str,
-        argv: list[str],
-        binary: str,
-        *,
-        log_path: Path | None = None,
-    ) -> bytes:
-        import plistlib
-
-        payload = {
-            "Label": self.label(ident),
-            "ProgramArguments": argv,
-            "RunAtLoad": True,
-            "KeepAlive": True,
-            "EnvironmentVariables": {"PATH": service_path_value(binary)},
-        }
-        if log_path is not None:
-            payload["StandardOutPath"] = str(log_path)
-            payload["StandardErrorPath"] = str(log_path)
-        return plistlib.dumps(payload)
-
-    # -- actions -----------------------------------------------------------
-
-    def enable(
-        self,
-        ident: str,
-        argv: list[str],
-        *,
-        description: str,
-        binary: str | None = None,
-        log_path: Path | None = None,
-    ) -> str:
-        """Install and start the unit. Returns the backend used."""
-        binary = binary or usm_bin()
-        if default_service_kind() == "systemd":
-            SYSTEMD_USER_DIR.mkdir(parents=True, exist_ok=True)
-            exec_start = " ".join(argv)
-            self.unit_path(ident).write_text(
-                self.render_unit(description, exec_start, binary)
-            )
-            systemctl("daemon-reload")
-            proc = systemctl("enable", "--now", self.unit_name(ident))
-            if proc.returncode != 0:
-                self.unit_path(ident).unlink(missing_ok=True)
-                raise RuntimeError(proc.stderr.strip() or "systemctl enable failed")
-            return "systemd"
-        LAUNCHD_USER_DIR.mkdir(parents=True, exist_ok=True)
-        self.plist_path(ident).write_bytes(
-            self.render_plist(ident, argv, binary, log_path=log_path)
-        )
-        launchctl("bootstrap", f"gui/{os.getuid()}", str(self.plist_path(ident)))
-        launchctl("kickstart", self._domain_target(ident))
-        return "launchd"
-
-    def disable(self, ident: str) -> str | None:
-        kind = self.enabled_kind(ident)
-        if kind == "systemd":
-            systemctl("disable", "--now", self.unit_name(ident))
-            self.unit_path(ident).unlink(missing_ok=True)
-            systemctl("daemon-reload")
-        elif kind == "launchd":
-            launchctl("bootout", self._domain_target(ident))
-            self.plist_path(ident).unlink(missing_ok=True)
-        return kind
-
-    def start(self, ident: str) -> subprocess.CompletedProcess | None:
-        kind = self.enabled_kind(ident)
-        if kind == "systemd":
-            return systemctl("start", self.unit_name(ident))
-        if kind == "launchd":
-            return launchctl("kickstart", self._domain_target(ident))
-        return None
-
-    def stop(self, ident: str) -> subprocess.CompletedProcess | None:
-        kind = self.enabled_kind(ident)
-        if kind == "systemd":
-            return systemctl("stop", self.unit_name(ident))
-        if kind == "launchd":
-            return launchctl("kill", "SIGTERM", self._domain_target(ident))
-        return None
-
-
 # ==========================================================================
 # Exclude patterns (shared between a watcher and azcopy's flags)
 # ==========================================================================
 
-DEFAULT_EXCLUDES = (
-    ".git/",
-    ".venv/",
-    "venv/",
-    "node_modules/",
-    "__pycache__/",
-    "*.pyc",
-    ".DS_Store",
-    ".mypy_cache/",
-    ".pytest_cache/",
-    ".ruff_cache/",
-    "*.tmp",
-    "*.part",
-    "*.swp",
-    ".~*",
-)
-
-
-def _has_glob(pattern: str) -> bool:
-    return any(ch in pattern for ch in "*?[")
-
-
-def _glob_segment_to_regex(stem: str) -> str:
-    """Regex matching a directory whose name globs *stem*, at any depth."""
-    body = fnmatch.translate(stem)
-    body = body.replace(r"(?s:", "").replace(r")\Z", "")
-    return rf"(^|.*/){body}/.*"
-
 
 @dataclass(frozen=True)
-class ExcludeSpec:
-    """One list of patterns, two renderings.
+class ExcludeSpec(_ExcludeSpec):
+    """The shared pattern matcher, plus the rendering only azcopy needs.
 
-    A watcher and azcopy must agree on what is ignored — if they drift, the
-    watcher fires on files azcopy then refuses to transfer and the daemon
-    spins. So patterns live here once and are rendered for both consumers.
-
-    Pattern forms follow rsync/gitignore intuition:
-      ``name``      match any path segment or file name
-      ``name/``     match a directory and everything under it
-      ``*.ext``     glob on the file name
-      ``a/b``       match that relative path prefix
-      ``a/*.log``   glob against the whole relative path
+    Matching lives in usm_daemon so a watcher and a transfer tool cannot
+    drift apart; translating those patterns into azcopy's three flags is
+    azcopy's problem and stays here.
     """
-
-    patterns: tuple[str, ...] = DEFAULT_EXCLUDES
-
-    @classmethod
-    def build(
-        cls, extra: Iterable[str] = (), *, defaults: bool = True
-    ) -> "ExcludeSpec":
-        pats: list[str] = list(DEFAULT_EXCLUDES) if defaults else []
-        for pat in extra:
-            pat = (pat or "").strip()
-            if pat and pat not in pats:
-                pats.append(pat)
-        return cls(tuple(pats))
-
-    def matches(self, relpath: str) -> bool:
-        """True when *relpath* (POSIX, relative to the root) is excluded."""
-        rel = (relpath or "").replace(os.sep, "/")
-        while rel.startswith("./"):
-            rel = rel[2:]
-        rel = rel.strip("/")
-        if not rel or rel == ".":
-            return False
-        segments = rel.split("/")
-        name = segments[-1]
-        for pat in self.patterns:
-            if pat.endswith("/"):
-                stem = pat.rstrip("/")
-                # A directory pattern hides the directory and its whole subtree.
-                if any(fnmatch.fnmatch(seg, stem) for seg in segments[:-1]):
-                    return True
-                if fnmatch.fnmatch(name, stem):
-                    return True
-                continue
-            if "/" in pat:
-                if fnmatch.fnmatch(rel, pat) or rel.startswith(pat.rstrip("*")):
-                    return True
-                continue
-            if fnmatch.fnmatch(name, pat):
-                return True
-            if any(fnmatch.fnmatch(seg, pat) for seg in segments[:-1]):
-                return True
-        return False
 
     def to_azcopy_flags(self) -> list[str]:
         """Render to azcopy's three (semicolon-separated) exclude flags.
@@ -1049,18 +728,3 @@ class ExcludeSpec:
         if regexes:
             flags += ["--exclude-regex", ";".join(dict.fromkeys(regexes))]
         return flags
-
-
-def sleep_until(deadline: float, stop_event, *, max_slice: float = 5.0) -> bool:
-    """Wait until *deadline*, waking early if *stop_event* is set.
-
-    Sliced so a stop request is noticed promptly even for long waits.
-    Returns True when it was interrupted.
-    """
-    while not stop_event.is_set():
-        remaining = deadline - time.time()
-        if remaining <= 0:
-            return False
-        if stop_event.wait(min(max_slice, remaining)):
-            return True
-    return True

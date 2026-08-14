@@ -9,7 +9,7 @@
 
 **One CLI for the boxes you SSH into.**
 
-27 tools for what you actually do on a remote machine — open a tunnel, find a
+33 tools for what you actually do on a remote machine — open a tunnel, find a
 free GPU, mount a blob container, serve a directory, kill whatever is holding
 port 8080 — behind a single command that installs in one line.
 
@@ -63,6 +63,7 @@ usm <command> --help     # help for one command
 
 | Command | What it does |
 | --- | --- |
+| [`host`](https://hspk.github.io/usm/commands/host/) | SSH inventory in a fenced `~/.ssh/config` block, plus fan-out exec |
 | [`ssh`](https://hspk.github.io/usm/commands/ssh/) | ssh with auto-reconnect and terminal repair |
 | [`tunnel`](https://hspk.github.io/usm/commands/tunnel/) | SSH tunnels (local/remote/SOCKS) with state + autostart |
 | [`proxy`](https://hspk.github.io/usm/commands/proxy/) | Turn a box into an HTTP/SOCKS/Shadowsocks proxy, or a Clash client |
@@ -82,12 +83,15 @@ usm <command> --help     # help for one command
 | [`cp`](https://hspk.github.io/usm/commands/cp/) | Copy across local and blobfuse paths, delegating to azcopy |
 | [`azsync`](https://hspk.github.io/usm/commands/azsync/) | Watch a directory and keep it mirrored to Azure Blob |
 | [`blobmount`](https://hspk.github.io/usm/commands/blobmount/) | Mount blob containers, keeping the SAS fresh |
+| [`dl`](https://hspk.github.io/usm/commands/dl/) | Resumable, checksum-verified downloads with mirrors |
+| [`space`](https://hspk.github.io/usm/commands/space/) | Find what's eating the disk and reclaim it safely |
 | [`clip`](https://hspk.github.io/usm/commands/clip/) | Clipboard from stdin; OSC52 fallback over SSH |
 
 **Machine & hardware**
 
 | Command | What it does |
 | --- | --- |
+| [`doctor`](https://hspk.github.io/usm/commands/doctor/) | One-pass health check: disk, memory, GPU, mounts, services |
 | [`init`](https://hspk.github.io/usm/commands/init/) | Bootstrap a machine with modern dev tools (cross-platform) |
 | [`gpu`](https://hspk.github.io/usm/commands/gpu/) | GPU inventory, free-picker, watch, and kill |
 | [`disk`](https://hspk.github.io/usm/commands/disk/) | Inspect, partition, format, and mount disks |
@@ -100,6 +104,8 @@ usm <command> --help     # help for one command
 
 | Command | What it does |
 | --- | --- |
+| [`svc`](https://hspk.github.io/usm/commands/svc/) | Run any command as a supervised service, with boot integration |
+| [`watch`](https://hspk.github.io/usm/commands/watch/) | Re-run a command whenever files change, debounced |
 | [`secret`](https://hspk.github.io/usm/commands/secret/) | Encrypted local env store; inject secrets into processes |
 | [`git-auth`](https://hspk.github.io/usm/commands/git-auth/) | Select Git identities and SSH keys by directory |
 | [`notify`](https://hspk.github.io/usm/commands/notify/) | Ping ntfy.sh / Telegram / webhook when a command exits |
@@ -117,6 +123,9 @@ usm port kill 8080                                # evict whatever squats there
 usm blobmount mount /mnt/data acct container      # mount blob, refresh the SAS
 usm notify -- python train.py                     # ping your phone when it exits
 usm share ./build --tunnel user@bastion           # hand someone a file, from anywhere
+usm doctor                                        # is this machine healthy?
+usm svc add api -- ./serve.sh                     # keep it running, and at boot
+usm watch src -- pytest -q                        # re-run tests on every save
 
 CUDA_VISIBLE_DEVICES=$(usm gpu free 2) python train.py   # grab the 2 idlest GPUs
 ```

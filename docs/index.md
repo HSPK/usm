@@ -47,6 +47,10 @@ you want from the [Commands](commands/index.md) section.
 
 | Command | What it does |
 | --- | --- |
+| [`usm doctor`](commands/doctor.md) | One-pass machine health check: disk, memory, GPU, mounts, services |
+| [`usm svc`](commands/svc.md) | Run any command as a supervised service, with boot integration |
+| [`usm watch`](commands/watch.md) | Re-run a command whenever files change, debounced |
+| [`usm host`](commands/host.md) | SSH inventory in a marker-fenced `~/.ssh/config` block, plus fan-out exec |
 | [`usm ssh`](commands/ssh.md) | ssh with auto-reconnect and terminal repair |
 | [`usm tunnel`](commands/tunnel.md) | SSH tunnels (local / remote / SOCKS) with state + launchd/systemd autostart |
 | [`usm proxy`](commands/proxy.md) | Turn a box into an HTTP/SOCKS (+Shadowsocks) proxy, or a Clash client routing rule-matched traffic through one (mihomo) |
@@ -56,6 +60,8 @@ you want from the [Commands](commands/index.md) section.
 | [`usm port`](commands/port.md) | Show what's on a port; kill the holder |
 | [`usm session`](commands/session.md) | Inspect and manage logged-in user sessions |
 | [`usm disk`](commands/disk.md) | Inspect, partition, format, and mount disks |
+| [`usm space`](commands/space.md) | Find what's eating the disk and reclaim it safely |
+| [`usm dl`](commands/dl.md) | Resumable, checksum-verified downloads with mirrors |
 | [`usm notify`](commands/notify.md) | Wrap a command and ping ntfy.sh / Telegram / webhook when it exits |
 | [`usm secret`](commands/secret.md) | Encrypted local env store; inject into shells or processes |
 | [`usm git-auth`](commands/git-auth.md) | Automatically select Git identity and SSH key by directory |

@@ -30,3 +30,37 @@ def tmp_cache(tmp_path, monkeypatch):
         monkeypatch.setattr(core.constants, name, value)
         monkeypatch.setattr(core, name, value)
     yield cache_dir
+
+
+#: Real locations that a test must never write into. A service-managing tool
+#: writes unit files for a living, so an ineffective monkeypatch does not
+#: fail loudly -- it quietly installs something on the developer's machine.
+#: This happened once (a moved symbol left a fixture patching the wrong
+#: module), and `usm doctor` found the leftover unit days later.
+_REAL_SERVICE_DIRS = (
+    Path.home() / ".config" / "systemd" / "user",
+    Path.home() / "Library" / "LaunchAgents",
+)
+
+
+def _listing(path: Path) -> set[str]:
+    try:
+        return {p.name for p in path.iterdir()}
+    except OSError:
+        return set()
+
+
+@pytest.fixture(autouse=True)
+def no_writes_to_the_real_system():
+    """Fail any test that creates a unit file on the actual machine."""
+    before = {path: _listing(path) for path in _REAL_SERVICE_DIRS}
+    yield
+    for path, names in before.items():
+        new = _listing(path) - names
+        if new:
+            for name in new:
+                (path / name).unlink(missing_ok=True)
+            raise AssertionError(
+                f"test wrote {sorted(new)} into {path} — redirect it with a "
+                "fixture instead of touching the real machine"
+            )

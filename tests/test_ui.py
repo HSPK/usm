@@ -549,3 +549,91 @@ class TestTableFitsItsContent:
         rendered_width(built, width=200)
         assert built.width is None
         assert rendered_width(built, width=30) <= 30
+
+
+class TestLabelledSections:
+    """A long status view is only scannable if its groups are named."""
+
+    def test_a_bare_section_is_still_a_blank_separator(self):
+        out = render(ui.detail([("a", "1"), ui.SECTION, ("b", "2")]))
+        assert "a" in out and "b" in out
+        assert "object" not in out
+
+    def test_a_labelled_section_prints_its_label(self):
+        out = render(ui.detail([(ui.SECTION, "Policy"), ("restart", "always")]))
+        assert "Policy" in out
+        assert "object" not in out, "the sentinel leaked into the output"
+
+    def test_a_leading_label_does_not_start_with_a_blank_line(self):
+        out = render(ui.detail([(ui.SECTION, "Service"), ("id", "x")]))
+        assert out.splitlines()[0].strip().startswith("Service")
+
+    def test_later_labels_are_separated_from_the_group_above(self):
+        out = render(
+            ui.detail(
+                [
+                    (ui.SECTION, "One"),
+                    ("a", "1"),
+                    (ui.SECTION, "Two"),
+                    ("b", "2"),
+                ]
+            )
+        )
+        lines = [line.rstrip() for line in out.splitlines()]
+        assert "" in lines[1:], "groups run together without a break"
+
+    def test_labels_are_redacted_like_any_other_value(self):
+        out = render(ui.detail([(ui.SECTION, "token sig=abcdefghijklmnop")]))
+        assert "abcdefghijklmnop" not in out
+
+    def test_mixed_bare_and_labelled_sections(self):
+        out = render(
+            ui.detail([("a", "1"), ui.SECTION, (ui.SECTION, "Named"), ("b", "2")])
+        )
+        assert "Named" in out and "object" not in out
+
+
+class TestRunningVocabulary:
+    def test_running_and_stopped_reuse_the_present_absent_glyphs(self):
+        assert ui.RUNNING == ui.CACHED
+        assert ui.STOPPED == ui.MISSING
+
+    def test_status_text_reads_as_a_word(self):
+        assert "running" in ui.status_text(True)
+        assert "stopped" in ui.status_text(False)
+
+    def test_status_text_labels_are_overridable(self):
+        assert "mounted" in ui.status_text(True, "mounted", "unmounted")
+        assert "unmounted" in ui.status_text(False, "mounted", "unmounted")
+
+
+class TestSubSecondDurations:
+    """A 300ms run reading as "0s" is just wrong."""
+
+    @pytest.mark.parametrize(
+        "value,expected",
+        [
+            (None, "-"),
+            (-5, "0s"),
+            (0, "0s"),
+            (0.005, "5ms"),
+            (0.05, "50ms"),
+            (0.1, "0.1s"),
+            (0.3, "0.3s"),
+            (0.95, "0.9s"),
+            (1, "1s"),
+            (59, "59s"),
+            (60, "1m"),
+            (3600, "1h"),
+            (86400, "1d"),
+        ],
+    )
+    def test_formatting(self, value, expected):
+        assert ui.compact_duration(value) == expected
+
+    def test_stays_within_the_column_budget(self):
+        widths = [
+            len(ui.compact_duration(v))
+            for v in (0, 0.005, 0.05, 0.3, 1, 59, 60, 3600, 86400, 10**7)
+        ]
+        assert max(widths) <= 5

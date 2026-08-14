@@ -84,6 +84,13 @@ STEP = "→"
 CACHED = "●"
 MISSING = "○"
 
+#: The same two glyphs, named for the other thing they mark. A daemon that is
+#: up and a script that is downloaded are the same "present/absent" idea, and
+#: giving them one shape is the point of having a design system; the aliases
+#: exist so call sites read as what they mean.
+RUNNING = CACHED
+STOPPED = MISSING
+
 #: Separator for composing several facts onto one line: ``a · b · c``.
 DOT = "·"
 
@@ -239,6 +246,15 @@ def joined(*parts: str) -> str:
     return f" {DOT} ".join(p for p in parts if p)
 
 
+def status_text(flag: bool, yes: str = "running", no: str = "stopped") -> str:
+    """A coloured word for a binary state, for detail views.
+
+    Tables use the glyph (:func:`state`); a detail row reads better with the
+    word, and both should agree on the colour.
+    """
+    return status("ok" if flag else "muted", yes if flag else no)
+
+
 # -- formatting -------------------------------------------------------------
 
 
@@ -256,7 +272,16 @@ def human_duration(secs: float | None) -> str:
     """Precise, variable-width. For detail views."""
     if secs is None:
         return "-"
-    secs = max(0, int(secs))
+    secs = max(0.0, float(secs))
+    if secs <= 0:
+        return "0s"
+    if secs < 0.1:
+        # Anything under a second used to render as "0s", which is wrong for
+        # the things that are actually fast: a settle window, a quick run.
+        return f"{int(secs * 1000)}ms"
+    if secs < 1:
+        return f"{secs:.1f}s"
+    secs = int(secs)
     if secs < 60:
         return f"{secs}s"
     if secs < 3600:
@@ -274,7 +299,16 @@ def compact_duration(secs: float | None) -> str:
     """
     if secs is None:
         return "-"
-    secs = max(0, int(secs))
+    secs = max(0.0, float(secs))
+    if secs <= 0:
+        return "0s"
+    if secs < 0.1:
+        # Anything under a second used to render as "0s", which is wrong for
+        # the things that are actually fast: a settle window, a quick run.
+        return f"{int(secs * 1000)}ms"
+    if secs < 1:
+        return f"{secs:.1f}s"
+    secs = int(secs)
     if secs < 60:
         return f"{secs}s"
     if secs < 3600:
@@ -533,20 +567,32 @@ def detail(rows: Iterable, *, key_style: str = STYLE_MUTED) -> "Table":
     """Key/value view for ``status``-style output.
 
     Values wrap rather than truncate: unlike a listing, a detail view has room,
-    and cutting a path in half is worse than a second line. Insert
-    :data:`SECTION` between groups.
+    and cutting a path in half is worse than a second line.
+
+    Insert :data:`SECTION` on its own to separate groups, or ``(SECTION,
+    "Label")`` to give the group a heading -- a long status view is much
+    easier to scan when its parts are named.
     """
     from rich.table import Table
 
     built = Table(box=None, show_header=False, pad_edge=False)
     built.add_column(style=key_style, no_wrap=True)
     built.add_column(overflow="fold")
+    first = True
     for row in rows:
         if row is SECTION:
             built.add_row("", "")
+            first = False
             continue
         key, value = row
+        if key is SECTION:
+            if not first:
+                built.add_row("", "")
+            built.add_row(f"[not dim bold]{redact(value)}[/not dim bold]", "")
+            first = False
+            continue
         built.add_row(str(key), "" if value is None else redact(value))
+        first = False
     return built
 
 

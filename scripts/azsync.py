@@ -48,6 +48,17 @@ from typing import Iterable
 import click
 from rich.console import Console
 
+from usm_daemon import (
+    DEFAULT_MAX_INDEX_FILES,
+    DEFAULT_POLL_INTERVAL,
+    InotifyWatcher,
+    PollingWatcher,
+    Watcher,
+    WatcherUnavailable,
+    _StartedWatcher,
+)
+from usm_daemon import build_watcher as _build_watcher
+
 from usm_azure import (
     AUTH_KINDS,
     SECTION,
@@ -100,8 +111,6 @@ DEFAULT_INTERVAL = 3600.0
 DEFAULT_MIN_GAP = 30.0
 DEFAULT_MIN_FILES = 1
 
-DEFAULT_POLL_INTERVAL = 15.0
-DEFAULT_MAX_INDEX_FILES = 200_000
 
 BACKOFF_BASE = 30.0
 BACKOFF_MAX = 900.0
@@ -960,266 +969,6 @@ class AzcopyEngine:
 # ==========================================================================
 
 
-class Watcher:
-    """Feed a ChangeAccumulator. Backends differ only in how they notice."""
-
-    backend = "none"
-
-    def __init__(self, root: Path, excludes: ExcludeSpec, acc: ChangeAccumulator):
-        self.root = root
-        self.excludes = excludes
-        self.acc = acc
-
-    def start(self) -> None:  # pragma: no cover - overridden
-        pass
-
-    def stop(self) -> None:  # pragma: no cover - overridden
-        pass
-
-    def _relpath(self, path: str) -> str | None:
-        try:
-            rel = os.path.relpath(path, self.root)
-        except ValueError:
-            return None
-        if rel.startswith(".."):
-            return None
-        return rel.replace(os.sep, "/")
-
-    def _admit(self, path: str) -> str | None:
-        """Return the relative path if it should count as a change."""
-        rel = self._relpath(path)
-        if rel is None or rel == ".":
-            return None
-        return None if self.excludes.matches(rel) else rel
-
-
-class InotifyWatcher(Watcher):
-    """watchdog-backed: inotify on Linux, FSEvents on macOS."""
-
-    backend = "inotify"
-
-    def __init__(self, root: Path, excludes: ExcludeSpec, acc: ChangeAccumulator):
-        super().__init__(root, excludes, acc)
-        self._observer = None
-
-    @staticmethod
-    def available() -> bool:
-        try:
-            import watchdog.observers  # noqa: F401
-        except Exception:
-            return False
-        return True
-
-    def start(self) -> None:
-        from watchdog.events import FileSystemEventHandler
-        from watchdog.observers import Observer
-
-        watcher = self
-
-        class _Handler(FileSystemEventHandler):
-            def on_any_event(self, event) -> None:
-                if getattr(event, "is_directory", False):
-                    return
-                kind = event.event_type
-                if kind not in ("created", "modified", "deleted", "moved", "closed"):
-                    return
-                # A move shows up as one event with both ends; count the
-                # destination (that's the file azcopy will upload).
-                path = getattr(event, "dest_path", None) or event.src_path
-                if watcher._admit(path) is None:
-                    return
-                size = 0
-                deleted = kind == "deleted"
-                if not deleted:
-                    try:
-                        size = os.path.getsize(path)
-                    except OSError:
-                        size = 0
-                watcher.acc.record(time.time(), size=size, deleted=deleted)
-
-        self._observer = Observer()
-        self._observer.schedule(_Handler(), str(self.root), recursive=True)
-        self._observer.start()
-
-    def stop(self) -> None:
-        if self._observer is None:
-            return
-        try:
-            self._observer.stop()
-            self._observer.join(timeout=5)
-        except RuntimeError:  # pragma: no cover - observer already dead
-            pass
-        self._observer = None
-
-
-class PollingWatcher(Watcher):
-    """Stdlib fallback for network mounts, blobfuse, and inotify-less hosts.
-
-    Keeps a ``{relpath: (mtime, size)}`` index and diffs it. Above
-    ``max_index_files`` the index is dropped and the tree is reduced to an
-    aggregate signature — still enough to *trigger* a sync, which is all a
-    watcher owes us.
-    """
-
-    backend = "poll"
-
-    def __init__(
-        self,
-        root: Path,
-        excludes: ExcludeSpec,
-        acc: ChangeAccumulator,
-        *,
-        interval: float = DEFAULT_POLL_INTERVAL,
-        max_index_files: int = DEFAULT_MAX_INDEX_FILES,
-    ) -> None:
-        super().__init__(root, excludes, acc)
-        self.interval = interval
-        self.max_index_files = max_index_files
-        self._index: dict[str, tuple[float, int]] | None = {}
-        self._signature: tuple[int, int, float] | None = None
-        self._thread: threading.Thread | None = None
-        self._stop = threading.Event()
-
-    def scan(self) -> tuple[dict[str, tuple[float, int]], tuple[int, int, float]]:
-        index: dict[str, tuple[float, int]] = {}
-        count = 0
-        total = 0
-        newest = 0.0
-        stack = [self.root]
-        while stack:
-            current = stack.pop()
-            try:
-                entries = list(os.scandir(current))
-            except OSError:
-                continue
-            for entry in entries:
-                rel = self._relpath(entry.path)
-                if rel is None or self.excludes.matches(rel):
-                    continue
-                try:
-                    if entry.is_dir(follow_symlinks=False):
-                        stack.append(Path(entry.path))
-                        continue
-                    stat = entry.stat(follow_symlinks=False)
-                except OSError:
-                    continue
-                count += 1
-                total += stat.st_size
-                newest = max(newest, stat.st_mtime)
-                if len(index) < self.max_index_files:
-                    index[rel] = (stat.st_mtime, stat.st_size)
-        return index, (count, total, newest)
-
-    def poll_once(self) -> None:
-        index, signature = self.scan()
-        indexed = len(index) < self.max_index_files
-        previous, prev_sig = self._index, self._signature
-        self._index = index if indexed else None
-        self._signature = signature
-
-        if prev_sig is None:
-            return  # first scan establishes the baseline
-        if not indexed or previous is None:
-            if signature != prev_sig:
-                # No per-file detail available; report one aggregate change.
-                delta = abs(signature[1] - prev_sig[1])
-                self.acc.record(time.time(), size=delta)
-                self.acc.mark_degraded()
-            return
-
-        now = time.time()
-        changed = 0
-        for rel, meta in index.items():
-            old = previous.get(rel)
-            if old is None or old != meta:
-                self.acc.record(now, size=meta[1])
-                changed += 1
-        for rel in previous:
-            if rel not in index:
-                self.acc.record(now, deleted=True)
-                changed += 1
-
-    def _loop(self) -> None:
-        while not self._stop.is_set():
-            try:
-                self.poll_once()
-            except Exception:  # pragma: no cover - never kill the watcher
-                self.acc.mark_degraded()
-            self._stop.wait(self.interval)
-
-    def start(self) -> None:
-        self.poll_once()  # baseline, synchronously
-        self._stop.clear()
-        self._thread = threading.Thread(
-            target=self._loop, name="azsync-poll", daemon=True
-        )
-        self._thread.start()
-
-    def stop(self) -> None:
-        self._stop.set()
-        if self._thread is not None:
-            self._thread.join(timeout=5)
-            self._thread = None
-
-
-def build_watcher(job: SyncJob, acc: ChangeAccumulator, *, warn=None) -> Watcher:
-    """Pick a backend, honouring --watch-mode and degrading when needed."""
-    root = job.source_path()
-    excludes = job.exclude_spec()
-    mode = (job.watch_mode or "auto").lower()
-
-    def polling() -> Watcher:
-        return PollingWatcher(
-            root,
-            excludes,
-            acc,
-            interval=job.poll_interval,
-            max_index_files=job.max_index_files,
-        )
-
-    if mode == "poll":
-        return polling()
-    if mode == "inotify":
-        if not InotifyWatcher.available():
-            raise click.ClickException(
-                "--watch-mode inotify needs the 'watchdog' package."
-            )
-        return InotifyWatcher(root, excludes, acc)
-
-    if InotifyWatcher.available():
-        watcher = InotifyWatcher(root, excludes, acc)
-        try:
-            watcher.start()
-            return _StartedWatcher(watcher)
-        except Exception as exc:  # inotify limits, network fs, no permissions
-            if warn is not None:
-                warn(f"inotify unavailable ({exc}); falling back to polling.")
-            try:
-                watcher.stop()
-            except Exception:
-                pass
-    elif warn is not None:
-        warn("watchdog not installed; using the polling watcher.")
-    return polling()
-
-
-class _StartedWatcher(Watcher):
-    """Wrap a watcher that `build_watcher` already had to start to test it."""
-
-    def __init__(self, inner: Watcher) -> None:
-        self.inner = inner
-        self.backend = inner.backend
-        self.root = inner.root
-        self.excludes = inner.excludes
-        self.acc = inner.acc
-
-    def start(self) -> None:
-        pass  # already running
-
-    def stop(self) -> None:
-        self.inner.stop()
-
-
 # ==========================================================================
 # Supervisor
 #
@@ -1227,6 +976,36 @@ class _StartedWatcher(Watcher):
 # lifetime and the state file. Everything it decides comes from the pure
 # policy; everything it transfers goes through the engine.
 # ==========================================================================
+
+
+# The watcher backends live in usm_daemon now; azsync still exposes them so
+# --watch-mode, its status output and its tests keep one import.
+_WATCHER_REEXPORTS = (
+    Watcher,
+    InotifyWatcher,
+    PollingWatcher,
+    _StartedWatcher,
+    DEFAULT_POLL_INTERVAL,
+    DEFAULT_MAX_INDEX_FILES,
+)
+
+
+def build_watcher(job: SyncJob, acc: ChangeAccumulator, *, warn=None) -> Watcher:
+    """Adapt a SyncJob to the shared watcher factory."""
+    try:
+        return _build_watcher(
+            job.source_path(),
+            job.exclude_spec(),
+            acc,
+            mode=job.watch_mode or "auto",
+            poll_interval=job.poll_interval,
+            max_index_files=job.max_index_files,
+            warn=warn,
+        )
+    except WatcherUnavailable as exc:
+        raise click.ClickException(
+            f"--watch-mode inotify needs the 'watchdog' package. ({exc})"
+        ) from exc
 
 
 class Supervisor:

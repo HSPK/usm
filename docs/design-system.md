@@ -15,7 +15,7 @@ from usmo.ui import Column, detail, ok, table
 | `✗` | something failed |
 | `!` | worth reading, but not fatal |
 | `→` | a step starting, or a transition (`old → new`) |
-| `●` `○` | present / absent — cached, mounted, enabled |
+| `●` `○` | present / absent — cached, mounted, enabled, running |
 | `·` | separator between facts on one line |
 
 Colour carries the same meaning everywhere:
@@ -28,6 +28,10 @@ Colour carries the same meaning everywhere:
 
 Nothing else is coloured. If a value isn't an identifier, a status or
 context, it stays plain.
+
+`ui.RUNNING` / `ui.STOPPED` are the same two glyphs under the names a daemon
+reads better with; a table uses the glyph (`ui.state`) and a detail row uses
+the word (`ui.status_text`), and both take their colour from the same place.
 
 ## Status lines
 
