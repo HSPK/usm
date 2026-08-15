@@ -32,6 +32,8 @@ from pathlib import Path
 from typing import Callable, Mapping, Sequence
 
 import click
+
+from usm_blocks import BlockError, ManagedBlock
 import yaml
 
 DEFAULT_USER_CONFIG = Path.home() / ".config" / "usm" / "init.yaml"
@@ -624,41 +626,13 @@ run '~/.tmux/plugins/tpm/tpm'
 """
 
 
-def _strip_managed_block(content: str, begin: str, end: str) -> tuple[str, bool]:
-    """Remove a ``begin``/``end`` delimited block, returning (rest, was_found)."""
-    kept: list[str] = []
-    inside = False
-    found = False
-    for line in content.splitlines():
-        stripped = line.strip()
-        if stripped == begin:
-            if inside:
-                raise ValueError(f"nested {begin} marker; fix the file manually")
-            inside = True
-            found = True
-            continue
-        if stripped == end:
-            if not inside:
-                raise ValueError(f"{end} without a matching {begin}; fix it manually")
-            inside = False
-            continue
-        if not inside:
-            kept.append(line)
-    if inside:
-        raise ValueError(f"unterminated {begin} block; fix the file manually")
-    return "\n".join(kept).strip("\n"), found
-
-
 def _upsert_managed_block(path: Path, body: str, begin: str, end: str) -> str:
     """Insert/refresh a managed block in ``path``; returns what happened."""
-    original = path.read_text(encoding="utf-8") if path.exists() else ""
-    cleaned, replaced = _strip_managed_block(original, begin, end)
-    block = f"{begin}\n{body.strip()}\n{end}\n"
-    updated = f"{cleaned}\n\n{block}" if cleaned else block
-    if updated == original:
+    block = ManagedBlock(begin, end, label=f"{begin} block")
+    original = block.read(path)
+    replaced = block.contains(original)
+    if not block.update(path, body.strip() + "\n"):
         return "unchanged"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(updated, encoding="utf-8")
     return "updated" if replaced else "inserted"
 
 
@@ -715,7 +689,7 @@ def _action_tmux_config(ctx: RunContext) -> StepResult:
             return StepResult.FAILED
     try:
         outcome = _upsert_tmux_conf(conf_path)
-    except ValueError as error:
+    except (ValueError, BlockError) as error:
         click.echo(f"  {conf_path}: {error}", err=True)
         return StepResult.FAILED
     if outcome == "unchanged":

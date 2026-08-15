@@ -26,6 +26,8 @@ from typing import Any, Callable, Iterator, Sequence
 
 import click
 
+from usm_blocks import BlockError, ManagedBlock
+
 
 SCHEMA_VERSION = 1
 ROOT = Path(os.environ.get("USM_GIT_AUTH_HOME", "~/.config/usm/git")).expanduser()
@@ -34,6 +36,10 @@ GIT_KEY_RE = re.compile(r"^[A-Za-z][A-Za-z0-9-]*\.[A-Za-z][A-Za-z0-9-]*$")
 SSH_OPTION_RE = re.compile(r"^[A-Za-z][A-Za-z0-9-]*$")
 BEGIN_MARKER = "## __USM_GIT_AUTH_BEGIN__"
 END_MARKER = "## __USM_GIT_AUTH_END__"
+
+#: The shell rc belongs to the user; usm_blocks owns the rules for editing
+#: one safely, and is shared with inject-alias, init and host.
+BLOCK = ManagedBlock(BEGIN_MARKER, END_MARKER, label="usm git-auth block")
 SUPPORTED_SHELLS = ("bash", "zsh")
 
 
@@ -518,33 +524,13 @@ def _detect_shell() -> str:
     return name if name in SUPPORTED_SHELLS else "bash"
 
 
-def _managed_block(shell: str) -> str:
+def _managed_block_body(shell: str) -> str:
     helper = _shell_dir() / f"git-auth.{shell}"
-    return f"{BEGIN_MARKER}\nsource {shlex.quote(str(helper))}\n{END_MARKER}\n"
+    return f"source {shlex.quote(str(helper))}\n"
 
 
-def _strip_managed_block(content: str) -> tuple[str, bool]:
-    lines = content.splitlines()
-    kept: list[str] = []
-    inside = False
-    found = False
-    for line in lines:
-        if line == BEGIN_MARKER:
-            if inside:
-                raise click.ClickException("nested git-auth shell markers found")
-            inside = True
-            found = True
-            continue
-        if line == END_MARKER:
-            if not inside:
-                raise click.ClickException("git-auth end marker has no begin marker")
-            inside = False
-            continue
-        if not inside:
-            kept.append(line)
-    if inside:
-        raise click.ClickException("incomplete git-auth shell marker block")
-    return "\n".join(kept).rstrip("\n"), found
+def _managed_block(shell: str) -> str:
+    return BLOCK.render(_managed_block_body(shell))
 
 
 def _shell_profile_write_path(path: Path) -> Path:
@@ -575,10 +561,12 @@ def _restore_file(path: Path, snapshot: tuple[str | None, int | None]) -> None:
 
 def _install_shell_block(write_path: Path, shell: str) -> str:
     original, mode = _file_snapshot(write_path)
-    cleaned, existed = _strip_managed_block(original or "")
-    content = (
-        f"{cleaned}\n\n{_managed_block(shell)}" if cleaned else _managed_block(shell)
-    )
+    text = original or ""
+    try:
+        existed = BLOCK.contains(text)
+        content = BLOCK.apply(text, _managed_block_body(shell))
+    except BlockError as exc:
+        raise click.ClickException(str(exc)) from exc
     _atomic_write(write_path, content, mode if mode is not None else 0o644)
     return "updated" if existed else "installed"
 
@@ -588,13 +576,12 @@ def _remove_shell_block(path: Path) -> bool:
     original, mode = _file_snapshot(write_path)
     if original is None:
         return False
-    cleaned, existed = _strip_managed_block(original)
+    try:
+        cleaned, existed = BLOCK.remove(original)
+    except BlockError as exc:
+        raise click.ClickException(str(exc)) from exc
     if existed:
-        _atomic_write(
-            write_path,
-            cleaned + ("\n" if cleaned else ""),
-            mode if mode is not None else 0o644,
-        )
+        _atomic_write(write_path, cleaned, mode if mode is not None else 0o644)
     return existed
 
 

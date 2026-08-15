@@ -553,8 +553,25 @@ def row_for(
     values: dict,
     terminal_width: int | None = None,
 ) -> list:
-    """Pick the values for the columns that survived, keyed by header."""
-    return [values.get(c.header, "") for c in visible_columns(columns, terminal_width)]
+    """Pick the values for the columns that survived, keyed by header.
+
+    A cell must be text. Passing a list or a dict is a programming error that
+    rich reports as an unrenderable object with no idea which column it came
+    from -- which is how `usm host ls` once crashed for every host that had a
+    tag. Numbers are converted, containers are refused by name.
+    """
+    row = []
+    for column in visible_columns(columns, terminal_width):
+        value = values.get(column.header, "")
+        if isinstance(value, (list, tuple, set, dict)):
+            raise TypeError(
+                f"column {column.header!r} got a {type(value).__name__}; "
+                "a table cell must be text"
+            )
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            value = str(value)
+        row.append(value)
+    return row
 
 
 # -- detail views -----------------------------------------------------------

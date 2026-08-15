@@ -130,8 +130,11 @@
       "requirements": [
         "click>=8.2.1"
       ],
-      "version": "1.0.4",
-      "hash": "sha256:210a9f3b6f13cfb5d3ea444a6435dc0a30c2db73e1285756411a42f202a72f69"
+      "version": "1.0.5",
+      "hash": "sha256:8891379f19c6eb047a20ef202c266af6ccd93e361c0ee9a9b23844e7c295d756",
+      "modules": [
+        "usm_blocks.py"
+      ]
     },
     "gpu": {
       "description": "GPU inventory, free-picker, watch, and kill.",
@@ -151,8 +154,11 @@
         "rich>=13.0",
         "usmo>=0.12.0"
       ],
-      "version": "1.0.1",
-      "hash": "sha256:1ceeed87c4313aad25d85fe1fe2ecd4059505cee77b1fb1fe68eb5d2bd5ef2db"
+      "version": "1.0.3",
+      "hash": "sha256:e5a8a5cd7f899ac66c7782b393069702fbb949f882cbc3c86a24baa4558e5803",
+      "modules": [
+        "usm_blocks.py"
+      ]
     },
     "init": {
       "description": "Bootstrap a machine with modern dev tools (cross-platform).",
@@ -161,8 +167,11 @@
         "click>=8.2.1",
         "pyyaml>=6.0.3"
       ],
-      "version": "1.0.2",
-      "hash": "sha256:c93223f4037416ab45a79a9a20eb8e76948501541deaf04e467b3ef4156a4f29"
+      "version": "1.0.3",
+      "hash": "sha256:45b772115cf88304fb0a35b05ba32da12c572a13011fd6692a4766b6232f38df",
+      "modules": [
+        "usm_blocks.py"
+      ]
     },
     "inject-alias": {
       "description": "Manage the usm alias block in your shell rc.",
@@ -170,8 +179,11 @@
       "requirements": [
         "click>=8.2.1"
       ],
-      "version": "1.0.1",
-      "hash": "sha256:d30376793f6b11309b98512c898a8ccce5c1bcbc42101f148f40649c251a2c8e"
+      "version": "1.0.2",
+      "hash": "sha256:6ef3b2836fd09157e682e2500da6b06d2ecd2f19a51e130d826ea22905a35a7b",
+      "modules": [
+        "usm_blocks.py"
+      ]
     },
     "net": {
       "description": "Inspect, diagnose, and monitor host networking.",

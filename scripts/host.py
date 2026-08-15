@@ -34,8 +34,14 @@ from typing import Any, Iterable
 import click
 from usmo import ui
 
+from usm_blocks import BlockError, ManagedBlock
+
 BEGIN_MARKER = "# >>> usm host >>>"
 END_MARKER = "# <<< usm host <<<"
+
+#: Editing ~/.ssh/config is shared with inject-alias, git-auth and init;
+#: usm_blocks owns the "don't damage a file you don't own" rules.
+BLOCK = ManagedBlock(BEGIN_MARKER, END_MARKER, label="usm host block")
 CONTEXT = {"help_option_names": ["-h", "--help"]}
 DEFAULT_PARALLEL = 8
 OUTPUT_LIMIT = 4000
@@ -121,22 +127,12 @@ def parse_target(target: str) -> tuple[str, str, str]:
 
 
 def split_managed_block(content: str) -> tuple[str, str, bool]:
-    begin = content.find(BEGIN_MARKER)
-    end = content.find(END_MARKER)
-    if begin == -1 and end == -1:
-        return content, "", False
-    if begin == -1 or end == -1 or end < begin:
-        raise click.ClickException(
-            "Found an incomplete usm host block; fix ~/.ssh/config manually first."
-        )
-    if content.find(BEGIN_MARKER, begin + len(BEGIN_MARKER)) != -1:
-        raise click.ClickException(
-            "Found duplicate usm host block markers; fix ~/.ssh/config manually first."
-        )
-    block_end = end + len(END_MARKER)
-    if block_end < len(content) and content[block_end : block_end + 1] == "\n":
-        block_end += 1
-    return content[:begin] + content[block_end:], content[begin:block_end], True
+    """Our block, and everything that isn't ours."""
+    try:
+        split = BLOCK.split(content)
+    except BlockError as exc:
+        raise click.ClickException(f"{exc}; fix ~/.ssh/config manually first.") from exc
+    return split.without_block, split.block, split.found
 
 
 def parse_block(block: str) -> dict[str, HostEntry]:
@@ -187,7 +183,11 @@ def read_config() -> tuple[str, dict[str, HostEntry]]:
 
 
 def render_block(entries: dict[str, HostEntry]) -> str:
-    lines = [BEGIN_MARKER]
+    return BLOCK.render(render_body(entries))
+
+
+def render_body(entries: dict[str, HostEntry]) -> str:
+    lines: list[str] = []
     for alias in sorted(entries):
         entry = entries[alias]
         lines.append(f"Host {entry.alias}")
@@ -205,8 +205,7 @@ def render_block(entries: dict[str, HostEntry]) -> str:
         if entry.tags:
             lines.append(f"    # usm-tags: {','.join(entry.tags)}")
         lines.extend(f"    {opt}" for opt in entry.options)
-    lines.append(END_MARKER)
-    return "\n".join(lines) + "\n"
+    return "\n".join(lines) + "\n" if lines else ""
 
 
 def atomic_write_config(content: str) -> None:
@@ -239,23 +238,13 @@ def atomic_write_config(content: str) -> None:
 
 def write_entries(entries: dict[str, HostEntry]) -> None:
     content = read_config_text()
-    begin = content.find(BEGIN_MARKER)
-    end = content.find(END_MARKER)
-    outside, _, had_block = split_managed_block(content)
-    block = render_block(entries)
-    if had_block:
-        block_end = end + len(END_MARKER)
-        if block_end < len(content) and content[block_end : block_end + 1] == "\n":
-            block_end += 1
-        before = content[:begin]
-        after = content[block_end:]
-        updated = before + block + after if entries else before + after
-    elif outside and not outside.endswith("\n"):
-        updated = outside + "\n\n" + block
-    elif outside:
-        updated = outside + ("" if outside.endswith("\n\n") else "\n") + block
-    else:
-        updated = block
+    try:
+        if entries:
+            updated = BLOCK.apply(content, render_body(entries))
+        else:
+            updated, _ = BLOCK.remove(content)
+    except BlockError as exc:
+        raise click.ClickException(f"{exc}; fix ~/.ssh/config manually first.") from exc
     atomic_write_config(updated)
 
 
@@ -481,19 +470,28 @@ def ls_cmd(
     pattern: str | None, include_all: bool, check: bool, as_json: bool, timeout: float
 ) -> None:
     """List managed hosts."""
-    rows = []
+    # Display rows and JSON records are built separately. They used to share
+    # one dict keyed by case, which broke the table the moment the column
+    # headers were lowercased: `row_for` started finding the JSON "tags",
+    # which is a list rich cannot render.
+    display: list[dict[str, Any]] = []
+    records: list[dict[str, Any]] = []
     for entry in filter_entries(all_entries(include_all), pattern):
         probe = check_one(entry, timeout) if check else None
-        rows.append(
+        display.append(
             {
-                "Alias": entry.alias,
-                "Target": entry.target,
-                "Port": entry.port or "-",
-                "Identity": ui.shorten_path(entry.identity) if entry.identity else "-",
-                "Tags": ",".join(entry.tags) or "-",
-                "Reach": ("ok" if probe and probe["ok"] else "failed")
+                "alias": entry.alias,
+                "target": entry.target,
+                "port": entry.port or "-",
+                "identity": ui.shorten_path(entry.identity) if entry.identity else "-",
+                "tags": ",".join(entry.tags) or "-",
+                "reach": ("ok" if probe and probe["ok"] else "failed")
                 if probe
                 else "-",
+            }
+        )
+        records.append(
+            {
                 "alias": entry.alias,
                 "target": entry.target,
                 "port": entry.port or None,
@@ -504,9 +502,9 @@ def ls_cmd(
             }
         )
     if as_json:
-        dump_json([{k: v for k, v in row.items() if k[:1].islower()} for row in rows])
+        dump_json(records)
     else:
-        print_host_table(rows)
+        print_host_table(display)
 
 
 @cli.command(context_settings=CONTEXT)

@@ -8,8 +8,14 @@ from pathlib import Path
 
 import click
 
+from usm_blocks import BlockError, ManagedBlock
+
 BEGIN_MARKER = "## __USM_INIT_ALIAS_BEGIN__"
 END_MARKER = "## __USM_INIT_ALIAS_END__"
+
+#: The rc file belongs to the user; usm_blocks owns the rules for editing one
+#: safely, shared with git-auth, init and host.
+BLOCK = ManagedBlock(BEGIN_MARKER, END_MARKER, label="usm alias block")
 SUPPORTED_SHELLS = ("bash", "zsh", "powershell")
 POSIX_ALIAS_BLOCK_BODY = """alias ll="ls -lh"
 alias gs="git status"
@@ -159,63 +165,25 @@ def prompt_for_shell(system_name: str) -> str:
     return default_shell
 
 
-def render_alias_block(shell: str) -> str:
+def render_alias_body(shell: str) -> str:
     if shell == "powershell":
-        block_body = POWERSHELL_ALIAS_BLOCK_BODY
-    else:
-        # `starship init` takes the shell name (bash/zsh) as its argument.
-        block_body = POSIX_ALIAS_BLOCK_BODY.replace("__SHELL__", shell)
-    return f"{BEGIN_MARKER}\n{block_body}\n{END_MARKER}\n"
+        return POWERSHELL_ALIAS_BLOCK_BODY
+    # `starship init` takes the shell name (bash/zsh) as its argument.
+    return POSIX_ALIAS_BLOCK_BODY.replace("__SHELL__", shell)
 
 
-def strip_existing_managed_block(content: str) -> tuple[str, bool]:
-    lines = content.splitlines()
-    kept_lines: list[str] = []
-    inside_managed_block = False
-    found_begin = False
-    found_end = False
-
-    for line in lines:
-        if line == BEGIN_MARKER:
-            if inside_managed_block:
-                raise ValueError("Found a nested usm alias block marker.")
-            inside_managed_block = True
-            found_begin = True
-            continue
-
-        if line == END_MARKER:
-            if not inside_managed_block:
-                raise ValueError("Found an end marker without a matching begin marker.")
-            inside_managed_block = False
-            found_end = True
-            continue
-
-        if not inside_managed_block:
-            kept_lines.append(line)
-
-    if inside_managed_block or found_begin != found_end:
-        raise ValueError(
-            "Found an incomplete managed alias block. Please fix it manually first."
-        )
-
-    return "\n".join(kept_lines).strip("\n"), found_begin and found_end
+def render_alias_block(shell: str) -> str:
+    return BLOCK.render(render_alias_body(shell))
 
 
 def upsert_alias_block(target_path: Path, shell: str) -> str:
-    target_path.parent.mkdir(parents=True, exist_ok=True)
-    original_content = (
-        target_path.read_text(encoding="utf-8") if target_path.exists() else ""
-    )
-    cleaned_content, replaced_existing = strip_existing_managed_block(original_content)
-    alias_block = render_alias_block(shell)
-
-    if cleaned_content:
-        updated_content = f"{cleaned_content}\n\n{alias_block}"
-    else:
-        updated_content = alias_block
-
-    target_path.write_text(updated_content, encoding="utf-8")
-    return "updated" if replaced_existing else "inserted"
+    """Insert or refresh the alias block, leaving the rest of the rc alone."""
+    try:
+        replaced = BLOCK.contains(BLOCK.read(target_path))
+        BLOCK.update(target_path, render_alias_body(shell), symlinks="follow")
+    except BlockError as exc:
+        raise ValueError(str(exc)) from exc
+    return "updated" if replaced else "inserted"
 
 
 def resolve_target(

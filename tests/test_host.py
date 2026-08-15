@@ -1164,3 +1164,89 @@ class TestCommandsJsonAndTables:
         assert "box" in result.output
         assert "Traceback" not in result.output
         assert "/very/long/path/to/key" not in result.output
+
+
+class TestListingRendersEveryField:
+    """`ls` once crashed for any host that had a tag.
+
+    The display row and the JSON record shared one dict, keyed by case. When
+    the column headers were lowercased, `ui.row_for` began finding the JSON
+    "tags" key -- a list, which rich refuses to render -- so `usm host ls`
+    raised NotRenderableError for anyone who had ever used --tag. No test
+    listed a tagged host, so nothing caught it.
+    """
+
+    def _add(self, runner, alias="box", *extra):
+        result = invoke(runner, "add", alias, "user@example.com:2222", *extra)
+        assert result.exit_code == 0, result.output
+        return result
+
+    def test_a_tagged_host_lists_without_error(self, runner):
+        self._add(runner, "box", "--tag", "gpu")
+        result = invoke(runner, "ls")
+        assert result.exit_code == 0, result.output
+        assert "gpu" in result.output
+
+    def test_several_tags_are_shown_together(self, runner):
+        self._add(runner, "box", "--tag", "gpu", "--tag", "prod")
+        result = invoke(runner, "ls")
+        assert result.exit_code == 0
+        assert "gpu,prod" in result.output.replace(" ", "")
+
+    def test_an_untagged_host_lists_too(self, runner):
+        self._add(runner, "plain")
+        result = invoke(runner, "ls")
+        assert result.exit_code == 0 and "plain" in result.output
+
+    def test_a_host_with_an_identity_lists(self, runner):
+        self._add(runner, "keyed", "--identity", "~/.ssh/id_ed25519")
+        result = invoke(runner, "ls")
+        assert result.exit_code == 0 and "keyed" in result.output
+
+    def test_every_row_value_is_a_string(self, runner):
+        """rich renders strings; anything else is a crash waiting to happen."""
+        self._add(runner, "box", "--tag", "gpu", "--identity", "~/.ssh/k")
+        rows = []
+        original = host.print_host_table
+
+        def capture(display, **kwargs):
+            rows.extend(display)
+            return original(display, **kwargs)
+
+        host.print_host_table = capture
+        try:
+            assert invoke(runner, "ls").exit_code == 0
+        finally:
+            host.print_host_table = original
+        assert rows, "nothing was rendered"
+        for row in rows:
+            for key, value in row.items():
+                assert isinstance(value, str), f"{key} is {type(value).__name__}"
+
+    def test_json_still_carries_structured_tags(self, runner):
+        """The table wants text; JSON consumers want the real list."""
+        self._add(runner, "box", "--tag", "gpu", "--tag", "prod")
+        data = parse_json_result(invoke(runner, "ls", "--json"))
+        assert data[0]["tags"] == ["gpu", "prod"]
+
+    def test_json_has_no_display_only_keys(self, runner):
+        self._add(runner, "box", "--tag", "gpu")
+        data = parse_json_result(invoke(runner, "ls", "--json"))
+        assert "reach" not in data[0], "display fields leaked into the contract"
+        assert "reachable" in data[0]
+
+    @pytest.mark.parametrize("width", ["40", "60", "80", "120", "200"])
+    def test_a_tagged_host_lists_at_any_width(self, runner, monkeypatch, width):
+        monkeypatch.setenv("COLUMNS", width)
+        self._add(runner, "box", "--tag", "gpu")
+        assert invoke(runner, "ls").exit_code == 0
+
+    def test_check_adds_reachability_without_breaking_the_row(
+        self, runner, monkeypatch
+    ):
+        self._add(runner, "box", "--tag", "gpu")
+        monkeypatch.setattr(
+            host, "check_one", lambda entry, timeout: {"ok": True, "detail": "ok"}
+        )
+        result = invoke(runner, "ls", "--check")
+        assert result.exit_code == 0 and "ok" in result.output

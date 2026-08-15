@@ -637,3 +637,47 @@ class TestSubSecondDurations:
             for v in (0, 0.005, 0.05, 0.3, 1, 59, 60, 3600, 86400, 10**7)
         ]
         assert max(widths) <= 5
+
+
+class TestRowValuesMustBeText:
+    """`usm host ls` crashed because a cell held a list.
+
+    Rich reports that as "unable to render list" with no hint about which
+    column, so the failure is far from the mistake. row_for is the seam every
+    listing goes through; it can name the column instead.
+    """
+
+    def _columns(self):
+        return [ui.Column("name"), ui.Column("tags")]
+
+    def test_strings_pass_through(self):
+        assert ui.row_for(self._columns(), {"name": "a", "tags": "x,y"}) == ["a", "x,y"]
+
+    def test_a_missing_key_becomes_empty(self):
+        assert ui.row_for(self._columns(), {"name": "a"}) == ["a", ""]
+
+    @pytest.mark.parametrize("value", [["a", "b"], ("a",), {"a"}, {"a": 1}])
+    def test_containers_are_refused_by_column_name(self, value):
+        with pytest.raises(TypeError, match="'tags'"):
+            ui.row_for(self._columns(), {"name": "a", "tags": value})
+
+    def test_an_empty_container_is_still_refused(self):
+        """An empty list renders as nothing today and crashes tomorrow."""
+        with pytest.raises(TypeError):
+            ui.row_for(self._columns(), {"name": "a", "tags": []})
+
+    @pytest.mark.parametrize("value,expected", [(3, "3"), (2.5, "2.5"), (0, "0")])
+    def test_numbers_are_converted(self, value, expected):
+        assert ui.row_for(self._columns(), {"name": "a", "tags": value})[1] == expected
+
+    def test_none_is_left_alone(self):
+        """rich renders None as an empty cell; that is a fine listing value."""
+        assert ui.row_for(self._columns(), {"name": "a", "tags": None})[1] is None
+
+    def test_hidden_columns_are_not_checked(self, monkeypatch):
+        columns = [ui.Column("name"), ui.Column("tags", hide_below=200)]
+        assert ui.row_for(columns, {"name": "a", "tags": ["x"]}, 80) == ["a"]
+
+    def test_the_error_names_the_offending_type(self):
+        with pytest.raises(TypeError, match="list"):
+            ui.row_for(self._columns(), {"tags": ["x"]})
