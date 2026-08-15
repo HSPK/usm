@@ -130,8 +130,8 @@
       "requirements": [
         "click>=8.2.1"
       ],
-      "version": "1.0.5",
-      "hash": "sha256:8891379f19c6eb047a20ef202c266af6ccd93e361c0ee9a9b23844e7c295d756",
+      "version": "1.0.6",
+      "hash": "sha256:d785ce899bb451daca65eb2a1845a82f9ba2a6cca9db7e92c4fa0960a72ba17f",
       "modules": [
         "usm_blocks.py"
       ]
@@ -154,8 +154,8 @@
         "rich>=13.0",
         "usmo>=0.12.0"
       ],
-      "version": "1.0.3",
-      "hash": "sha256:e5a8a5cd7f899ac66c7782b393069702fbb949f882cbc3c86a24baa4558e5803",
+      "version": "1.0.4",
+      "hash": "sha256:83c00e71974b885cf4fe13fefd5057be49484d4645a4c093c8a18cf4465f3326",
       "modules": [
         "usm_blocks.py"
       ]
@@ -167,8 +167,8 @@
         "click>=8.2.1",
         "pyyaml>=6.0.3"
       ],
-      "version": "1.0.3",
-      "hash": "sha256:45b772115cf88304fb0a35b05ba32da12c572a13011fd6692a4766b6232f38df",
+      "version": "1.0.4",
+      "hash": "sha256:1c080e0055178d7c0c4403f0c3f14962b63cdca8d60420206183bf05a48f34ee",
       "modules": [
         "usm_blocks.py"
       ]
@@ -179,8 +179,8 @@
       "requirements": [
         "click>=8.2.1"
       ],
-      "version": "1.0.2",
-      "hash": "sha256:6ef3b2836fd09157e682e2500da6b06d2ecd2f19a51e130d826ea22905a35a7b",
+      "version": "1.0.3",
+      "hash": "sha256:6efeb9a37cfd3d07b5f35a19e3fa56290e9634b397d7c8f47ed86dee61b2349f",
       "modules": [
         "usm_blocks.py"
       ]

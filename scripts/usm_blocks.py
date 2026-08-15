@@ -26,6 +26,7 @@ own way, and by tests that should not need click to check text handling.
 
 from __future__ import annotations
 
+import errno
 import os
 import shutil
 from dataclasses import dataclass
@@ -191,6 +192,16 @@ class ManagedBlock:
         if symlinks == "refuse":
             raise BlockError(f"refusing to edit {path} because it is a symlink")
         if symlinks == "follow":
+            # Python 3.12 raises on a symlink loop here; 3.13 returns the path
+            # and reports it as non-existent, which would have us replace the
+            # link with a regular file. Detect the loop ourselves instead.
+            try:
+                os.stat(path)
+            except OSError as exc:
+                if exc.errno == errno.ELOOP:
+                    raise BlockError(f"symlink loop at {path}") from exc
+                if exc.errno != errno.ENOENT:
+                    raise BlockError(f"cannot resolve symlink {path}: {exc}") from exc
             try:
                 return path.resolve(strict=False)
             except (OSError, RuntimeError) as exc:

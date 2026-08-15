@@ -445,11 +445,17 @@ class TestSymlinkPolicy:
         assert (tmp_path / "missing").exists()
 
     def test_a_symlink_loop_is_reported(self, block, tmp_path):
+        """3.12 raises here, 3.13 silently says the path does not exist.
+
+        Left to the standard library, 3.13 would have us replace the link
+        with a regular file; the loop has to be detected explicitly.
+        """
         a, b = tmp_path / "a", tmp_path / "b"
         a.symlink_to(b)
         b.symlink_to(a)
-        with pytest.raises(BlockError):
+        with pytest.raises(BlockError, match="loop"):
             block.update(a, "y\n", symlinks="follow")
+        assert a.is_symlink(), "the link must survive being refused"
 
     def test_an_unknown_policy_is_a_programming_error(self, block, tmp_path):
         link = tmp_path / "link"
