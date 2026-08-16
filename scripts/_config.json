@@ -219,8 +219,8 @@
         "uvicorn>=0.30.0",
         "websockets>=14.0"
       ],
-      "version": "1.4.1",
-      "hash": "sha256:9404282409e1fcbd9b29c12d1e56093a2db655b8c6d5e8654648719ac346e91e"
+      "version": "1.4.2",
+      "hash": "sha256:5cfbae23d4a55cbe51c377abfc7cac24b280e29ae239041b5c564e923986dfd3"
     },
     "port": {
       "description": "Show or free ports by killing the holder.",

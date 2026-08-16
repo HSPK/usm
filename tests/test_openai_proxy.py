@@ -9,22 +9,27 @@ so streaming timing can be observed.
 from __future__ import annotations
 
 import asyncio
+import io
 import json
 import socket
 import socketserver
 import threading
 import time
+from datetime import datetime, timezone
 from collections.abc import Callable
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import ClassVar
 
 import httpx
 import pytest
+
+import openai_proxy
 import uvicorn
 import websockets
 from asgi_lifespan import LifespanManager
 from openai_proxy import (
     AnthropicError,
+    AccessLog,
     AnthropicStreamTranslator,
     ResponsesError,
     ResponsesStreamTranslator,
@@ -45,6 +50,10 @@ from openai_proxy import (
     resolve_native_api_url,
     resolve_native_responses_url,
     resolve_realtime_url,
+    format_access_line,
+    log_client,
+    log_model,
+    log_timezone,
     resolve_url,
     responses_input_to_messages,
     responses_text_to_chat,
@@ -4719,3 +4728,443 @@ class TestCli:
     def test_null_content_becomes_empty_string(self):
         msgs = anthropic_messages_to_chat([{"role": "user", "content": None}])
         assert msgs == [{"role": "user", "content": ""}]
+
+
+# --- Access log -----------------------------------------------------------
+
+
+class TestLogTimezone:
+    """Timestamps are read by a person, usually not in the server's zone."""
+
+    def test_defaults_to_utc_plus_eight(self):
+        from openai_proxy import DEFAULT_LOG_UTC_OFFSET
+
+        assert DEFAULT_LOG_UTC_OFFSET == 8.0
+
+    @pytest.mark.parametrize("offset", [0, 8, -5, 5.5, -9.5, 14])
+    def test_offsets_round_trip(self, offset):
+        tz = log_timezone(offset)
+        assert tz.utcoffset(None).total_seconds() == offset * 3600
+
+    def test_a_fixed_offset_ignores_the_host_zone(self, monkeypatch):
+        monkeypatch.setenv("TZ", "America/New_York")
+        stamped = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc).astimezone(
+            log_timezone(8)
+        )
+        assert stamped.strftime("%z") == "+0800"
+        assert stamped.hour == 20
+
+    def test_the_offset_shows_in_a_formatted_line(self):
+        line = format_access_line(
+            when=datetime(2026, 5, 4, 3, 2, 1, tzinfo=log_timezone(8)),
+            ip="1.2.3.4",
+            port="5",
+            method="GET",
+            path="/x",
+            model="m",
+            status=200,
+            duration=0.0,
+        )
+        assert line.startswith("2026-05-04 03:02:01 +0800 ")
+
+
+class TestLogClient:
+    def test_reports_ip_and_port(self):
+        assert log_client({"client": ("10.0.0.1", 4242)}) == ("10.0.0.1", "4242")
+
+    def test_a_missing_client_is_dashes(self):
+        assert log_client({}) == ("-", "-")
+
+    def test_an_empty_client_is_dashes(self):
+        assert log_client({"client": None}) == ("-", "-")
+
+    def test_a_client_without_a_port(self):
+        assert log_client({"client": ("10.0.0.1",)}) == ("10.0.0.1", "-")
+
+    def test_an_ipv6_peer_is_kept_whole(self):
+        assert log_client({"client": ("::1", 80)}) == ("::1", "80")
+
+    def test_a_blank_host_is_a_dash(self):
+        assert log_client({"client": ("", 80)}) == ("-", "80")
+
+
+class TestLogModel:
+    """The model is the point of the log line; find it wherever it lives."""
+
+    def test_from_a_json_body(self):
+        assert log_model(b'{"model": "gpt-4o"}', b"") == "gpt-4o"
+
+    def test_from_the_deployment_key(self):
+        assert log_model(b'{"deployment": "dep-1"}', b"") == "dep-1"
+
+    def test_model_wins_over_deployment(self):
+        assert log_model(b'{"deployment": "d", "model": "m"}', b"") == "m"
+
+    def test_from_the_query_string(self):
+        assert log_model(b"", b"model=o3-mini") == "o3-mini"
+
+    def test_the_body_wins_over_the_query(self):
+        assert log_model(b'{"model": "body"}', b"model=query") == "body"
+
+    def test_missing_everywhere_is_a_dash(self):
+        assert log_model(b"", b"") == "-"
+
+    def test_falls_back_to_the_configured_default(self):
+        assert log_model(b"", b"", "default-dep") == "default-dep"
+
+    def test_a_body_model_beats_the_default(self):
+        assert log_model(b'{"model": "m"}', b"", "default-dep") == "m"
+
+    @pytest.mark.parametrize(
+        "body",
+        [b"not json", b"", b"{", b"null", b"[1,2]", b'"a string"', b"\xff\xfe"],
+    )
+    def test_unparseable_bodies_do_not_raise(self, body):
+        assert log_model(body, b"") == "-"
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            b'{"model": null}',
+            b'{"model": 42}',
+            b'{"model": ""}',
+            b'{"model": "   "}',
+            b'{"model": []}',
+            b'{"model": {"a": 1}}',
+        ],
+    )
+    def test_a_model_that_is_not_a_usable_string_is_ignored(self, body):
+        assert log_model(body, b"") == "-"
+
+    def test_whitespace_is_trimmed(self):
+        assert log_model(b'{"model": "  gpt-4o  "}', b"") == "gpt-4o"
+
+    def test_a_unicode_model_survives(self):
+        assert log_model('{"model": "模型-α"}'.encode(), b"") == "模型-α"
+
+    def test_an_absurdly_long_model_is_truncated(self):
+        from openai_proxy import MAX_MODEL_LENGTH
+
+        body = json.dumps({"model": "x" * 5000}).encode()
+        assert len(log_model(body, b"")) == MAX_MODEL_LENGTH
+
+    def test_a_malformed_query_does_not_raise(self):
+        assert log_model(b"", b"%%%") == "-"
+
+    def test_an_empty_query_value_is_ignored(self):
+        assert log_model(b"", b"model=") == "-"
+
+
+class TestAccessLogMiddleware:
+    """The middleware must observe requests, never alter them."""
+
+    def _app(self, handler=None, **kwargs):
+        stream = io.StringIO()
+
+        async def default(scope, receive, send):
+            while True:
+                message = await receive()
+                if not message.get("more_body"):
+                    break
+            await send({"type": "http.response.start", "status": 200, "headers": []})
+            await send({"type": "http.response.body", "body": b"ok"})
+
+        app = AccessLog(
+            handler or default,
+            tz=log_timezone(8),
+            stream=stream,
+            clock=iter([0.0, 0.25]).__next__,
+            now=lambda tz: datetime(2026, 3, 4, 5, 6, 7, tzinfo=tz),
+            **kwargs,
+        )
+        return app, stream
+
+    async def _get(self, app, **scope_extra):
+        scope = {
+            "type": "http",
+            "method": "POST",
+            "path": "/v1/chat/completions",
+            "query_string": b"",
+            "headers": [],
+            "client": ("203.0.113.7", 51515),
+            **scope_extra,
+        }
+        body = scope_extra.pop("_body", b'{"model": "gpt-4o"}')
+        messages = [{"type": "http.request", "body": body, "more_body": False}]
+
+        async def receive():
+            return messages.pop(0) if messages else {"type": "http.disconnect"}
+
+        sent = []
+
+        async def send(message):
+            sent.append(message)
+
+        await app(scope, receive, send)
+        return sent
+
+    async def test_logs_every_requested_field(self):
+        app, stream = self._app()
+        await self._get(app)
+        line = stream.getvalue().strip()
+        assert "2026-03-04 05:06:07 +0800" in line
+        assert "203.0.113.7:51515" in line
+        assert "model=gpt-4o" in line
+        assert "status=200" in line
+        assert "POST /v1/chat/completions" in line
+
+    async def test_records_the_duration(self):
+        app, stream = self._app()
+        await self._get(app)
+        assert "250ms" in stream.getvalue()
+
+    async def test_one_line_per_request(self):
+        app, stream = self._app()
+        await self._get(app)
+        assert len(stream.getvalue().strip().splitlines()) == 1
+
+    async def test_the_body_still_reaches_the_application(self):
+        """Sniffing must observe, not consume."""
+        seen = []
+
+        async def echo(scope, receive, send):
+            while True:
+                message = await receive()
+                seen.append(message.get("body", b""))
+                if not message.get("more_body"):
+                    break
+            await send({"type": "http.response.start", "status": 200, "headers": []})
+            await send({"type": "http.response.body", "body": b""})
+
+        app, _ = self._app(echo)
+        await self._get(app)
+        assert b"".join(seen) == b'{"model": "gpt-4o"}'
+
+    async def test_a_streamed_body_is_reassembled_for_the_model(self):
+        async def drain(scope, receive, send):
+            while True:
+                if not (await receive()).get("more_body"):
+                    break
+            await send({"type": "http.response.start", "status": 200, "headers": []})
+            await send({"type": "http.response.body", "body": b""})
+
+        stream = io.StringIO()
+        app = AccessLog(
+            drain,
+            tz=log_timezone(8),
+            stream=stream,
+            clock=iter([0.0, 0.0]).__next__,
+        )
+        chunks = [
+            {"type": "http.request", "body": b'{"mod', "more_body": True},
+            {"type": "http.request", "body": b'el": "split"}', "more_body": False},
+        ]
+
+        async def receive():
+            return chunks.pop(0)
+
+        await app(
+            {
+                "type": "http",
+                "method": "POST",
+                "path": "/v1/chat/completions",
+                "query_string": b"",
+                "client": ("1.1.1.1", 2),
+            },
+            receive,
+            lambda message: asyncio.sleep(0),
+        )
+        assert "model=split" in stream.getvalue()
+
+    async def test_a_huge_body_is_not_buffered_whole(self, monkeypatch):
+        monkeypatch.setattr(openai_proxy, "MAX_LOG_BODY_SNIFF", 16)
+        app, stream = self._app()
+        await self._get(app, _body=b'{"model": "' + b"x" * 100000 + b'"}')
+        assert "status=200" in stream.getvalue()
+
+    async def test_the_model_comes_from_the_query_when_absent_from_the_body(self):
+        app, stream = self._app()
+        await self._get(app, query_string=b"model=o3-mini", _body=b"")
+        assert "model=o3-mini" in stream.getvalue()
+
+    async def test_a_request_without_a_model_logs_a_dash(self):
+        app, stream = self._app()
+        await self._get(app, path="/health", _body=b"")
+        assert "model=-" in stream.getvalue()
+
+    async def test_the_default_deployment_is_used_when_nothing_says_otherwise(self):
+        app, stream = self._app(default_model="gpt-4o-mini")
+        await self._get(app, _body=b"")
+        assert "model=gpt-4o-mini" in stream.getvalue()
+
+    async def test_an_unknown_peer_logs_dashes(self):
+        app, stream = self._app()
+        await self._get(app, client=None)
+        assert " -:- " in stream.getvalue()
+
+    async def test_a_failing_status_is_recorded(self):
+        async def failing(scope, receive, send):
+            await send({"type": "http.response.start", "status": 503, "headers": []})
+            await send({"type": "http.response.body", "body": b""})
+
+        app, stream = self._app(failing)
+        await self._get(app)
+        assert "status=503" in stream.getvalue()
+
+    async def test_an_exception_is_logged_and_re_raised(self):
+        async def boom(scope, receive, send):
+            raise RuntimeError("upstream exploded")
+
+        app, stream = self._app(boom)
+        with pytest.raises(RuntimeError, match="upstream exploded"):
+            await self._get(app)
+        assert "status=error" in stream.getvalue()
+
+    async def test_a_lifespan_scope_passes_straight_through(self):
+        seen = []
+
+        async def app_inner(scope, receive, send):
+            seen.append(scope["type"])
+
+        app, stream = self._app(app_inner)
+        await app({"type": "lifespan"}, None, None)
+        assert seen == ["lifespan"] and stream.getvalue() == ""
+
+    async def test_a_websocket_is_logged_once_closed(self):
+        async def ws(scope, receive, send):
+            return
+
+        app, stream = self._app(ws)
+        await app(
+            {"type": "websocket", "path": "/v1/realtime", "client": ("9.9.9.9", 7)},
+            None,
+            None,
+        )
+        line = stream.getvalue()
+        assert "WS /v1/realtime" in line and "9.9.9.9:7" in line
+
+    async def test_a_closed_stream_does_not_break_the_request(self):
+        stream = io.StringIO()
+        stream.close()
+
+        async def ok(scope, receive, send):
+            await send({"type": "http.response.start", "status": 200, "headers": []})
+            await send({"type": "http.response.body", "body": b""})
+
+        app = AccessLog(ok, tz=log_timezone(8), stream=stream, clock=lambda: 0.0)
+        await self._get(app)  # must not raise
+
+
+class TestAccessLogWiring:
+    async def test_enabled_by_default(self, upstream):
+        upstream_url, _, _ = upstream
+        stream = io.StringIO()
+        _, cfg = _build_for(upstream_url)
+        app = build_app(cfg, token_provider=_fake_token, log_stream=stream)
+        async with (
+            LifespanManager(app),
+            httpx.AsyncClient(
+                transport=httpx.ASGITransport(app), base_url="http://test"
+            ) as ac,
+        ):
+            await ac.get("/health")
+        assert "GET /health" in stream.getvalue()
+
+    async def test_can_be_turned_off(self, upstream):
+        upstream_url, _, _ = upstream
+        stream = io.StringIO()
+        _, cfg = _build_for(upstream_url)
+        cfg["access_log"] = False
+        app = build_app(cfg, token_provider=_fake_token, log_stream=stream)
+        async with (
+            LifespanManager(app),
+            httpx.AsyncClient(
+                transport=httpx.ASGITransport(app), base_url="http://test"
+            ) as ac,
+        ):
+            await ac.get("/health")
+        assert stream.getvalue() == ""
+
+    async def test_the_offset_is_configurable(self, upstream):
+        upstream_url, _, _ = upstream
+        stream = io.StringIO()
+        _, cfg = _build_for(upstream_url)
+        cfg["log_utc_offset"] = -5
+        app = build_app(cfg, token_provider=_fake_token, log_stream=stream)
+        async with (
+            LifespanManager(app),
+            httpx.AsyncClient(
+                transport=httpx.ASGITransport(app), base_url="http://test"
+            ) as ac,
+        ):
+            await ac.get("/health")
+        assert "-0500" in stream.getvalue()
+
+    async def test_streaming_still_streams_with_the_log_attached(self, client):
+        """The log wraps the ASGI app; a stream must not be buffered by it."""
+        async with client.stream(
+            "POST",
+            "/v1/chat/completions",
+            json={"model": "m", "stream": True},
+        ) as response:
+            assert response.status_code == 200
+            body = "".join([chunk async for chunk in response.aiter_text()])
+        assert "chunk" in body or body
+
+
+class TestAccessLogKeepsSecretsOut:
+    """A log is read by more people than the traffic it describes."""
+
+    async def _log_one(self, **scope_extra):
+        stream = io.StringIO()
+
+        async def ok(scope, receive, send):
+            while True:
+                if not (await receive()).get("more_body"):
+                    break
+            await send({"type": "http.response.start", "status": 200, "headers": []})
+            await send({"type": "http.response.body", "body": b""})
+
+        app = AccessLog(ok, tz=log_timezone(8), stream=stream, clock=lambda: 0.0)
+        scope = {
+            "type": "http",
+            "method": "POST",
+            "path": "/v1/chat/completions",
+            "query_string": b"",
+            "headers": [],
+            "client": ("1.2.3.4", 5),
+            **scope_extra,
+        }
+        body = scope_extra.pop("_body", b"{}")
+        messages = [{"type": "http.request", "body": body, "more_body": False}]
+
+        async def receive():
+            return messages.pop(0) if messages else {"type": "http.disconnect"}
+
+        await app(scope, receive, lambda message: asyncio.sleep(0))
+        return stream.getvalue()
+
+    async def test_a_query_string_api_key_is_not_logged(self):
+        out = await self._log_one(query_string=b"api-key=sk-supersecret123&model=m")
+        assert "sk-supersecret123" not in out
+        assert "model=m" in out
+
+    async def test_an_authorization_header_is_not_logged(self):
+        out = await self._log_one(
+            headers=[(b"authorization", b"Bearer sk-supersecret123")]
+        )
+        assert "sk-supersecret123" not in out
+
+    async def test_the_message_content_is_not_logged(self):
+        """Prompts are user data; only the model name belongs in a log."""
+        body = json.dumps(
+            {"model": "m", "messages": [{"role": "user", "content": "my private text"}]}
+        ).encode()
+        out = await self._log_one(_body=body)
+        assert "my private text" not in out
+        assert "model=m" in out
+
+    async def test_an_api_key_in_the_body_is_not_logged(self):
+        body = json.dumps({"model": "m", "api_key": "sk-leak"}).encode()
+        out = await self._log_one(_body=body)
+        assert "sk-leak" not in out

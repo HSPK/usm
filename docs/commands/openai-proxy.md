@@ -300,8 +300,37 @@ The proxy also supports standard multipart SDK calls such as
 | `--token-limit-field` | `auto` | Pin the output-token cap to `max_tokens` or `max_completion_tokens` instead of auto-detecting. |
 | `--retry-429` | `2` | Additional attempts after an upstream 429; `0` disables automatic retry. |
 | `--retry-max-wait` | `30` | Maximum cumulative seconds spent waiting for 429 retries. |
+| `--log-tz` | `8` | UTC offset in hours for access-log timestamps. |
+| `--access-log` / `--no-access-log` | on | One log line per request. |
 
 `--help` for the full list (timeouts, default deployment, etc.).
+
+## The access log
+
+One line per request, on stderr, timestamped in **UTC+8** by default:
+
+```
+2026-08-16 22:51:19 +0800 127.0.0.1:38388 POST /v1/chat/completions model=gpt-4o status=200 1188ms
+```
+
+The fields are the peer address and port, the method and path, the model,
+the upstream status, and how long the whole exchange took. The model is read
+from the request body (or the query string, for the endpoints that put it
+there), falling back to `--deployment`; requests that name no model — like
+`/health` — log `model=-`.
+
+The timestamp uses a fixed offset rather than the host's zone, because these
+proxies usually run on machines set to UTC while the person reading the log
+is not. `--log-tz -5` or `--log-tz 5.5` for anywhere else, `--log-tz 0` for
+UTC.
+
+Only the model is taken from the body. Prompts, API keys in the query string
+and `Authorization` headers are never logged. The source address is the
+socket peer, not `X-Forwarded-For`: a header the client controls would make
+the log forgeable.
+
+uvicorn's own access log is switched off, so this replaces it rather than
+doubling it. `--no-access-log` turns the whole thing off.
 
 ## Why it exists
 

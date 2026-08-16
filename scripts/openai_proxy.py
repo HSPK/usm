@@ -29,6 +29,7 @@ import uuid
 from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 from email import policy
 from email.message import Message
 from email.parser import BytesHeaderParser
@@ -93,6 +94,14 @@ MAX_VIDEO_MODELS = 1024
 DEFAULT_429_RETRIES = 2
 DEFAULT_429_MAX_WAIT = 30.0
 MODEL_CAPABILITY_TTL = 300.0
+
+#: Access-log timestamps default to China Standard Time rather than UTC,
+#: because that is where these logs get read. Override with --log-tz.
+DEFAULT_LOG_UTC_OFFSET = 8.0
+#: Only this much of a request body is buffered to find "model". A chat
+#: request puts it in the first few dozen bytes; an image upload must not be
+#: held in memory just to be logged.
+MAX_LOG_BODY_SNIFF = 64 * 1024
 
 AsyncTokenProvider = Callable[[], Awaitable[str]]
 AsyncSleeper = Callable[[float], Awaitable[None]]
@@ -3023,6 +3032,194 @@ async def realtime_proxy(websocket: WebSocket) -> None:
             pass
 
 
+# Access log ---------------------------------------------------------------
+
+
+def log_timezone(offset_hours: float) -> timezone:
+    """A fixed-offset zone, so log timestamps do not depend on the host's TZ.
+
+    A proxy usually runs on a box configured in UTC while the person reading
+    the log is not, which makes every timestamp a subtraction.
+    """
+    return timezone(timedelta(hours=offset_hours))
+
+
+def log_client(scope: dict) -> tuple[str, str]:
+    """The peer address as (ip, port), with "-" for anything unknown.
+
+    Deliberately the socket peer rather than X-Forwarded-For: that header is
+    attacker-controlled, and a log that can be forged is worse than one that
+    only reports what the kernel saw.
+    """
+    client = scope.get("client")
+    if not client:
+        return "-", "-"
+    host = client[0] or "-"
+    port = client[1] if len(client) > 1 else None
+    return str(host), ("-" if port in (None, "") else str(port))
+
+
+def log_model(body: bytes, query_string: bytes, default: str | None = None) -> str:
+    """Best-effort model name for one request.
+
+    The body is authoritative and is where every chat/responses/messages call
+    puts it; a few endpoints pass it in the query instead. Anything
+    unparseable simply has no model, which is not worth a log warning.
+    """
+    if body:
+        try:
+            payload = json.loads(body)
+        except (ValueError, UnicodeDecodeError):
+            payload = None
+        if isinstance(payload, dict):
+            for key in ("model", "deployment"):
+                value = payload.get(key)
+                if isinstance(value, str) and value.strip():
+                    return value.strip()[:MAX_MODEL_LENGTH]
+    if query_string:
+        try:
+            query = urllib.parse.parse_qs(query_string.decode("utf-8", "replace"))
+        except ValueError:  # pragma: no cover - parse_qs is very tolerant
+            query = {}
+        for key in ("model", "deployment"):
+            values = query.get(key)
+            if values and isinstance(values[0], str) and values[0].strip():
+                return values[0].strip()[:MAX_MODEL_LENGTH]
+    return default or "-"
+
+
+def format_access_line(
+    *,
+    when: datetime,
+    ip: str,
+    port: str,
+    method: str,
+    path: str,
+    model: str,
+    status: int | str,
+    duration: float,
+) -> str:
+    """One greppable line per request, fields in a stable order."""
+    stamp = when.strftime("%Y-%m-%d %H:%M:%S %z")
+    return (
+        f"{stamp} {ip}:{port} {method} {path} model={model} "
+        f"status={status} {duration * 1000:.0f}ms"
+    )
+
+
+class AccessLog:
+    """ASGI middleware logging time, peer, model and outcome per request.
+
+    Written as raw ASGI rather than BaseHTTPMiddleware so that streaming
+    responses are untouched: the body is *observed* on its way past, never
+    consumed, and only the first MAX_LOG_BODY_SNIFF bytes are held.
+    """
+
+    def __init__(
+        self,
+        app,
+        *,
+        tz: timezone,
+        stream=None,
+        clock: Callable[[], float] = time.monotonic,
+        now: Callable[[timezone], datetime] | None = None,
+        default_model: str | None = None,
+    ) -> None:
+        self.app = app
+        self.tz = tz
+        self.stream = stream
+        self.clock = clock
+        self.now = now or (lambda tz: datetime.now(tz))
+        self.default_model = default_model
+
+    def _write(self, line: str) -> None:
+        stream = self.stream if self.stream is not None else sys.stderr
+        try:
+            print(line, file=stream, flush=True)
+        except (OSError, ValueError):  # pragma: no cover - closed stream
+            pass
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] not in ("http", "websocket"):
+            await self.app(scope, receive, send)
+            return
+
+        ip, port = log_client(scope)
+        path = scope.get("path", "-")
+        started = self.clock()
+
+        if scope["type"] == "websocket":
+            await self.app(scope, receive, send)
+            self._write(
+                format_access_line(
+                    when=self.now(self.tz),
+                    ip=ip,
+                    port=port,
+                    method="WS",
+                    path=path,
+                    model="-",
+                    status="closed",
+                    duration=self.clock() - started,
+                )
+            )
+            return
+
+        sniffed = bytearray()
+
+        async def receive_logging():
+            message = await receive()
+            if message.get("type") == "http.request":
+                room = MAX_LOG_BODY_SNIFF - len(sniffed)
+                if room > 0:
+                    sniffed.extend(message.get("body", b"")[:room])
+            return message
+
+        status: int | str = "-"
+
+        async def send_logging(message):
+            nonlocal status
+            if message.get("type") == "http.response.start":
+                status = message.get("status", "-")
+            await send(message)
+
+        try:
+            await self.app(scope, receive_logging, send_logging)
+        except Exception:
+            # Still record the request; the exception belongs to the caller.
+            self._write(
+                format_access_line(
+                    when=self.now(self.tz),
+                    ip=ip,
+                    port=port,
+                    method=scope.get("method", "-"),
+                    path=path,
+                    model=log_model(
+                        bytes(sniffed),
+                        scope.get("query_string", b""),
+                        self.default_model,
+                    ),
+                    status="error",
+                    duration=self.clock() - started,
+                )
+            )
+            raise
+
+        self._write(
+            format_access_line(
+                when=self.now(self.tz),
+                ip=ip,
+                port=port,
+                method=scope.get("method", "-"),
+                path=path,
+                model=log_model(
+                    bytes(sniffed), scope.get("query_string", b""), self.default_model
+                ),
+                status=status,
+                duration=self.clock() - started,
+            )
+        )
+
+
 # App factory --------------------------------------------------------------
 
 
@@ -3034,6 +3231,7 @@ def build_app(
     retry_sleep: AsyncSleeper | None = None,
     retry_random: Callable[[], float] | None = None,
     retry_now: Callable[[], float] | None = None,
+    log_stream=None,
 ) -> Starlette:
     """Build the ASGI app.
 
@@ -3126,7 +3324,17 @@ def build_app(
         ),
     ]
 
-    return Starlette(lifespan=lifespan, routes=routes)
+    app = Starlette(lifespan=lifespan, routes=routes)
+    if cfg.get("access_log", True):
+        # Wrapped rather than added via add_middleware so the log sees the
+        # raw ASGI events, including for the WebSocket routes.
+        app = AccessLog(
+            app,
+            tz=log_timezone(cfg.get("log_utc_offset", DEFAULT_LOG_UTC_OFFSET)),
+            stream=log_stream,
+            default_model=cfg.get("default_dep"),
+        )
+    return app
 
 
 # CLI ----------------------------------------------------------------------
@@ -3218,6 +3426,19 @@ def build_app(
     envvar="TRAPI_PROXY_LOG_LEVEL",
     type=click.Choice(["debug", "info", "warning", "error"]),
 )
+@click.option(
+    "--log-tz",
+    type=float,
+    default=DEFAULT_LOG_UTC_OFFSET,
+    envvar="TRAPI_PROXY_LOG_TZ",
+    help="UTC offset in hours for access-log timestamps.",
+)
+@click.option(
+    "--access-log/--no-access-log",
+    default=True,
+    envvar="TRAPI_PROXY_ACCESS_LOG",
+    help="Log one line per request: time, peer, model, status.",
+)
 def cli(
     host,
     port,
@@ -3234,6 +3455,8 @@ def cli(
     retry_429,
     retry_max_wait,
     log_level,
+    log_tz,
+    access_log,
 ):
     base = f"{endpoint.rstrip('/')}/{instance.strip('/')}/openai"
     cfg = {
@@ -3250,6 +3473,8 @@ def cli(
         "token_field": None if token_limit_field == "auto" else token_limit_field,
         "retry_429": retry_429,
         "retry_max_wait": retry_max_wait,
+        "access_log": access_log,
+        "log_utc_offset": log_tz,
     }
     apis = ["/v1/chat/completions", f"/v1/responses ({responses_mode})"]
     if anthropic_mode == "translate":
@@ -3260,10 +3485,19 @@ def cli(
         f"  api-version: {api_version}\n"
         f"  endpoints:   /health, /status, /v1/*\n"
         f"  apis:        {', '.join(apis)}\n"
-        f"  429 retries: {retry_429} (max wait {retry_max_wait:g}s)",
+        f"  429 retries: {retry_429} (max wait {retry_max_wait:g}s)\n"
+        f"  access log:  {'on' if access_log else 'off'} (UTC{log_tz:+g})",
         err=True,
     )
-    uvicorn.run(build_app(cfg), host=host, port=port, log_level=log_level)
+    uvicorn.run(
+        build_app(cfg),
+        host=host,
+        port=port,
+        log_level=log_level,
+        # Our own line carries the model and the peer port; uvicorn's would
+        # only duplicate the rest of it.
+        access_log=False,
+    )
 
 
 if __name__ == "__main__":
