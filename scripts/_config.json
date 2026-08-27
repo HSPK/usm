@@ -30,11 +30,12 @@
       "hash": "sha256:ddf8e8298210d756f0325ce0bcf160310b2cdbec7961cdb93c8ae467a0e002de"
     },
     "blobmount": {
-      "description": "Mount Azure Blob containers, refreshing the SAS.",
+      "description": "Mount Azure Blob with SAS, Azure CLI or Workload Identity.",
       "path": "blobmount.py",
       "modules": [
         "usm_daemon.py",
-        "usm_azure.py"
+        "usm_azure.py",
+        "usm_fic.py"
       ],
       "requirements": [
         "click>=8.2.1",
@@ -43,8 +44,8 @@
         "rich>=13.0",
         "usmo>=0.12.0"
       ],
-      "version": "1.0.7",
-      "hash": "sha256:9749796151b1c729b35deb86d0b81792cff5c7550244ff3944100a0ca9b4b4c5"
+      "version": "1.1.0",
+      "hash": "sha256:8219168be64da0932d6dec1bc81e5b34b3bdb575a45f475f8c990381b96cd384"
     },
     "check_py": {
       "description": "Show active Python/pip versions.",
