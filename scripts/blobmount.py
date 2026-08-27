@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Mount Azure Blob containers with blobfuse2, and keep the SAS alive.
+"""Mount Azure Blob containers with blobfuse2.
 
 The shell version this replaces minted a 6-day SAS once at mount time; when
 it expired the mount stayed up but every read started failing. Here a small
@@ -9,6 +9,7 @@ mount survives indefinitely.
 Examples
 --------
   usm blobmount mount /mnt/data myaccount mycontainer
+  usm blobmount mount /mnt/data myaccount mycontainer --auth fic
   usm blobmount ls                       # what is mounted, and is it healthy
   usm blobmount status data              # detail + SAS clock + probe result
   usm blobmount refresh data             # re-mint the SAS right now
@@ -41,6 +42,7 @@ import click
 import yaml
 from rich.console import Console
 
+from usm_fic import workload_identity_from_env
 from usm_azure import (
     AUTH_KINDS,
     AUTH_SPEC_FLAG,
@@ -74,6 +76,7 @@ from usm_azure import (
 )
 
 console = Console(stderr=True)
+BLOBMOUNT_AUTH_KINDS = (*AUTH_KINDS, "fic")
 
 STATE_DIR = Path(
     os.environ.get("USM_BLOBMOUNT_STATE_DIR") or (USM_CACHE_DIR / "blobmount")
@@ -96,10 +99,9 @@ MOUNT_TIMEOUT = 120.0
 UNMOUNT_TIMEOUT = 60.0
 STARTUP_GRACE_SECS = 2.0
 
-BLOBFUSE_RELEASE = "blobfuse2-2.3.2"
-BLOBFUSE_DEB = (
-    "https://github.com/Azure/azure-storage-fuse/releases/download/"
-    f"{BLOBFUSE_RELEASE}/{BLOBFUSE_RELEASE}-Ubuntu-20.04.x86_64.deb"
+BLOBFUSE_RELEASE = "blobfuse2-2.5.4"
+BLOBFUSE_RELEASE_URL = (
+    f"https://github.com/Azure/azure-storage-fuse/releases/download/{BLOBFUSE_RELEASE}"
 )
 
 # Health states a mountpoint can be in.
@@ -136,6 +138,47 @@ def ensure_blobfuse2() -> str:
     )
 
 
+def blobfuse_deb_url() -> str:
+    """Return the release asset matching this Debian-family host."""
+    machine = platform.machine().lower()
+    arch = {
+        "x86_64": "x86_64",
+        "amd64": "x86_64",
+        "aarch64": "arm64",
+        "arm64": "arm64",
+    }.get(machine)
+    if arch is None:
+        raise BlobmountError(f"unsupported blobfuse2 architecture: {machine}")
+
+    values: dict[str, str] = {}
+    try:
+        for line in Path("/etc/os-release").read_text().splitlines():
+            key, sep, value = line.partition("=")
+            if sep:
+                values[key] = value.strip().strip('"')
+    except OSError as exc:
+        raise BlobmountError(f"cannot read /etc/os-release: {exc}") from exc
+    distro = values.get("ID", "").lower()
+    version = values.get("VERSION_ID", "")
+    major = version.partition(".")[0]
+
+    if distro == "ubuntu":
+        release = version if version in {"18.04", "20.04", "22.04"} else "22.04"
+        asset = f"{BLOBFUSE_RELEASE}-Ubuntu-{release}.{arch}.deb"
+    elif (
+        distro == "debian"
+        and arch == "x86_64"
+        and major in {"9", "10", "11", "12", "13"}
+    ):
+        asset = f"{BLOBFUSE_RELEASE}-Debian-{major}.0.x86_64.deb"
+    else:
+        raise BlobmountError(
+            f"no blobfuse2 {BLOBFUSE_RELEASE} .deb for "
+            f"{distro or 'unknown'} {version or 'unknown'} {arch}"
+        )
+    return f"{BLOBFUSE_RELEASE_URL}/{asset}"
+
+
 def install_blobfuse2(*, assume_yes: bool = False) -> str:
     """Install blobfuse2 from the upstream .deb (Debian/Ubuntu only)."""
     if platform.system().lower() != "linux":
@@ -154,13 +197,14 @@ def install_blobfuse2(*, assume_yes: bool = False) -> str:
 
     workdir = USM_CACHE_DIR / "downloads"
     workdir.mkdir(parents=True, exist_ok=True)
-    deb = workdir / f"{BLOBFUSE_RELEASE}.deb"
-    console.print(f"[dim]Downloading {BLOBFUSE_DEB}[/dim]")
+    url = blobfuse_deb_url()
+    deb = workdir / Path(url).name
+    console.print(f"[dim]Downloading {url}[/dim]")
     import urllib.error
     import urllib.request
 
     try:
-        with urllib.request.urlopen(BLOBFUSE_DEB, timeout=300) as response:
+        with urllib.request.urlopen(url, timeout=300) as response:
             deb.write_bytes(response.read())
     except (urllib.error.URLError, OSError) as exc:
         raise BlobmountError(f"download failed: {exc}") from exc
@@ -367,6 +411,9 @@ def make_mount_id(mount_dir: Path, container: str, custom: str | None = None) ->
 
 
 def mount_provider(mount: Mount):
+    if mount.auth == "fic":
+        workload_identity_from_env()
+        return build_provider("aad")
     return build_provider(
         mount.auth,
         spec=mount.sas_spec,
@@ -392,14 +439,24 @@ def mount_sas_manager(mount: Mount) -> SasManager:
 
 
 def render_config(mount: Mount, sas: str | None) -> str:
-    """Render the blobfuse2 YAML. The SAS is the only secret in it."""
+    """Render blobfuse2 YAML for SAS, Azure CLI or Workload Identity."""
     azstorage: dict = {
         "type": "block",
         "account-name": mount.account,
         "endpoint": mount.endpoint(),
         "container": mount.container,
     }
-    if sas:
+    if mount.auth == "fic":
+        identity = workload_identity_from_env()
+        azstorage.update(
+            {
+                "mode": "spn",
+                "tenantid": identity.tenant_id,
+                "clientid": identity.client_id,
+                "oauth-token-path": identity.token_file,
+            }
+        )
+    elif sas:
         azstorage["mode"] = "sas"
         azstorage["sas"] = sas.lstrip("?")
     else:
@@ -530,7 +587,10 @@ def do_mount(
     config = write_config(mount, sas)
 
     env = os.environ.copy()
-    env.setdefault("AZCOPY_AUTO_LOGIN_TYPE", "AZCLI")
+    if mount.auth == "fic":
+        env["AZCOPY_AUTO_LOGIN_TYPE"] = "WORKLOAD"
+    else:
+        env.setdefault("AZCOPY_AUTO_LOGIN_TYPE", "AZCLI")
     proc = run(build_mount_argv(mount, binary, config), env=env, timeout=MOUNT_TIMEOUT)
     output = ((proc.stdout or "") + (proc.stderr or "")).strip()
     if proc.returncode != 0:
@@ -854,8 +914,8 @@ def _health_label(health: str | None) -> str:
 
 def _sas_label(mount: Mount, *, compact: bool = False) -> str:
     """Time left on the credential, coloured by urgency."""
-    if mount.auth == "aad":
-        return "[dim]entra[/dim]"
+    if mount.auth in {"aad", "fic"}:
+        return "[dim]workload[/dim]" if mount.auth == "fic" else "[dim]entra[/dim]"
     expires = load_state(mount.id).sas_expires_at
     if not expires:
         return "[dim]-[/dim]"
@@ -873,11 +933,11 @@ def _auth_options(fn):
             click.option("--name", help="Explicit id instead of a derived slug."),
             click.option(
                 "--auth",
-                type=click.Choice(AUTH_KINDS),
+                type=click.Choice(BLOBMOUNT_AUTH_KINDS),
                 default=None,
-                help="Credential source. 'aad' lets blobfuse2 use your Azure "
-                "CLI login (nothing to rotate); 'az' mints a SAS and keeps it "
-                "fresh; the rest read one from an external provider.",
+                help="Credential source. 'fic' uses Azure Workload Identity, "
+                "'aad' uses your Azure CLI login, 'az' mints a rotating SAS; "
+                "the rest read a SAS from an external provider.",
             ),
             click.option("--sas-env", help="[--auth env] environment variable name."),
             click.option(
@@ -1203,7 +1263,7 @@ def cmd_status(ident):
             + (f" ({mount.sas_spec})" if mount.sas_spec else "")
             + (
                 f" · expires in {_sas_label(mount)}"
-                if mount.auth != "aad"
+                if mount.auth not in {"aad", "fic"}
                 else " · nothing to rotate"
             ),
         ),

@@ -29,6 +29,7 @@ from blobmount import (
     Mount,
     MountState,
     MountSupervisor,
+    blobfuse_deb_url,
     build_mount_argv,
     make_mount_id,
     parse_target,
@@ -192,6 +193,40 @@ def stub_sas(tmp_path):
 # --- Config rendering ------------------------------------------------------
 
 
+@pytest.mark.parametrize(
+    ("os_release", "machine", "asset"),
+    [
+        (
+            'ID=ubuntu\nVERSION_ID="22.04"\n',
+            "x86_64",
+            "Ubuntu-22.04.x86_64.deb",
+        ),
+        (
+            'ID=ubuntu\nVERSION_ID="24.04"\n',
+            "aarch64",
+            "Ubuntu-22.04.arm64.deb",
+        ),
+        (
+            'ID=debian\nVERSION_ID="12"\n',
+            "x86_64",
+            "Debian-12.0.x86_64.deb",
+        ),
+    ],
+)
+def test_blobfuse_deb_url_matches_host(monkeypatch, os_release, machine, asset):
+    monkeypatch.setattr(blobmount.platform, "machine", lambda: machine)
+    real_read_text = Path.read_text
+
+    def read_text(path, *args, **kwargs):
+        if str(path) == "/etc/os-release":
+            return os_release
+        return real_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", read_text)
+
+    assert blobfuse_deb_url().endswith(asset)
+
+
 class TestRenderConfig:
     def test_shape_matches_blobfuse2(self, tmp_path):
         import yaml
@@ -222,6 +257,29 @@ class TestRenderConfig:
 
         config = yaml.safe_load(render_config(make_mount(tmp_path), None))
         assert config["azstorage"]["mode"] == "azcli"
+        assert "sas" not in config["azstorage"]
+
+    def test_fic_mode_uses_projected_workload_identity(self, tmp_path, monkeypatch):
+        import yaml
+
+        token = tmp_path / "token"
+        token.write_text("projected-jwt")
+        monkeypatch.setenv("AZURE_CLIENT_ID", "client-id")
+        monkeypatch.setenv("AZURE_TENANT_ID", "tenant-id")
+        monkeypatch.setenv("AZURE_FEDERATED_TOKEN_FILE", str(token))
+
+        config = yaml.safe_load(render_config(make_mount(tmp_path, auth="fic"), None))
+
+        assert config["azstorage"] == {
+            "type": "block",
+            "account-name": "acct",
+            "endpoint": "https://acct.blob.core.windows.net/",
+            "container": "bucket",
+            "mode": "spn",
+            "tenantid": "tenant-id",
+            "clientid": "client-id",
+            "oauth-token-path": str(token),
+        }
         assert "sas" not in config["azstorage"]
 
     def test_read_only_and_allow_other(self, tmp_path):
@@ -828,6 +886,32 @@ class TestCliMount:
         )
         assert result.exit_code == 0, result.output
         assert blobmount.load_mount("mnt").container == "bucket"
+
+    def test_mount_accepts_fic_auth(
+        self, tmp_path, state_dir, fake_blobfuse, runner, monkeypatch
+    ):
+        token = tmp_path / "token"
+        token.write_text("projected-jwt")
+        monkeypatch.setenv("AZURE_CLIENT_ID", "client-id")
+        monkeypatch.setenv("AZURE_TENANT_ID", "tenant-id")
+        monkeypatch.setenv("AZURE_FEDERATED_TOKEN_FILE", str(token))
+
+        result = invoke(
+            runner,
+            [
+                "mount",
+                str(tmp_path / "mnt"),
+                "acct",
+                "bucket",
+                "--auth",
+                "fic",
+                "--no-supervise",
+            ],
+        )
+
+        assert result.exit_code == 0, result.output
+        assert blobmount.load_mount("mnt").auth == "fic"
+        assert fake_blobfuse.calls_for("mount")
 
     def test_refuses_an_existing_mountpoint(
         self, tmp_path, state_dir, fake_blobfuse, runner, env_sas
@@ -1947,6 +2031,14 @@ class TestOutputQuality:
     ):
         blobmount.save_mount(make_mount(tmp_path, id="m", auth="aad"))
         assert "nothing to rotate" in invoke(runner, ["status", "m"]).output
+
+    def test_status_of_a_fic_mount_says_nothing_to_rotate(
+        self, tmp_path, state_dir, fake_blobfuse, runner
+    ):
+        blobmount.save_mount(make_mount(tmp_path, id="m", auth="fic"))
+        output = invoke(runner, ["status", "m"]).output
+        assert "nothing to rotate" in output
+        assert "fic" in output
 
 
 class TestSupervisorLoopAndStart:

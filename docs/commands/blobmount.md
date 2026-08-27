@@ -51,13 +51,15 @@ That makes it usable straight from a health check or a cron guard.
 
 ## Credentials
 
-Same seven sources as [`usm azsync`](azsync.md) — the SAS layer is literally
-the same code (see *Shared module* below).
+Seven sources share the same SAS/AAD layer as [`usm azsync`](azsync.md).
+`fic` is a blobmount-only adapter over the standard Kubernetes Workload
+Identity environment.
 
 | `--auth` | Flag | Source |
 | --- | --- | --- |
 | `az` | `--sas-ttl-hours` | Mint a user-delegation SAS with the Azure CLI (default). |
 | `aad` | — | No SAS: blobfuse2 uses your Azure CLI login. Nothing to rotate. |
+| `fic` | — | No SAS: blobfuse2 uses an Azure Workload Identity projected token. |
 | `inline` | — | A SAS you supply. Cannot be rotated. |
 | `env` | `--sas-env NAME` | An environment variable. |
 | `file` | `--sas-file PATH` | A file, re-read on every refresh. |
@@ -70,6 +72,9 @@ the rendered blobfuse2 config is `0600`, and every log line, table and error
 message is redacted (`sig=***`).
 
 ```bash
+# Kubernetes pod mutated by Azure Workload Identity
+usm blobmount mount /mnt/data acct bucket --auth fic --no-supervise
+
 # Rotated by an external agent
 usm blobmount mount /mnt/data acct bucket --sas-file /run/secrets/blob.sas
 
@@ -98,7 +103,34 @@ usm blobmount rm <id> [--keep-mounted]
 
 `--no-supervise` mounts once and exits, matching the old shell behaviour —
 useful in a container where something else owns the lifecycle. You get a
-reminder that the SAS will then never be refreshed.
+reminder that a SAS will then never be refreshed. FIC and AAD credentials
+self-refresh and do not need SAS rotation.
+
+### FIC / Azure Workload Identity
+
+`--auth fic` requires the standard webhook contract:
+
+```text
+AZURE_CLIENT_ID
+AZURE_TENANT_ID
+AZURE_FEDERATED_TOKEN_FILE
+```
+
+The token file must exist and be readable. blobmount renders:
+
+```yaml
+azstorage:
+  mode: spn
+  tenantid: <AZURE_TENANT_ID>
+  clientid: <AZURE_CLIENT_ID>
+  oauth-token-path: <AZURE_FEDERATED_TOKEN_FILE>
+```
+
+No SAS is generated, cached, logged, or written into the config. A Kubernetes
+workload normally obtains these values by setting `serviceAccountName`, adding
+pod label `azure.workload.identity/use: "true"`, annotating the ServiceAccount
+with `azure.workload.identity/client-id`, and configuring the matching FIC on
+the managed identity.
 
 ## Start at boot
 
@@ -123,7 +155,7 @@ on by default; use `--no-allow-other` to skip that requirement). Debian and
 Ubuntu only — elsewhere install blobfuse2 yourself and point
 `$USM_BLOBFUSE2_BIN` at it.
 
-## Shared module
+## Shared modules
 
 The SAS lifecycle, blob URL handling, service units, locking and redaction
 live in
@@ -132,12 +164,14 @@ shared verbatim with [`usm azsync`](azsync.md). Scripts declare shared modules
 in `_config.json`:
 
 ```json
-"blobmount": { "path": "blobmount.py", "modules": ["usm_azure.py"] }
+"blobmount": {
+  "path": "blobmount.py",
+  "modules": ["usm_azure.py", "usm_fic.py"]
+}
 ```
 
-The module is fetched into the same cache directory and imported normally.
-Its bytes are folded into the script's manifest hash, so editing it bumps
-every command that imports it and cached installs actually pick the change up.
+`usm_fic.py` owns only projected-token validation. Module bytes are folded
+into the command hash, so cached installs update atomically.
 
 ## Flags worth knowing
 
@@ -156,6 +190,8 @@ every command that imports it and cached installs actually pick the change up.
 
 - `blobfuse2` — `usm blobmount install`, or `$USM_BLOBFUSE2_BIN`.
 - `az` CLI logged in, for `--auth az` (default) and `--auth aad`.
+- Azure Workload Identity webhook variables and projected token for
+  `--auth fic`.
 - A writable parent for the mount directory (it is created if missing).
 
 ## Companion commands
@@ -168,7 +204,8 @@ through FUSE. [`usm azsync`](azsync.md) does the same continuously.
 
 [`scripts/blobmount.py`](https://github.com/HSPK/usm/blob/main/scripts/blobmount.py)
 plus the shared
-[`scripts/usm_azure.py`](https://github.com/HSPK/usm/blob/main/scripts/usm_azure.py).
+[`scripts/usm_azure.py`](https://github.com/HSPK/usm/blob/main/scripts/usm_azure.py)
+and [`scripts/usm_fic.py`](https://github.com/HSPK/usm/blob/main/scripts/usm_fic.py).
 
 Test suite at
 [`tests/test_blobmount.py`](https://github.com/HSPK/usm/blob/main/tests/test_blobmount.py)
