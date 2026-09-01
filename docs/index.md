@@ -59,6 +59,7 @@ you want from the [Commands](commands/index.md) section.
 | [`usm net`](commands/net.md) | Inspect, diagnose, and monitor host networking |
 | [`usm port`](commands/port.md) | Show what's on a port; kill the holder |
 | [`usm session`](commands/session.md) | Inspect and manage logged-in user sessions |
+| [`usm convo`](commands/convo.md) | Pack and restore Copilot / Codex / Claude Code sessions |
 | [`usm disk`](commands/disk.md) | Inspect, partition, format, and mount disks |
 | [`usm space`](commands/space.md) | Find what's eating the disk and reclaim it safely |
 | [`usm dl`](commands/dl.md) | Resumable, checksum-verified downloads with mirrors |

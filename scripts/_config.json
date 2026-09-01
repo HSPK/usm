@@ -74,6 +74,17 @@
       "version": "1.0.1",
       "hash": "sha256:deb5590297297b6fcfebb8c1175d283bc852aa9412643bb5492fe40ce73cdf02"
     },
+    "convo": {
+      "description": "Pack and restore Copilot / Codex / Claude Code sessions.",
+      "path": "convo.py",
+      "requirements": [
+        "click>=8.2.1",
+        "rich>=13.0",
+        "usmo>=0.12.0"
+      ],
+      "version": "1.0.0",
+      "hash": "sha256:019c928a3b537fd48f41d15ac8a0207707ea4170d2588857edbf2adc61509c8e"
+    },
     "cp": {
       "description": "Copy files, with Azure blob support.",
       "path": "cp.py",

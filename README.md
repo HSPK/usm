@@ -9,7 +9,7 @@
 
 **One CLI for the boxes you SSH into.**
 
-33 tools for what you actually do on a remote machine — open a tunnel, find a
+34 tools for what you actually do on a remote machine — open a tunnel, find a
 free GPU, mount a blob container, serve a directory, kill whatever is holding
 port 8080 — behind a single command that installs in one line.
 
@@ -85,6 +85,7 @@ usm <command> --help     # help for one command
 | [`blobmount`](https://hspk.github.io/usm/commands/blobmount/) | Mount blob containers, keeping the SAS fresh |
 | [`dl`](https://hspk.github.io/usm/commands/dl/) | Resumable, checksum-verified downloads with mirrors |
 | [`space`](https://hspk.github.io/usm/commands/space/) | Find what's eating the disk and reclaim it safely |
+| [`convo`](https://hspk.github.io/usm/commands/convo/) | Pack and restore Copilot / Codex / Claude Code sessions |
 | [`clip`](https://hspk.github.io/usm/commands/clip/) | Clipboard from stdin; OSC52 fallback over SSH |
 
 **Machine & hardware**

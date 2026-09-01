@@ -70,6 +70,7 @@ nav:
       - svc — Run anything as a service: commands/svc.md
       - watch — Re-run on file change: commands/watch.md
       - host — SSH inventory and fan-out: commands/host.md
+      - convo — Pack/restore agent sessions: commands/convo.md
       - session — Login sessions: commands/session.md
       - net — Network inspect/diagnose: commands/net.md
       - tunnel — SSH tunnels: commands/tunnel.md
