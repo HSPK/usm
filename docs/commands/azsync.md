@@ -144,6 +144,70 @@ agent running `usm azsync up <id>` with `Restart=always`. On Linux, run
 locally, on every transfer. Without it nothing is ever deleted at the
 destination.
 
+## Gated checkpoint publication
+
+A training checkpoint is not an ordinary directory. Uploading it while the
+trainer is still writing produces a remote checkpoint that looks usable but
+isn't; uploading `.complete` in the same azcopy job is not sufficient because
+azcopy does not promise that the marker arrives last.
+
+Gate checkpoint publication behind a local marker:
+
+```bash
+usm azsync add ./output https://acct.blob.core.windows.net/runs/job-1 \
+  --publish-path checkpoints \
+  --publish-pattern 'checkpoint-*' \
+  --publish-unit directory \
+  --ready-marker .complete \
+  --publish-stable 120 \
+  --after-publish keep
+```
+
+The checkpoint namespace is excluded from ordinary `azcopy sync`; logs,
+metrics and everything outside it continue through the retain lane. A
+checkpoint is eligible only when:
+
+1. `.complete` exists and is newer than every payload file;
+2. its file list, sizes, mtimes and inode identities remain unchanged for
+   `--publish-stable`;
+3. it is older than `--publish-min-age`;
+4. it is not among the latest `--publish-keep-last` checkpoints.
+
+Publication is ordered:
+
+```text
+payload (excluding .complete)
+  → verify count + bytes (or MD5)
+  → .azsync-manifest.json
+  → .complete, as a separate final upload
+```
+
+Remote consumers should only use checkpoints with `.complete`. An existing
+remote marker is a conflict by default; `--publish-conflict replace`
+explicitly removes it before republishing, so an old marker never advertises
+new payload as complete.
+
+To offload old checkpoints after publishing:
+
+```bash
+usm azsync add ./output <url> \
+  --publish-path checkpoints \
+  --publish-pattern 'checkpoint-*' \
+  --publish-unit directory \
+  --ready-marker .complete \
+  --publish-keep-last 2 \
+  --after-publish delete
+```
+
+Deletion is still not direct. The unchanged local unit is atomically renamed
+under `.azsync-moved/<transaction>/`, the transaction is persisted, then the
+quarantine is removed. A crash at any point resumes from the ledger without
+re-publishing the marker or deleting a changed checkpoint.
+
+`--publish-*` and `--delete` are incompatible: after offload removes the
+source, destination mirroring would remove the archived blob on the next
+sync.
+
 ## Limits
 
 - A large file still being written can be uploaded truncated; the next
@@ -172,6 +236,13 @@ destination.
 | `--delete` | off | Mirror mode; deletes remote extras. |
 | `--compare-hash` | off | MD5 instead of last-modified time. |
 | `--cap-mbps` | — | Throttle the transfer. |
+| `--publish-path` / `--publish-pattern` | — | Select gated checkpoint units. |
+| `--publish-unit` | `directory` | Publish/delete one directory or one file. |
+| `--ready-marker` | `.complete` | Completion gate, always uploaded last. |
+| `--publish-stable` | `120` | Required unchanged period in seconds. |
+| `--publish-keep-last` | `2` | Keep the newest checkpoints local. |
+| `--after-publish` | `keep` | Keep or delete the local checkpoint. |
+| `--publish-verify` | `size` | `azcopy`, `size`, or `md5`. |
 
 ## Prerequisites
 

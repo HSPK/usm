@@ -4,8 +4,9 @@
       "description": "Watch a directory and keep it synced to Azure Blob.",
       "path": "azsync.py",
       "modules": [
+        "usm_azure.py",
         "usm_daemon.py",
-        "usm_azure.py"
+        "usm_publish.py"
       ],
       "requirements": [
         "click>=8.2.1",
@@ -15,8 +16,8 @@
         "usmo>=0.12.0",
         "watchdog>=4.0.0"
       ],
-      "version": "1.0.7",
-      "hash": "sha256:4bd559f7fac678e6d9f6fc6f601aa0c6ced2856be862a508bf255f1781b85991"
+      "version": "1.0.8",
+      "hash": "sha256:d98196a88aa8325670c914d32d2aa3cb566d43211c1424bb6568db5706d5cc65"
     },
     "bench": {
       "description": "Benchmark CPU / memory / disk / network / GPU.",

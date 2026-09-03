@@ -39,14 +39,17 @@ import os
 import shlex
 import subprocess
 import sys
+import tempfile
 import threading
 import time
+import urllib.parse
 from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
-from typing import Iterable
+from typing import Callable, Iterable
 
 import click
 from rich.console import Console
+from usmo import ui
 
 from usm_daemon import (
     DEFAULT_MAX_INDEX_FILES,
@@ -58,6 +61,16 @@ from usm_daemon import (
     _StartedWatcher,
 )
 from usm_daemon import build_watcher as _build_watcher
+from usm_publish import (
+    PublishError,
+    PublishLedger,
+    PublishPolicy,
+    TreeSnapshot,
+    clean_quarantine,
+    discover as discover_publish_candidates,
+    quarantine,
+    snapshot_unchanged,
+)
 
 from usm_azure import (
     AUTH_KINDS,
@@ -165,8 +178,57 @@ class SyncJob:
     put_md5: bool = False
     extra_args: list[str] = field(default_factory=list)
 
+    # gated checkpoint publication
+    publish_paths: list[str] = field(default_factory=list)
+    publish_patterns: list[str] = field(default_factory=list)
+    publish_excludes: list[str] = field(default_factory=list)
+    publish_unit: str = "directory"
+    ready_marker: str = ".complete"
+    publish_stable: float = 120.0
+    publish_min_age: float = 0.0
+    publish_keep_last: int = 2
+    publish_order: str = "mtime"
+    after_publish: str = "keep"
+    publish_verify: str = "size"
+    publish_conflict: str = "fail"
+
     def exclude_spec(self) -> ExcludeSpec:
         return ExcludeSpec.build(self.excludes, defaults=self.default_excludes)
+
+    def publish_policy(self) -> PublishPolicy:
+        return PublishPolicy(
+            paths=tuple(self.publish_paths),
+            patterns=tuple(self.publish_patterns),
+            excludes=tuple(self.publish_excludes),
+            unit=self.publish_unit,
+            ready_marker=self.ready_marker,
+            stable=self.publish_stable,
+            min_age=self.publish_min_age,
+            keep_last=self.publish_keep_last,
+            order=self.publish_order,
+            after_publish=self.after_publish,
+            verify=self.publish_verify,
+            conflict=self.publish_conflict,
+        )
+
+    def retain_exclude_spec(self) -> ExcludeSpec:
+        """Ordinary sync must never publish an incomplete checkpoint."""
+        extra = list(self.excludes)
+        policy = self.publish_policy()
+        if policy.enabled:
+            if policy.paths:
+                extra.extend(path.rstrip("/") + "/" for path in policy.paths)
+            else:
+                extra.extend(policy.patterns)
+            extra.append(".azsync-moved/")
+        return ExcludeSpec.build(extra, defaults=self.default_excludes)
+
+    def watch_exclude_spec(self) -> ExcludeSpec:
+        """Watch checkpoint writes, but never our own quarantine cleanup."""
+        extra = list(self.excludes)
+        if self.publish_policy().enabled:
+            extra.append(".azsync-moved/")
+        return ExcludeSpec.build(extra, defaults=self.default_excludes)
 
     def source_path(self) -> Path:
         return Path(self.source)
@@ -208,6 +270,11 @@ class RuntimeState:
 
     sas_expires_at: float | None = None
     next_deadline: float | None = None
+    publish_pending: int = 0
+    publish_ready: int = 0
+    publish_last_path: str | None = None
+    publish_last_at: float | None = None
+    publish_last_error: str | None = None
 
 
 # Store ---------------------------------------------------------------------
@@ -270,6 +337,10 @@ def lock_path(job_id: str) -> Path:
 
 def azcopy_dir(job_id: str) -> Path:
     return STATE_DIR / job_id / "azcopy"
+
+
+def publish_ledger_path(job_id: str) -> Path:
+    return STATE_DIR / job_id / "publish-ledger.json"
 
 
 def _from_dict(cls, raw: dict):
@@ -482,6 +553,275 @@ class ChangeAccumulator:
             self._stat.merge(stat)
         if stat.files:
             self.updated.set()
+
+
+# Gated checkpoint publication ---------------------------------------------
+
+
+@dataclass
+class PublishRun:
+    discovered: int = 0
+    ready: int = 0
+    published: int = 0
+    deleted: int = 0
+    bytes: int = 0
+    error: str | None = None
+
+
+class PublishCoordinator:
+    """Publish payload → verify → manifest → marker, then optionally delete.
+
+    A checkpoint marker is a remote visibility barrier, not merely permission
+    to remove the local copy.  Ordinary sync excludes the publish namespace;
+    this coordinator is the only code allowed to upload it, and uploads the
+    marker last.
+    """
+
+    def __init__(
+        self,
+        job: SyncJob,
+        engine: "AzcopyEngine",
+        *,
+        ledger_path: Path | None = None,
+        clock: Callable[[], float] = time.time,
+        log: Callable[[str], None] | None = None,
+    ) -> None:
+        self.job = job
+        self.engine = engine
+        self.policy = job.publish_policy()
+        self.ledger_path = ledger_path or publish_ledger_path(job.id)
+        self.clock = clock
+        self.log = log or (lambda _message: None)
+        self.ledger = PublishLedger.load(self.ledger_path)
+        self.next_wake: float | None = None
+
+    def _save(self) -> None:
+        self.ledger.save(self.ledger_path)
+
+    def scan(self) -> list:
+        now = self.clock()
+        candidates = discover_publish_candidates(
+            self.job.source_path(), self.policy, self.ledger, now
+        )
+        deadlines = []
+        for candidate in candidates:
+            if candidate.ready or candidate.reason == "waiting for marker":
+                continue
+            tx = self.ledger.transactions[candidate.snapshot.relpath]
+            mtime = candidate.snapshot.mtime_ns / 1_000_000_000
+            deadlines.append(
+                max(
+                    tx.observed_at + self.policy.stable,
+                    mtime + self.policy.stable,
+                    mtime + self.policy.min_age,
+                )
+            )
+        self.next_wake = min(deadlines) if deadlines else None
+        self._save()
+        return candidates
+
+    def _transition(
+        self, snapshot: TreeSnapshot, state: str, *, error: str | None = None
+    ) -> None:
+        self.ledger.transition(snapshot.relpath, state, self.clock(), error=error)
+        self._save()
+
+    def _payload_verified(self, snapshot: TreeSnapshot, result: SyncResult) -> bool:
+        if result.status != OK or result.failed:
+            return False
+        if self.policy.verify == "azcopy":
+            return True
+        # overwrite=true makes every payload file a completed transfer.  The
+        # job summary is Azure's acknowledgement of both count and bytes.
+        if result.completed < snapshot.file_count:
+            return False
+        if result.bytes < snapshot.bytes:
+            return False
+        return True
+
+    def _run_exact(
+        self, source: Path, remote_relpath: str, token: SasToken
+    ) -> SyncResult:
+        argv = self.engine.build_exact_copy_argv(
+            source, remote_relpath, token.token or None
+        )
+        return self.engine.run(argv)
+
+    def publish_one(self, candidate, token: SasToken) -> PublishRun:
+        snapshot = candidate.snapshot
+        tx = self.ledger.transactions[snapshot.relpath]
+        result = PublishRun(discovered=1, ready=1)
+        if snapshot.unit == "directory":
+            remote_marker = f"{snapshot.relpath}/{self.policy.ready_marker}"
+        else:
+            remote_marker = snapshot.relpath + self.policy.ready_marker
+        exists = getattr(self.engine, "remote_exists", None)
+        if exists is not None:
+            try:
+                marker_exists = exists(remote_marker, token.token or None)
+            except PublishError as exc:
+                self._transition(snapshot, "failed", error=str(exc))
+                result.error = str(exc)
+                return result
+            if marker_exists:
+                if self.policy.conflict == "fail":
+                    message = (
+                        f"remote checkpoint already has {self.policy.ready_marker}; "
+                        "use --publish-conflict replace to republish it"
+                    )
+                    self._transition(snapshot, "conflict", error=message)
+                    result.error = message
+                    return result
+                removed = self.engine.remove_remote(remote_marker, token.token or None)
+                if not removed.ok:
+                    message = removed.error or "cannot remove old ready marker"
+                    self._transition(snapshot, "failed", error=message)
+                    result.error = message
+                    return result
+        self.log(
+            f"publish start {snapshot.relpath} "
+            f"({snapshot.file_count} files, {human_bytes(snapshot.bytes)})"
+        )
+
+        self._transition(snapshot, "uploading_payload")
+        upload = self.engine.run(
+            self.engine.build_publish_argv(
+                snapshot, token.token or None, marker=self.policy.ready_marker
+            )
+        )
+        if not self._payload_verified(snapshot, upload):
+            message = upload.error or (
+                f"payload verification failed: {upload.completed}/"
+                f"{snapshot.file_count} files, {upload.bytes}/{snapshot.bytes} bytes"
+            )
+            self._transition(snapshot, "failed", error=message)
+            result.error = message
+            return result
+
+        self._transition(snapshot, "verifying_payload")
+        if not snapshot_unchanged(self.job.source_path(), snapshot, self.policy):
+            message = "checkpoint changed while its payload was uploading"
+            self._transition(snapshot, "failed", error=message)
+            result.error = message
+            return result
+
+        self._transition(snapshot, "publishing_manifest")
+        with tempfile.TemporaryDirectory(prefix="usm-azsync-publish-") as tmp:
+            manifest = Path(tmp) / ".azsync-manifest.json"
+            manifest.write_text(json.dumps(snapshot.manifest(tx.transaction), indent=2))
+            remote_manifest = f"{snapshot.relpath}/.azsync-manifest.json"
+            manifest_result = self._run_exact(manifest, remote_manifest, token)
+            if not manifest_result.ok:
+                message = manifest_result.error or "manifest upload failed"
+                self._transition(snapshot, "failed", error=message)
+                result.error = message
+                return result
+
+        if not snapshot_unchanged(self.job.source_path(), snapshot, self.policy):
+            message = "checkpoint changed before its marker was published"
+            self._transition(snapshot, "failed", error=message)
+            result.error = message
+            return result
+
+        marker = candidate.marker
+        if marker is None:
+            message = "ready marker disappeared before publication"
+            self._transition(snapshot, "failed", error=message)
+            result.error = message
+            return result
+        self._transition(snapshot, "publishing_marker")
+        marker_result = self._run_exact(marker, remote_marker, token)
+        if not marker_result.ok:
+            message = marker_result.error or "ready marker upload failed"
+            self._transition(snapshot, "failed", error=message)
+            result.error = message
+            return result
+
+        self._transition(snapshot, "published")
+        result.published = 1
+        result.bytes = snapshot.bytes
+        self.log(f"published {snapshot.relpath} (marker last)")
+
+        if self.policy.after_publish == "delete":
+            if not snapshot_unchanged(self.job.source_path(), snapshot, self.policy):
+                message = "checkpoint changed after publication; kept locally"
+                self._transition(snapshot, "failed", error=message)
+                result.error = message
+                return result
+            try:
+                quarantine(
+                    self.job.source_path(),
+                    snapshot,
+                    tx.transaction,
+                    ready_marker=self.policy.ready_marker,
+                )
+                quarantine_root = (
+                    self.job.source_path() / ".azsync-moved" / tx.transaction
+                )
+                self.ledger.transition(
+                    snapshot.relpath,
+                    "quarantined",
+                    self.clock(),
+                    quarantined_path=str(quarantine_root),
+                )
+                self._save()
+                clean_quarantine(quarantine_root)
+                self._transition(snapshot, "deleted")
+                result.deleted = 1
+                self.log(
+                    f"moved {snapshot.relpath}; reclaimed {human_bytes(snapshot.bytes)}"
+                )
+            except PublishError as exc:
+                self._transition(snapshot, "failed", error=str(exc))
+                result.error = str(exc)
+        return result
+
+    def run(self, token: SasToken) -> PublishRun:
+        if not self.policy.enabled:
+            return PublishRun()
+        # A crash after the atomic rename leaves a safe, already-published
+        # checkpoint in quarantine.  Finishing that deletion is idempotent.
+        for tx in list(self.ledger.transactions.values()):
+            if tx.state != "quarantined" or not tx.quarantined_path:
+                continue
+            try:
+                clean_quarantine(Path(tx.quarantined_path))
+                self.ledger.transition(tx.path, "deleted", self.clock())
+            except PublishError as exc:
+                tx.error = str(exc)
+        # A process can die after the atomic rename but before persisting the
+        # quarantined state.  The transaction id was persisted at discovery,
+        # so a matching directory is safe to finish; unknown directories are
+        # deliberately left for a human.
+        quarantine_root = self.job.source_path() / ".azsync-moved"
+        for tx in list(self.ledger.transactions.values()):
+            orphan = quarantine_root / tx.transaction
+            if not orphan.exists() or tx.state not in ("published", "deleted"):
+                continue
+            try:
+                clean_quarantine(orphan)
+                self.ledger.transition(tx.path, "deleted", self.clock())
+            except PublishError as exc:
+                tx.error = str(exc)
+        self._save()
+        try:
+            candidates = self.scan()
+        except PublishError as exc:
+            return PublishRun(error=str(exc))
+        total = PublishRun(
+            discovered=len(candidates),
+            ready=sum(1 for item in candidates if item.ready),
+        )
+        for candidate in candidates:
+            if not candidate.ready:
+                continue
+            one = self.publish_one(candidate, token)
+            total.published += one.published
+            total.deleted += one.deleted
+            total.bytes += one.bytes
+            if one.error:
+                total.error = one.error
+        return total
 
 
 # Trigger policy ------------------------------------------------------------
@@ -874,7 +1214,7 @@ class AzcopyEngine:
             argv.append("--put-md5")
         elif job.put_md5:
             argv.append("--put-md5")
-        argv += job.exclude_spec().to_azcopy_flags()
+        argv += job.retain_exclude_spec().to_azcopy_flags()
         if job.cap_mbps:
             argv += ["--cap-mbps", str(job.cap_mbps)]
         if job.block_size_mb:
@@ -884,11 +1224,123 @@ class AzcopyEngine:
         argv += list(job.extra_args)
         return argv
 
+    def _remote_url(self, remote_relpath: str, sas: str | None) -> str:
+        base = split_sas(self.job.dest)[0].rstrip("/")
+        quoted = "/".join(
+            urllib.parse.quote(part, safe="") for part in Path(remote_relpath).parts
+        )
+        return join_sas(f"{base}/{quoted}", sas)
+
+    def remote_exists(self, remote_relpath: str, sas: str | None) -> bool:
+        """Probe one blob without depending on SAS-only HTTP access."""
+        argv = [
+            self.binary,
+            "list",
+            self._remote_url(remote_relpath, sas),
+            "--machine-readable",
+            "--output-type=json",
+            "--log-level=ERROR",
+        ]
+        proc = subprocess.run(
+            argv,
+            capture_output=True,
+            text=True,
+            env=self.env(),
+        )
+        text = "\n".join((proc.stdout, proc.stderr)).strip()
+        if proc.returncode == 0:
+            return bool(text)
+        lowered = text.lower()
+        if any(
+            marker in lowered
+            for marker in (
+                "blobnotfound",
+                "not found",
+                "does not exist",
+                "statuscode=404",
+                "status code: 404",
+            )
+        ):
+            return False
+        raise PublishError(
+            f"cannot check remote marker {remote_relpath}: "
+            f"{redact(text)[-500:] or f'azcopy exited {proc.returncode}'}"
+        )
+
+    def remove_remote(self, remote_relpath: str, sas: str | None) -> SyncResult:
+        return self.run(
+            [
+                self.binary,
+                "remove",
+                self._remote_url(remote_relpath, sas),
+                "--output-type=json",
+                "--log-level=ERROR",
+            ]
+        )
+
     def build_resume_argv(self, job_id: str, sas: str | None) -> list[str]:
         argv = [self.binary, "jobs", "resume", job_id, "--output-type=json"]
         if sas:
             argv += ["--destination-sas", sas]
         return argv
+
+    def build_publish_argv(
+        self,
+        snapshot: TreeSnapshot,
+        sas: str | None,
+        *,
+        marker: str,
+        dry_run: bool = False,
+    ) -> list[str]:
+        """Upload one checkpoint payload, deliberately excluding its marker."""
+        source = str(Path(self.job.source))
+        dest = join_sas(split_sas(self.job.dest)[0], sas)
+        argv = [
+            self.binary,
+            "copy",
+            source,
+            dest,
+            "--recursive",
+            "--overwrite=true",
+            "--output-type=json",
+            "--log-level=ERROR",
+            "--include-path",
+            snapshot.relpath,
+        ]
+        marker_name = (
+            marker
+            if snapshot.unit == "directory"
+            else Path(snapshot.relpath).name + marker
+        )
+        argv += ["--exclude-pattern", marker_name]
+        if self.job.publish_verify == "md5":
+            argv.append("--put-md5")
+        if self.job.cap_mbps:
+            argv += ["--cap-mbps", str(self.job.cap_mbps)]
+        if self.job.block_size_mb:
+            argv += ["--block-size-mb", str(self.job.block_size_mb)]
+        if dry_run:
+            argv.append("--dry-run")
+        return argv
+
+    def build_exact_copy_argv(
+        self, source: Path, remote_relpath: str, sas: str | None
+    ) -> list[str]:
+        """Upload exactly one file; used for manifest then marker."""
+        base = split_sas(self.job.dest)[0].rstrip("/")
+        quoted = "/".join(
+            urllib.parse.quote(part, safe="") for part in Path(remote_relpath).parts
+        )
+        dest = join_sas(f"{base}/{quoted}", sas)
+        return [
+            self.binary,
+            "copy",
+            str(source),
+            dest,
+            "--overwrite=true",
+            "--output-type=json",
+            "--log-level=ERROR",
+        ]
 
     # -- execution ---------------------------------------------------------
 
@@ -995,7 +1447,7 @@ def build_watcher(job: SyncJob, acc: ChangeAccumulator, *, warn=None) -> Watcher
     try:
         return _build_watcher(
             job.source_path(),
-            job.exclude_spec(),
+            job.watch_exclude_spec(),
             acc,
             mode=job.watch_mode or "auto",
             poll_interval=job.poll_interval,
@@ -1017,6 +1469,7 @@ class Supervisor:
         sas: SasManager | None = None,
         watcher: Watcher | None = None,
         acc: ChangeAccumulator | None = None,
+        publisher: PublishCoordinator | None = None,
         clock=time.time,
         log=None,
     ) -> None:
@@ -1027,8 +1480,11 @@ class Supervisor:
         self.sas = sas if sas is not None else job_sas_manager(job)
         self.watcher = watcher
         self.clock = clock
-        self.state = RuntimeState()
         self._log = log or self._default_log
+        self.state = RuntimeState()
+        self.publisher = publisher or PublishCoordinator(
+            job, self.engine, clock=clock, log=self.log
+        )
         self._stop = threading.Event()
         self._forced = False
         self._child: subprocess.Popen | None = None
@@ -1129,6 +1585,26 @@ class Supervisor:
                 result = SyncResult(status=AUTH_INVALID, error=str(exc))
             else:
                 result = self._retry_after_refresh(fresh, result)
+                token = fresh
+
+        if result.status == OK and self.job.publish_policy().enabled:
+            published = self.publisher.run(token)
+            self.state.publish_pending = published.discovered
+            self.state.publish_ready = published.ready
+            self.state.publish_last_error = published.error
+            if published.published:
+                self.state.publish_last_at = self.clock()
+                ledger = self.publisher.ledger.transactions
+                completed = [
+                    tx.path
+                    for tx in ledger.values()
+                    if tx.state in ("published", "deleted")
+                ]
+                self.state.publish_last_path = completed[-1] if completed else None
+            if published.error:
+                result.status = PARTIAL
+                result.error = published.error
+                self.log(f"publish incomplete: {published.error}")
 
         self._running = False
         return self._finish(result, batch, reason)
@@ -1232,6 +1708,20 @@ class Supervisor:
         decision = decide(
             self.clock(), self.acc.snapshot(), self._policy_input(), self.cfg
         )
+        publish_wake = self.publisher.next_wake
+        if (
+            publish_wake is not None
+            and publish_wake <= self.clock()
+            and not self._running
+            and not (
+                self.state.backoff_until and self.state.backoff_until > self.clock()
+            )
+        ):
+            decision = Decision(SYNC, "checkpoint ready", self.clock())
+        elif publish_wake is not None and (
+            decision.wake_at is None or publish_wake < decision.wake_at
+        ):
+            decision = Decision(decision.action, decision.reason, publish_wake)
         self.state.next_deadline = decision.wake_at
         if decision.should_sync:
             self._forced = False
@@ -1267,7 +1757,7 @@ class Supervisor:
             self.log(f"watcher failed to start ({exc}); polling instead")
             self.watcher = PollingWatcher(
                 source,
-                job.exclude_spec(),
+                job.watch_exclude_spec(),
                 self.acc,
                 interval=job.poll_interval,
                 max_index_files=job.max_index_files,
@@ -1586,6 +2076,80 @@ def _sync_options(fn):
             ),
             click.option("--cap-mbps", type=float, help="Throttle the transfer rate."),
             click.option("--block-size-mb", type=float, help="azcopy block size."),
+            click.option(
+                "--publish-path",
+                "publish_paths",
+                multiple=True,
+                help="Gate this relative directory behind a ready marker (repeatable).",
+            ),
+            click.option(
+                "--publish-pattern",
+                "publish_patterns",
+                multiple=True,
+                help="Checkpoint name glob inside --publish-path (repeatable).",
+            ),
+            click.option(
+                "--publish-exclude",
+                "publish_excludes",
+                multiple=True,
+                help="Exclude payload files (file unit only).",
+            ),
+            click.option(
+                "--publish-unit",
+                type=click.Choice(["file", "directory"]),
+                default="directory",
+                show_default=True,
+            ),
+            click.option(
+                "--ready-marker",
+                default=".complete",
+                show_default=True,
+                help="Local completion marker, uploaded last.",
+            ),
+            click.option(
+                "--publish-stable",
+                type=click.FloatRange(min=0),
+                default=120.0,
+                show_default=True,
+                help="Seconds the checkpoint must remain unchanged.",
+            ),
+            click.option(
+                "--publish-min-age",
+                type=click.FloatRange(min=0),
+                default=0.0,
+                show_default=True,
+            ),
+            click.option(
+                "--publish-keep-last",
+                type=click.IntRange(min=0),
+                default=2,
+                show_default=True,
+                help="Newest checkpoints that must remain local.",
+            ),
+            click.option(
+                "--publish-order",
+                type=click.Choice(["mtime", "natural"]),
+                default="mtime",
+                show_default=True,
+            ),
+            click.option(
+                "--after-publish",
+                type=click.Choice(["keep", "delete"]),
+                default="keep",
+                show_default=True,
+            ),
+            click.option(
+                "--publish-verify",
+                type=click.Choice(["azcopy", "size", "md5"]),
+                default="size",
+                show_default=True,
+            ),
+            click.option(
+                "--publish-conflict",
+                type=click.Choice(["fail", "replace"]),
+                default="fail",
+                show_default=True,
+            ),
         ]
     ):
         fn = decorator(fn)
@@ -1647,7 +2211,31 @@ def _job_from_options(source: Path, dest: str, opts: dict) -> SyncJob:
         compare_hash=opts["compare_hash"],
         cap_mbps=opts.get("cap_mbps"),
         block_size_mb=opts.get("block_size_mb"),
+        publish_paths=list(opts.get("publish_paths") or []),
+        publish_patterns=list(opts.get("publish_patterns") or []),
+        publish_excludes=list(opts.get("publish_excludes") or []),
+        publish_unit=opts["publish_unit"],
+        ready_marker=opts["ready_marker"],
+        publish_stable=opts["publish_stable"],
+        publish_min_age=opts["publish_min_age"],
+        publish_keep_last=opts["publish_keep_last"],
+        publish_order=opts["publish_order"],
+        after_publish=opts["after_publish"],
+        publish_verify=opts["publish_verify"],
+        publish_conflict=opts["publish_conflict"],
     )
+
+
+def validate_job(job: SyncJob) -> None:
+    try:
+        job.publish_policy().validate(job.source_path())
+    except PublishError as exc:
+        raise click.ClickException(str(exc)) from exc
+    if job.publish_policy().enabled and job.delete_destination:
+        raise click.ClickException(
+            "--publish-* and --delete cannot be combined: checkpoints that "
+            "intentionally disappear locally would be deleted remotely next sync."
+        )
 
 
 @click.group(
@@ -1667,6 +2255,7 @@ def cmd_add(source, dest, no_start, **opts):
     src = Path(source).resolve()
     resolved = resolve_destination(dest)
     job = _job_from_options(src, resolved, opts)
+    validate_job(job)
     job.id = make_job_id(src, resolved, opts.get("name"))
     if _def_path(job.id).exists():
         raise click.ClickException(f"{job.id} already exists; pick --name.")
@@ -1858,10 +2447,37 @@ def cmd_status(job_id, history):
         ("delete destination", "yes" if job.delete_destination else "no"),
         ("boot", SERVICE.enabled_kind(job.id) or "-"),
     ]
+    policy = job.publish_policy()
+    if policy.enabled:
+        selector = ui.joined(
+            ",".join(policy.paths) or "source root",
+            ",".join(policy.patterns) or "*",
+        )
+        rows += [
+            SECTION,
+            ("publish", selector),
+            ("ready marker", policy.ready_marker),
+            ("unit / action", f"{policy.unit} / {policy.after_publish}"),
+            (
+                "stability",
+                f"{human_duration(policy.stable)} · keep latest {policy.keep_last}",
+            ),
+            ("verification", policy.verify),
+            (
+                "publish queue",
+                f"{state.publish_ready} ready / {state.publish_pending} discovered",
+            ),
+            ("last published", state.publish_last_path or "-"),
+        ]
     console.print(kv_table(rows))
 
     if state.last_error:
         console.print(f"\n[red]last error[/red]  {redact(state.last_error)[:600]}")
+    if state.publish_last_error:
+        console.print(
+            f"\n[yellow]publish error[/yellow]  "
+            f"{redact(state.publish_last_error)[:600]}"
+        )
 
     records = read_history(job.id, history)
     if records:
@@ -1933,6 +2549,7 @@ def _run_once(job: SyncJob, *, reason: str) -> None:
 def cmd_once(source, dest, **opts):
     src = Path(source).resolve()
     job = _job_from_options(src, resolve_destination(dest), opts)
+    validate_job(job)
     job.id = "once-" + slugify(src.name or "root")
     _run_once(job, reason="once")
 
@@ -2091,6 +2708,34 @@ def cmd_dry_run(job_id):
         console.print(f"[green]✓[/green] {result.summary()}")
     else:
         raise click.ClickException(redact(result.error or result.status))
+    policy = job.publish_policy()
+    if policy.enabled:
+        ledger = PublishLedger.load(publish_ledger_path(job.id))
+        candidates = discover_publish_candidates(
+            job.source_path(), policy, ledger, time.time()
+        )
+        console.print("\n[bold]Checkpoint publication[/bold]")
+        if not candidates:
+            console.print("[dim]No checkpoint units discovered.[/dim]")
+        for candidate in candidates:
+            colour = "green" if candidate.ready else "dim"
+            action = (
+                f"publish, then {policy.after_publish}"
+                if candidate.ready
+                else candidate.reason
+            )
+            console.print(
+                f"[{colour}]{candidate.snapshot.relpath}[/{colour}]"
+                f"  {human_bytes(candidate.snapshot.bytes)} · {action}"
+            )
+            if candidate.ready:
+                publish_argv = engine.build_publish_argv(
+                    candidate.snapshot,
+                    token.token or None,
+                    marker=policy.ready_marker,
+                    dry_run=True,
+                )
+                console.print(f"[dim]{redact(shlex.join(publish_argv))}[/dim]")
 
 
 @cli.command("up", short_help="Run the supervisor in the foreground.")
