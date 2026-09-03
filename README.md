@@ -9,7 +9,7 @@
 
 **One CLI for the boxes you SSH into.**
 
-33 tools for what you actually do on a remote machine — open a tunnel, find a
+34 tools for what you actually do on a remote machine — open a tunnel, find a
 free GPU, mount a blob container, serve a directory, kill whatever is holding
 port 8080 — behind a single command that installs in one line.
 
@@ -81,6 +81,7 @@ usm <command> --help     # help for one command
 | [`serve`](https://hspk.github.io/usm/commands/serve/) | Full file server via miniserve (uploads, range, zip, auth) |
 | [`rsync`](https://hspk.github.io/usm/commands/rsync/) | rsync with sensible defaults + auto-excludes |
 | [`cp`](https://hspk.github.io/usm/commands/cp/) | Copy across local and blobfuse paths, delegating to azcopy |
+| [`azrole`](https://hspk.github.io/usm/commands/azrole/) | Assign AML workspace and storage roles to an Entra user |
 | [`azsync`](https://hspk.github.io/usm/commands/azsync/) | Watch a directory and keep it mirrored to Azure Blob |
 | [`blobmount`](https://hspk.github.io/usm/commands/blobmount/) | Mount blob containers, keeping the SAS fresh |
 | [`dl`](https://hspk.github.io/usm/commands/dl/) | Resumable, checksum-verified downloads with mirrors |
@@ -169,7 +170,8 @@ contribute a script.
 ## Notes
 
 - Some scripts target Ubuntu; `init`, `clip`, and `tunnel` are cross-platform.
-- `blobmount`, `azsync`, and `cp` expect Azure CLI / `azcopy` / `blobfuse2`.
+- `azrole`, `blobmount`, `azsync`, and `cp` expect Azure CLI / `azcopy` /
+  `blobfuse2` as described in their command documentation.
 
 ## License
 

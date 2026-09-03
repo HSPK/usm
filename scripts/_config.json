@@ -1,5 +1,11 @@
 {
   "scripts": {
+    "azrole": {
+      "description": "Assign AML workspace and storage roles to an Entra user.",
+      "path": "azrole.sh",
+      "version": "1.0.0",
+      "hash": "sha256:d4706c876fe51f84bd5f9b46417c06e274a9b75880974d02c43f71a63735a092"
+    },
     "azsync": {
       "description": "Watch a directory and keep it synced to Azure Blob.",
       "path": "azsync.py",

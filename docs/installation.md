@@ -88,6 +88,8 @@ most common are:
 
 - `ssh` (for [`tunnel`](commands/tunnel.md))
 - `bash` (every shell script runs under bash)
-- `azcopy`, `blobfuse2`, `az` CLI (for [`blobmount`](commands/blobmount.md) /
+- `az` CLI (for [`azrole`](commands/azrole.md), and some authentication modes
+  in [`blobmount`](commands/blobmount.md) / [`cp`](commands/cp.md))
+- `azcopy`, `blobfuse2` (for [`blobmount`](commands/blobmount.md) /
   [`cp`](commands/cp.md))
 - `launchctl` on macOS or `systemctl --user` on Linux (only for `usm tunnel enable`)

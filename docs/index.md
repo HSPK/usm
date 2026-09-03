@@ -74,6 +74,7 @@ you want from the [Commands](commands/index.md) section.
 | [`usm init`](commands/init.md) | Bootstrap a fresh Ubuntu machine |
 | [`usm blobmount`](commands/blobmount.md) | Mount an Azure blob container, keeping the SAS fresh |
 | [`usm cp`](commands/cp.md) | Copy across local + blobfuse mountpoints, delegating to azcopy |
+| [`usm azrole`](commands/azrole.md) | Assign AML workspace and storage roles to an Entra user |
 | [`usm azsync`](commands/azsync.md) | Watch a directory and keep it mirrored to Azure Blob |
 | [`usm cu122`](commands/cu122.md) | Install NVIDIA driver 535 + CUDA 12.2 on Ubuntu |
 | [`usm inject-alias`](commands/inject-alias.md) | Manage a marker-fenced alias block in your shell rc |
