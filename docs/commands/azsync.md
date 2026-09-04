@@ -42,6 +42,49 @@ And two suppressors:
 | rate limit | `--min-gap 30` | Never start within 30s of the last transfer finishing. |
 | backoff | — | After a failure: 30s, 60s, 120s … capped at 15m, reset on success. |
 
+### Training-complete signal
+
+`sync` wakes the daemon immediately but does not weaken checkpoint safety.
+For a trainer that has just written `.complete`, use `flush`:
+
+```bash
+touch output/checkpoints/checkpoint-1000/.complete
+usm azsync flush training-output \
+  --checkpoint checkpoints/checkpoint-1000 \
+  --wait \
+  --timeout 1800
+```
+
+The request is persisted before the daemon is signalled. On POSIX, `SIGUSR1`
+provides the low-latency wakeup; the JSON event on disk carries the meaning,
+so a coalesced signal, Windows, or a supervisor crash cannot lose it. Claimed
+events return to the pending queue after a crash.
+
+An explicit flush accelerates `--publish-stable`, but does not bypass the
+gate. It takes a snapshot, waits `--settle` (1 second), and takes another:
+
+```text
+.complete exists and is newest
+  → snapshot A
+  → settle
+  → snapshot B
+  → A.identity == B.identity
+  → publish payload / manifest / marker
+```
+
+`--publish-min-age`, `--publish-keep-last`, selectors and remote verification
+still apply. A write, inode replacement or marker change during the settle
+returns exit code 2 and leaves the checkpoint local. `--wait` returns only
+after retain sync and gated publication finish.
+
+| Exit | Meaning |
+| ---: | --- |
+| `0` | Sync and publication completed |
+| `2` | Selected checkpoint is not ready |
+| `3` | Partial transfer |
+| `4` | Authentication/network/publish failure |
+| `5` | Timed out waiting; the durable request may still complete |
+
 A transfer already running never queues a second one; changes that arrive
 while it runs simply belong to the next batch. If a transfer fails, its batch
 is merged back so nothing is silently dropped.
@@ -123,7 +166,9 @@ where you can.
 usm azsync add ./data https://acct...   # define + start watching
 usm azsync ls                           # status, pending changes, SAS clock
 usm azsync status data-bucket           # detail + recent transfer history
-usm azsync sync data-bucket             # transfer now
+usm azsync sync data-bucket             # enqueue an immediate reconcile
+usm azsync sync data-bucket --wait      # and wait for its result
+usm azsync flush data-bucket --wait     # training done: short safe settle
 usm azsync dry-run data-bucket          # what would move, transfers nothing
 usm azsync logs data-bucket -f          # follow (--azcopy for azcopy's log)
 usm azsync stop|start|restart data-bucket

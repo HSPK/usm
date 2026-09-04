@@ -60,6 +60,7 @@ from usm_daemon import (
     WatcherUnavailable,
     _StartedWatcher,
 )
+from usm_signal import SignalError, SignalEvent, SignalQueue
 from usm_daemon import build_watcher as _build_watcher
 from usm_publish import (
     PublishError,
@@ -68,6 +69,7 @@ from usm_publish import (
     TreeSnapshot,
     clean_quarantine,
     discover as discover_publish_candidates,
+    flush_candidates,
     quarantine,
     snapshot_unchanged,
 )
@@ -275,6 +277,10 @@ class RuntimeState:
     publish_last_path: str | None = None
     publish_last_at: float | None = None
     publish_last_error: str | None = None
+    signal_pending: int = 0
+    signal_last_kind: str | None = None
+    signal_last_at: float | None = None
+    signal_last_result: str | None = None
 
 
 # Store ---------------------------------------------------------------------
@@ -341,6 +347,10 @@ def azcopy_dir(job_id: str) -> Path:
 
 def publish_ledger_path(job_id: str) -> Path:
     return STATE_DIR / job_id / "publish-ledger.json"
+
+
+def signal_queue(job_id: str) -> SignalQueue:
+    return SignalQueue(STATE_DIR / job_id / "signals")
 
 
 def _from_dict(cls, raw: dict):
@@ -566,6 +576,7 @@ class PublishRun:
     deleted: int = 0
     bytes: int = 0
     error: str | None = None
+    waiting: list[dict] = field(default_factory=list)
 
 
 class PublishCoordinator:
@@ -776,7 +787,14 @@ class PublishCoordinator:
                 result.error = str(exc)
         return result
 
-    def run(self, token: SasToken) -> PublishRun:
+    def run(
+        self,
+        token: SasToken,
+        *,
+        flush_checkpoint: str | None = None,
+        flush_settle: float | None = None,
+        sleep=time.sleep,
+    ) -> PublishRun:
         if not self.policy.enabled:
             return PublishRun()
         # A crash after the atomic rename leaves a safe, already-published
@@ -805,12 +823,29 @@ class PublishCoordinator:
                 tx.error = str(exc)
         self._save()
         try:
-            candidates = self.scan()
+            if flush_settle is None:
+                candidates = self.scan()
+            else:
+                candidates = flush_candidates(
+                    self.job.source_path(),
+                    self.policy,
+                    self.ledger,
+                    checkpoint=flush_checkpoint,
+                    settle=flush_settle,
+                    clock=self.clock,
+                    sleep=sleep,
+                )
+                self._save()
         except PublishError as exc:
             return PublishRun(error=str(exc))
         total = PublishRun(
             discovered=len(candidates),
             ready=sum(1 for item in candidates if item.ready),
+            waiting=[
+                {"path": item.snapshot.relpath, "reason": item.reason}
+                for item in candidates
+                if not item.ready
+            ],
         )
         for candidate in candidates:
             if not candidate.ready:
@@ -1470,6 +1505,7 @@ class Supervisor:
         watcher: Watcher | None = None,
         acc: ChangeAccumulator | None = None,
         publisher: PublishCoordinator | None = None,
+        signals: SignalQueue | None = None,
         clock=time.time,
         log=None,
     ) -> None:
@@ -1485,6 +1521,9 @@ class Supervisor:
         self.publisher = publisher or PublishCoordinator(
             job, self.engine, clock=clock, log=self.log
         )
+        self.signals = signals or signal_queue(job.id)
+        self._active_signal: SignalEvent | None = None
+        self._last_publish = PublishRun()
         self._stop = threading.Event()
         self._forced = False
         self._child: subprocess.Popen | None = None
@@ -1506,6 +1545,7 @@ class Supervisor:
         self.state.pending_since = pending.first_at
         token = self.sas.current() if self.sas.enabled else None
         self.state.sas_expires_at = token.expires_at if token else None
+        self.state.signal_pending = self.signals.pending_count()
         save_state(self.job.id, self.state)
 
     def request_stop(self) -> None:
@@ -1530,12 +1570,75 @@ class Supervisor:
             path.unlink(missing_ok=True)
             self._forced = True
 
+    def _claim_signal(self) -> SignalEvent | None:
+        if self._active_signal is not None:
+            return self._active_signal
+        try:
+            event = self.signals.claim()
+        except SignalError as exc:
+            self.log(f"discarded corrupt signal: {exc}")
+            return None
+        if event is None:
+            return None
+        if event.kind not in ("sync", "flush"):
+            self.signals.complete(
+                event,
+                "invalid",
+                {"error": f"unknown signal kind: {event.kind}"},
+            )
+            self.state.signal_last_kind = event.kind
+            self.state.signal_last_at = self.clock()
+            self.state.signal_last_result = "invalid"
+            return None
+        self._active_signal = event
+        self._forced = True
+        self.log(f"signal {event.kind} {event.id} received")
+        return event
+
+    def _complete_signal(self, event: SignalEvent, result: SyncResult) -> None:
+        published = self._last_publish
+        status = result.status
+        if (
+            event.kind == "flush"
+            and result.status == OK
+            and published.waiting
+            and not published.published
+        ):
+            status = "waiting"
+        detail = {
+            "sync": {
+                "status": result.status,
+                "completed": result.completed,
+                "bytes": result.bytes,
+                "error": result.error,
+            },
+            "publish": {
+                "discovered": published.discovered,
+                "ready": published.ready,
+                "published": published.published,
+                "deleted": published.deleted,
+                "bytes": published.bytes,
+                "waiting": published.waiting,
+                "error": published.error,
+            },
+        }
+        try:
+            self.signals.complete(event, status, detail)
+        except SignalError as exc:
+            self.log(f"cannot persist result for signal {event.id}: {exc}")
+        self.state.signal_last_kind = event.kind
+        self.state.signal_last_at = self.clock()
+        self.state.signal_last_result = status
+        self._active_signal = None
+
     # -- one transfer ------------------------------------------------------
 
     def _needed_lifetime(self) -> float:
         return self.sas.needed_lifetime(self.state.last_duration)
 
-    def run_sync(self, reason: str) -> SyncResult:
+    def run_sync(
+        self, reason: str, signal_event: SignalEvent | None = None
+    ) -> SyncResult:
         """Run one transfer end to end, including SAS refresh and recovery."""
         now = self.clock()
         batch = self.acc.take()
@@ -1587,8 +1690,16 @@ class Supervisor:
                 result = self._retry_after_refresh(fresh, result)
                 token = fresh
 
+        self._last_publish = PublishRun()
         if result.status == OK and self.job.publish_policy().enabled:
-            published = self.publisher.run(token)
+            flush = signal_event is not None and signal_event.kind == "flush"
+            payload = signal_event.payload if flush else {}
+            published = self.publisher.run(
+                token,
+                flush_checkpoint=payload.get("checkpoint") if flush else None,
+                flush_settle=float(payload.get("settle", 1.0)) if flush else None,
+            )
+            self._last_publish = published
             self.state.publish_pending = published.discovered
             self.state.publish_ready = published.ready
             self.state.publish_last_error = published.error
@@ -1705,6 +1816,7 @@ class Supervisor:
     def tick(self) -> Decision:
         """Evaluate once. Split out from run() so tests can drive it."""
         self._consume_trigger_file()
+        self._claim_signal()
         decision = decide(
             self.clock(), self.acc.snapshot(), self._policy_input(), self.cfg
         )
@@ -1725,7 +1837,10 @@ class Supervisor:
         self.state.next_deadline = decision.wake_at
         if decision.should_sync:
             self._forced = False
-            self.run_sync(decision.reason)
+            event = self._active_signal
+            result = self.run_sync(decision.reason, event)
+            if event is not None:
+                self._complete_signal(event, result)
         return decision
 
     def run(self) -> int:
@@ -1750,6 +1865,9 @@ class Supervisor:
             f"watching {source} → {redact(split_sas(job.dest)[0])} "
             f"[{self.watcher.backend}, auth={job.auth}]"
         )
+        recovered = self.signals.recover()
+        if recovered:
+            self.log(f"recovered {recovered} signal(s) from a previous crash")
 
         try:
             self.watcher.start()
@@ -1856,11 +1974,15 @@ def stop_daemon(job_id: str, *, timeout: float = 20.0) -> bool:
 
 
 def poke_daemon(job_id: str) -> bool:
-    """Ask a running supervisor to sync now (signal + trigger file)."""
+    """Backward-compatible immediate sync request."""
+    _event, acknowledged = submit_daemon_signal(job_id, "sync")
+    return acknowledged
+
+
+def wake_daemon(job_id: str) -> bool:
+    """Wake the supervisor. The queued file carries the actual meaning."""
     import signal
 
-    trigger_path(job_id).parent.mkdir(parents=True, exist_ok=True)
-    trigger_path(job_id).write_text(str(time.time()))
     state = load_state(job_id)
     pid = state.supervisor_pid
     if pid_alive(pid) and hasattr(signal, "SIGUSR1"):
@@ -1870,6 +1992,13 @@ def poke_daemon(job_id: str) -> bool:
         except OSError:
             return False
     return pid_alive(pid)
+
+
+def submit_daemon_signal(
+    job_id: str, kind: str, payload: dict | None = None
+) -> tuple[SignalEvent, bool]:
+    event = signal_queue(job_id).submit(kind, payload)
+    return event, wake_daemon(job_id)
 
 
 def run_supervisor(job_id: str) -> int:
@@ -2469,6 +2598,18 @@ def cmd_status(job_id, history):
             ),
             ("last published", state.publish_last_path or "-"),
         ]
+    rows += [
+        SECTION,
+        ("pending signals", str(state.signal_pending)),
+        (
+            "last signal",
+            (
+                f"{state.signal_last_kind} · {state.signal_last_result}"
+                if state.signal_last_kind
+                else "-"
+            ),
+        ),
+    ]
     console.print(kv_table(rows))
 
     if state.last_error:
@@ -2506,33 +2647,145 @@ def cmd_status(job_id, history):
 
 @cli.command("sync", short_help="Transfer now, skipping the debounce.")
 @click.argument("job_id")
-@click.option("--wait", is_flag=True, help="Run in the foreground and wait for it.")
-def cmd_sync(job_id, wait):
+@click.option("--wait", is_flag=True, help="Wait for the daemon's result.")
+@click.option(
+    "--timeout",
+    type=click.FloatRange(min=0),
+    default=1800.0,
+    show_default=True,
+    help="How long --wait may wait.",
+)
+def cmd_sync(job_id, wait, timeout):
     job = _require_job(job_id)
-    if is_running(job.id) and not wait:
-        if poke_daemon(job.id):
-            console.print(f"[green]✓[/green] Asked {job.id} to sync now.")
-        else:
-            console.print(f"[yellow]![/yellow] {job.id} did not acknowledge.")
-        return
     if is_running(job.id):
-        raise click.ClickException(
-            f"{job.id} is running; use `usm azsync sync {job.id}` without --wait."
-        )
+        event, acknowledged = submit_daemon_signal(job.id, "sync")
+        if acknowledged:
+            console.print(
+                f"[green]✓[/green] Asked {job.id} to sync now [dim]({event.id})[/dim]."
+            )
+        else:
+            console.print(
+                f"[yellow]![/yellow] {job.id} did not acknowledge; "
+                "the request remains queued."
+            )
+        if wait:
+            _wait_for_signal(job, event, timeout)
+        return
     _run_once(job, reason="manual")
 
 
-def _run_once(job: SyncJob, *, reason: str) -> None:
+@cli.command("flush", short_help="Sync now and safely publish ready checkpoints.")
+@click.argument("job_id")
+@click.option(
+    "--checkpoint",
+    help="Only this source-relative checkpoint path.",
+)
+@click.option(
+    "--settle",
+    type=click.FloatRange(min=0),
+    default=1.0,
+    show_default=True,
+    help="Seconds between the two explicit-completion snapshots.",
+)
+@click.option("--wait", is_flag=True, help="Wait for sync/publication to finish.")
+@click.option(
+    "--timeout",
+    type=click.FloatRange(min=0),
+    default=1800.0,
+    show_default=True,
+    help="How long --wait may wait.",
+)
+def cmd_flush(job_id, checkpoint, settle, wait, timeout):
+    """Training-complete signal: marker + double snapshot, then publish."""
+    job = _require_job(job_id)
+    if not job.publish_policy().enabled:
+        raise click.ClickException(
+            f"{job.id} has no --publish-path/--publish-pattern policy."
+        )
+    payload = {"checkpoint": checkpoint, "settle": settle}
+    if is_running(job.id):
+        event, acknowledged = submit_daemon_signal(job.id, "flush", payload)
+        if acknowledged:
+            console.print(
+                f"[green]✓[/green] Asked {job.id} to flush now [dim]({event.id})[/dim]."
+            )
+        else:
+            console.print(
+                f"[yellow]![/yellow] {job.id} did not acknowledge; "
+                "the flush remains queued."
+            )
+        if wait:
+            _wait_for_signal(job, event, timeout)
+        return
+    event = SignalEvent.create("flush", payload)
+    _run_once(job, reason="flush", signal_event=event)
+
+
+def _wait_for_signal(job: SyncJob, event: SignalEvent, timeout: float) -> None:
+    result = signal_queue(job.id).wait(event.id, timeout)
+    if result is None:
+        console.print(
+            f"[red]✗[/red] Timed out waiting for {event.kind} {event.id}; "
+            "the request remains queued or running."
+        )
+        raise SystemExit(5)
+    detail = result.detail
+    publish = detail.get("publish") or {}
+    if result.status == OK:
+        console.print(
+            f"[green]✓[/green] {event.kind} complete"
+            + (
+                f" · {publish.get('published', 0)} checkpoint(s) published"
+                if event.kind == "flush"
+                else ""
+            )
+        )
+        return
+    if result.status == "waiting":
+        waiting = publish.get("waiting") or []
+        reason = waiting[0].get("reason") if waiting else "not ready"
+        console.print(f"[yellow]![/yellow] checkpoint not published: {reason}")
+        raise SystemExit(2)
+    if result.status == PARTIAL:
+        console.print(
+            f"[yellow]![/yellow] {event.kind} partial: "
+            f"{publish.get('error') or 'some transfers failed'}"
+        )
+        raise SystemExit(3)
+    console.print(
+        f"[red]✗[/red] {event.kind} failed: "
+        f"{publish.get('error') or (detail.get('sync') or {}).get('error') or result.status}"
+    )
+    raise SystemExit(4)
+
+
+def _run_once(
+    job: SyncJob,
+    *,
+    reason: str,
+    signal_event: SignalEvent | None = None,
+) -> None:
     lock = FileLock(lock_path(job.id))
     if not lock.acquire():
         raise click.ClickException(f"{job.id} is busy (another sync holds the lock).")
     try:
         supervisor = Supervisor(job, log=lambda m: console.print(f"[dim]{m}[/dim]"))
-        result = supervisor.run_sync(reason)
+        result = supervisor.run_sync(reason, signal_event)
     finally:
         lock.release()
     if result.ok:
         console.print(f"[green]✓[/green] {result.summary()}")
+        if signal_event is not None and signal_event.kind == "flush":
+            publish = supervisor._last_publish
+            if publish.waiting and not publish.published:
+                console.print(
+                    f"[yellow]![/yellow] checkpoint not published: "
+                    f"{publish.waiting[0]['reason']}"
+                )
+                raise SystemExit(2)
+            console.print(
+                f"[green]✓[/green] {publish.published} checkpoint(s) published"
+            )
         return
     if result.status == PARTIAL:
         console.print(f"[yellow]![/yellow] {result.summary()}")

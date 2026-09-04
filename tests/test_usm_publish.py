@@ -23,6 +23,7 @@ from usm_publish import (
     PublishPolicy,
     clean_quarantine,
     discover,
+    flush_candidates,
     quarantine,
     snapshot_unchanged,
     snapshot_unit,
@@ -365,6 +366,140 @@ class TestReadiness:
         discover(source, policy, ledger, time.time() + 20)
         tx = ledger.transactions[items[0].snapshot.relpath]
         assert tx.transaction != old and tx.state != "published"
+
+
+class TestExplicitFlush:
+    def test_bypasses_long_stability_after_two_equal_snapshots(self, source, policy):
+        checkpoint(source)
+        policy = replace(policy, stable=3600)
+        ledger = PublishLedger()
+        items = flush_candidates(source, policy, ledger, settle=0, sleep=lambda _: None)
+        assert items[0].ready
+
+    def test_still_requires_marker(self, source, policy):
+        checkpoint(source, marker=False)
+        items = flush_candidates(
+            source, policy, PublishLedger(), settle=0, sleep=lambda _: None
+        )
+        assert not items[0].ready and "marker" in items[0].reason
+
+    def test_still_requires_marker_newer_than_payload(self, source, policy):
+        root = checkpoint(source)
+        now = time.time()
+        os.utime(root / ".complete", (now - 100, now - 100))
+        os.utime(root / "model.bin", (now, now))
+        items = flush_candidates(
+            source, policy, PublishLedger(), settle=0, sleep=lambda _: None
+        )
+        assert not items[0].ready and "after marker" in items[0].reason
+
+    def test_still_honours_min_age(self, source, policy):
+        checkpoint(source, age=1)
+        policy = replace(policy, min_age=60)
+        items = flush_candidates(
+            source, policy, PublishLedger(), settle=0, sleep=lambda _: None
+        )
+        assert not items[0].ready and "min-age" in items[0].reason
+
+    def test_still_honours_keep_last(self, source, policy):
+        checkpoint(source)
+        policy = replace(policy, keep_last=1)
+        items = flush_candidates(
+            source, policy, PublishLedger(), settle=0, sleep=lambda _: None
+        )
+        assert not items[0].ready and "kept" in items[0].reason
+
+    def test_change_during_settle_is_not_ready(self, source, policy):
+        root = checkpoint(source)
+
+        def change(_seconds):
+            (root / "model.bin").write_bytes(b"changed")
+            (root / ".complete").touch()
+
+        items = flush_candidates(
+            source, policy, PublishLedger(), settle=1, sleep=change
+        )
+        assert not items[0].ready and "changed during" in items[0].reason
+
+    def test_inode_replacement_during_settle_is_not_ready(self, source, policy):
+        root = checkpoint(source)
+        path = root / "model.bin"
+
+        def replace_inode(_seconds):
+            before = path.stat()
+            replacement = root / "replacement"
+            replacement.write_bytes(path.read_bytes())
+            replacement.replace(path)
+            os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
+
+        items = flush_candidates(
+            source, policy, PublishLedger(), settle=1, sleep=replace_inode
+        )
+        assert not items[0].ready and "changed during" in items[0].reason
+
+    def test_marker_change_during_settle_is_not_ready(self, source, policy):
+        root = checkpoint(source)
+
+        def touch_marker(_seconds):
+            time.sleep(0.002)
+            (root / ".complete").touch()
+
+        items = flush_candidates(
+            source, policy, PublishLedger(), settle=1, sleep=touch_marker
+        )
+        assert not items[0].ready and "marker changed" in items[0].reason
+
+    def test_checkpoint_appearing_during_settle_is_not_ready(self, source, policy):
+        def create(_seconds):
+            checkpoint(source)
+
+        items = flush_candidates(
+            source, policy, PublishLedger(), settle=1, sleep=create
+        )
+        assert not items[0].ready and "appeared during" in items[0].reason
+
+    def test_exact_checkpoint_only(self, source, policy):
+        checkpoint(source, "checkpoint-1")
+        checkpoint(source, "checkpoint-2")
+        items = flush_candidates(
+            source,
+            policy,
+            PublishLedger(),
+            checkpoint="checkpoints/checkpoint-2",
+            settle=0,
+            sleep=lambda _: None,
+        )
+        assert [item.snapshot.relpath for item in items] == ["checkpoints/checkpoint-2"]
+
+    def test_exact_checkpoint_must_match_policy(self, source, policy):
+        checkpoint(source, "checkpoint-1")
+        with pytest.raises(PublishError, match="not selected"):
+            flush_candidates(
+                source,
+                policy,
+                PublishLedger(),
+                checkpoint="checkpoints/nope",
+                settle=0,
+                sleep=lambda _: None,
+            )
+
+    @pytest.mark.parametrize("path", ["/tmp/x", "../x", ".", ""])
+    def test_unsafe_exact_checkpoint(self, source, policy, path):
+        with pytest.raises(PublishError, match="below the source"):
+            flush_candidates(
+                source,
+                policy,
+                PublishLedger(),
+                checkpoint=path,
+                settle=0,
+                sleep=lambda _: None,
+            )
+
+    def test_negative_settle_is_refused(self, source, policy):
+        with pytest.raises(PublishError, match="negative"):
+            flush_candidates(
+                source, policy, PublishLedger(), settle=-1, sleep=lambda _: None
+            )
 
 
 class TestKeepLast:

@@ -6,7 +6,8 @@
       "modules": [
         "usm_azure.py",
         "usm_daemon.py",
-        "usm_publish.py"
+        "usm_publish.py",
+        "usm_signal.py"
       ],
       "requirements": [
         "click>=8.2.1",
@@ -16,8 +17,8 @@
         "usmo>=0.12.0",
         "watchdog>=4.0.0"
       ],
-      "version": "1.0.8",
-      "hash": "sha256:d98196a88aa8325670c914d32d2aa3cb566d43211c1424bb6568db5706d5cc65"
+      "version": "1.0.9",
+      "hash": "sha256:e3143d64fb2c6586b3b3f653462c40856602e22bcef4cc6077b4786b10a04757"
     },
     "bench": {
       "description": "Benchmark CPU / memory / disk / network / GPU.",

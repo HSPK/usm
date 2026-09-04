@@ -21,7 +21,7 @@ import re
 import shutil
 import stat
 import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Iterable
 
@@ -457,6 +457,62 @@ def discover(
                 item.ready = False
                 item.reason = f"kept locally (latest {policy.keep_last})"
     return found
+
+
+def flush_candidates(
+    source: Path,
+    policy: PublishPolicy,
+    ledger: PublishLedger,
+    *,
+    checkpoint: str | None = None,
+    settle: float = 1.0,
+    clock=time.time,
+    sleep=time.sleep,
+) -> list[Candidate]:
+    """Explicit completion signal: two equal snapshots across a short settle.
+
+    This only accelerates the stability window.  Marker ordering, min-age,
+    selectors and keep-last remain exactly the same.
+    """
+    if settle < 0:
+        raise PublishError("flush settle cannot be negative")
+    wanted = None
+    if checkpoint is not None:
+        path = Path(checkpoint)
+        if path.is_absolute() or ".." in path.parts or checkpoint in ("", "."):
+            raise PublishError(
+                f"flush checkpoint must stay below the source: {checkpoint!r}"
+            )
+        wanted = path.as_posix().strip("/")
+
+    accelerated = replace(policy, stable=0)
+    first = discover(source, accelerated, ledger, clock())
+    if wanted is not None:
+        first = [item for item in first if item.snapshot.relpath == wanted]
+        if not first:
+            raise PublishError(
+                f"checkpoint is not selected by the publish policy: {wanted}"
+            )
+    first_by_path = {item.snapshot.relpath: item for item in first}
+    sleep(settle)
+    second = discover(source, accelerated, ledger, clock())
+    if wanted is not None:
+        second = [item for item in second if item.snapshot.relpath == wanted]
+
+    out: list[Candidate] = []
+    for item in second:
+        previous = first_by_path.get(item.snapshot.relpath)
+        if previous is None:
+            item.ready = False
+            item.reason = "appeared during flush settle"
+        elif previous.snapshot.identity != item.snapshot.identity:
+            item.ready = False
+            item.reason = "changed during flush settle"
+        elif previous.snapshot.marker_mtime_ns != item.snapshot.marker_mtime_ns:
+            item.ready = False
+            item.reason = "marker changed during flush settle"
+        out.append(item)
+    return out
 
 
 def snapshot_unchanged(
