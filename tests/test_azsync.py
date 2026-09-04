@@ -3200,12 +3200,53 @@ class TestPublishCoordinator:
         result = self.coordinator(job, engine, state_dir).run(self.TOKEN)
         assert result.discovered == 0 and engine.calls == []
 
-    def test_keep_last_prevents_upload(self, tmp_path, state_dir):
-        job = publish_job(tmp_path, publish_keep_last=1)
-        make_checkpoint(job)
+    def test_keep_last_publishes_but_retains_local(self, tmp_path, state_dir):
+        job = publish_job(tmp_path, publish_keep_last=1, after_publish="delete")
+        root = make_checkpoint(job)
         engine = FakePublishEngine(job)
         result = self.coordinator(job, engine, state_dir).run(self.TOKEN)
-        assert result.ready == 0 and engine.calls == []
+        assert result.ready == 1 and result.published == 1
+        assert result.retained == 1 and result.deleted == 0
+        assert root.exists()
+        assert [call[0] for call in engine.calls] == [
+            "probe",
+            "payload",
+            "exact",
+            "exact",
+        ]
+
+    def test_only_old_checkpoints_are_deleted(self, tmp_path, state_dir):
+        job = publish_job(tmp_path, publish_keep_last=2, after_publish="delete")
+        roots = [
+            make_checkpoint(job, f"checkpoint-{number}") for number in (100, 200, 300)
+        ]
+        now = time.time()
+        for index, root in enumerate(roots):
+            stamp = now - 100 + index
+            for path in root.rglob("*"):
+                if path.is_file():
+                    os.utime(path, (stamp, stamp))
+            os.utime(root / ".complete", (stamp + 0.5, stamp + 0.5))
+        result = self.coordinator(job, FakePublishEngine(job), state_dir).run(
+            self.TOKEN
+        )
+        assert result.published == 3
+        assert result.deleted == 1 and result.retained == 2
+        assert not roots[0].exists()
+        assert roots[1].exists() and roots[2].exists()
+
+    def test_flush_can_publish_the_newest_checkpoint(self, tmp_path, state_dir):
+        job = publish_job(tmp_path, publish_keep_last=1, after_publish="delete")
+        root = make_checkpoint(job)
+        coordinator = self.coordinator(job, FakePublishEngine(job), state_dir)
+        result = coordinator.run(
+            self.TOKEN,
+            flush_checkpoint="checkpoints/checkpoint-100",
+            flush_settle=0,
+            sleep=lambda _: None,
+        )
+        assert result.published == 1 and result.retained == 1
+        assert root.exists()
 
     def test_quarantine_crash_is_finished_on_next_run(self, tmp_path, state_dir):
         job = publish_job(tmp_path, after_publish="delete")
@@ -3799,11 +3840,12 @@ class TestSignalCli:
                 event_id,
                 OK,
                 time.time(),
-                {"publish": {"published": 1}},
+                {"publish": {"published": 1, "retained": 1, "deleted": 0}},
             ),
         )
         result = invoke(runner, ["flush", "training", "--wait"])
         assert result.exit_code == 0 and "1 checkpoint" in result.output
+        assert "1 retained locally" in result.output
 
     @pytest.mark.parametrize(
         "status,expected",

@@ -163,6 +163,7 @@ class Candidate:
     ready: bool
     reason: str
     order_key: tuple
+    keep_local: bool = False
 
 
 @dataclass
@@ -451,11 +452,9 @@ def discover(
             found.append(Candidate(snapshot, marker, ready, reason, key))
     ledger.prune_missing(present)
     found.sort(key=lambda item: item.order_key)
-    if policy.keep_last:
+    if policy.after_publish == "delete" and policy.keep_last:
         for item in found[-policy.keep_last :]:
-            if item.ready:
-                item.ready = False
-                item.reason = f"kept locally (latest {policy.keep_last})"
+            item.keep_local = True
     return found
 
 

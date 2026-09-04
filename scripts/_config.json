@@ -18,8 +18,8 @@
         "usmo>=0.12.0",
         "watchdog>=4.0.0"
       ],
-      "version": "1.0.10",
-      "hash": "sha256:e2a3aa7f492ec3cc14c92844015095e9487928edd918abaaa5a5a362cdfe9378"
+      "version": "1.0.11",
+      "hash": "sha256:af46542bcf436ef38e15a89aa27378040955f3a8623b49add2b0545137a67590"
     },
     "bench": {
       "description": "Benchmark CPU / memory / disk / network / GPU.",

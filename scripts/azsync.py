@@ -575,6 +575,7 @@ class PublishRun:
     ready: int = 0
     published: int = 0
     deleted: int = 0
+    retained: int = 0
     bytes: int = 0
     error: str | None = None
     waiting: list[dict] = field(default_factory=list)
@@ -754,7 +755,12 @@ class PublishCoordinator:
         result.bytes = snapshot.bytes
         self.log(f"published {snapshot.relpath} (marker last)")
 
-        if self.policy.after_publish == "delete":
+        if self.policy.after_publish == "delete" and candidate.keep_local:
+            result.retained = 1
+            self.log(
+                f"retained {snapshot.relpath} locally (latest {self.policy.keep_last})"
+            )
+        elif self.policy.after_publish == "delete":
             if not snapshot_unchanged(self.job.source_path(), snapshot, self.policy):
                 message = "checkpoint changed after publication; kept locally"
                 self._transition(snapshot, "failed", error=message)
@@ -854,6 +860,7 @@ class PublishCoordinator:
             one = self.publish_one(candidate, token)
             total.published += one.published
             total.deleted += one.deleted
+            total.retained += one.retained
             total.bytes += one.bytes
             if one.error:
                 total.error = one.error
@@ -1618,6 +1625,7 @@ class Supervisor:
                 "ready": published.ready,
                 "published": published.published,
                 "deleted": published.deleted,
+                "retained": published.retained,
                 "bytes": published.bytes,
                 "waiting": published.waiting,
                 "error": published.error,
@@ -2745,13 +2753,18 @@ def _wait_for_signal(job: SyncJob, event: SignalEvent, timeout: float) -> None:
     detail = result.detail
     publish = detail.get("publish") or {}
     if result.status == OK:
+        publish_bits = []
+        if event.kind == "flush":
+            publish_bits.append(
+                f"{publish.get('published', 0)} checkpoint(s) published"
+            )
+            if publish.get("deleted"):
+                publish_bits.append(f"{publish['deleted']} deleted locally")
+            if publish.get("retained"):
+                publish_bits.append(f"{publish['retained']} retained locally")
         console.print(
             f"[green]✓[/green] {event.kind} complete"
-            + (
-                f" · {publish.get('published', 0)} checkpoint(s) published"
-                if event.kind == "flush"
-                else ""
-            )
+            + (f" · {ui.joined(*publish_bits)}" if publish_bits else "")
         )
         return
     if result.status == "waiting":
@@ -2797,7 +2810,16 @@ def _run_once(
                 )
                 raise SystemExit(2)
             console.print(
-                f"[green]✓[/green] {publish.published} checkpoint(s) published"
+                "[green]✓[/green] "
+                + ui.joined(
+                    f"{publish.published} checkpoint(s) published",
+                    (f"{publish.deleted} deleted locally" if publish.deleted else ""),
+                    (
+                        f"{publish.retained} retained locally"
+                        if publish.retained
+                        else ""
+                    ),
+                )
             )
         return
     if result.status == PARTIAL:
@@ -2985,11 +3007,12 @@ def cmd_dry_run(job_id):
             console.print("[dim]No checkpoint units discovered.[/dim]")
         for candidate in candidates:
             colour = "green" if candidate.ready else "dim"
-            action = (
-                f"publish, then {policy.after_publish}"
-                if candidate.ready
-                else candidate.reason
-            )
+            if not candidate.ready:
+                action = candidate.reason
+            elif policy.after_publish == "delete" and candidate.keep_local:
+                action = f"publish, keep local (latest {policy.keep_last})"
+            else:
+                action = f"publish, then {policy.after_publish}"
             console.print(
                 f"[{colour}]{candidate.snapshot.relpath}[/{colour}]"
                 f"  {human_bytes(candidate.snapshot.bytes)} · {action}"

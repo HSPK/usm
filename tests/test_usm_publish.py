@@ -401,13 +401,14 @@ class TestExplicitFlush:
         )
         assert not items[0].ready and "min-age" in items[0].reason
 
-    def test_still_honours_keep_last(self, source, policy):
+    def test_keep_last_does_not_block_flush_publication(self, source, policy):
         checkpoint(source)
-        policy = replace(policy, keep_last=1)
+        policy = replace(policy, keep_last=1, after_publish="delete")
         items = flush_candidates(
             source, policy, PublishLedger(), settle=0, sleep=lambda _: None
         )
-        assert not items[0].ready and "kept" in items[0].reason
+        assert items[0].ready
+        assert items[0].keep_local
 
     def test_change_during_settle_is_not_ready(self, source, policy):
         root = checkpoint(source)
@@ -512,10 +513,12 @@ class TestKeepLast:
 
     def test_latest_two_are_kept(self, source, policy):
         self._many(source, ["checkpoint-1", "checkpoint-2", "checkpoint-3"])
-        policy = replace(policy, stable=0, keep_last=2)
+        policy = replace(policy, stable=0, keep_last=2, after_publish="delete")
         items = discover(source, policy, PublishLedger(), time.time())
-        assert [i.snapshot.relpath for i in items if i.ready] == [
-            "checkpoints/checkpoint-1"
+        assert all(item.ready for item in items)
+        assert [i.snapshot.relpath for i in items if i.keep_local] == [
+            "checkpoints/checkpoint-2",
+            "checkpoints/checkpoint-3",
         ]
 
     def test_zero_keeps_none(self, source, policy):
@@ -525,16 +528,30 @@ class TestKeepLast:
             i.ready for i in discover(source, policy, PublishLedger(), time.time())
         )
 
+    def test_keep_mode_never_marks_retention_exemptions(self, source, policy):
+        self._many(source, ["checkpoint-1", "checkpoint-2"])
+        policy = replace(policy, stable=0, keep_last=2, after_publish="keep")
+        items = discover(source, policy, PublishLedger(), time.time())
+        assert all(item.ready for item in items)
+        assert not any(item.keep_local for item in items)
+
     def test_more_keep_than_candidates_keeps_everything(self, source, policy):
         self._many(source, ["checkpoint-1"])
-        policy = replace(policy, stable=0, keep_last=5)
-        assert not discover(source, policy, PublishLedger(), time.time())[0].ready
+        policy = replace(policy, stable=0, keep_last=5, after_publish="delete")
+        item = discover(source, policy, PublishLedger(), time.time())[0]
+        assert item.ready and item.keep_local
 
     def test_natural_order_understands_numbers(self, source, policy):
         self._many(source, ["checkpoint-2", "checkpoint-10", "checkpoint-100"])
-        policy = replace(policy, stable=0, keep_last=1, order="natural")
+        policy = replace(
+            policy,
+            stable=0,
+            keep_last=1,
+            order="natural",
+            after_publish="delete",
+        )
         items = discover(source, policy, PublishLedger(), time.time())
-        kept = [i for i in items if not i.ready and "kept" in i.reason]
+        kept = [i for i in items if i.keep_local]
         assert kept[0].snapshot.relpath.endswith("checkpoint-100")
 
     def test_natural_order_handles_mixed_names(self, source, policy):

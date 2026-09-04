@@ -72,10 +72,12 @@ gate. It takes a snapshot, waits `--settle` (1 second), and takes another:
   → publish payload / manifest / marker
 ```
 
-`--publish-min-age`, `--publish-keep-last`, selectors and remote verification
-still apply. A write, inode replacement or marker change during the settle
-returns exit code 2 and leaves the checkpoint local. `--wait` returns only
-after retain sync and gated publication finish.
+`--publish-min-age`, selectors and remote verification still apply. A write,
+inode replacement or marker change during the settle returns exit code 2 and
+leaves the checkpoint local. `--publish-keep-last` does **not** delay remote
+publication; it only exempts the newest checkpoints from local deletion after
+they are published. `--wait` returns only after retain sync and gated
+publication finish.
 
 | Exit | Meaning |
 | ---: | --- |
@@ -215,8 +217,7 @@ checkpoint is eligible only when:
 1. `.complete` exists and is newer than every payload file;
 2. its file list, sizes, mtimes and inode identities remain unchanged for
    `--publish-stable`;
-3. it is older than `--publish-min-age`;
-4. it is not among the latest `--publish-keep-last` checkpoints.
+3. it is older than `--publish-min-age`.
 
 Publication is ordered:
 
@@ -252,6 +253,11 @@ re-publishing the marker or deleting a changed checkpoint.
 `--publish-*` and `--delete` are incompatible: after offload removes the
 source, destination mirroring would remove the archived blob on the next
 sync.
+
+`--publish-keep-last 2` means every ready checkpoint is published immediately,
+but the newest two remain on local disk for fast training resume. With
+checkpoints 100/200/300/400/500, all five exist remotely after publication;
+100/200/300 are eligible for local cleanup and 400/500 are retained.
 
 ## Limits
 
