@@ -35,6 +35,7 @@ import click
 from usmo import ui
 
 from usm_blocks import BlockError, ManagedBlock
+from usm_cli import grouped_class
 
 BEGIN_MARKER = "# >>> usm host >>>"
 END_MARKER = "# <<< usm host <<<"
@@ -451,7 +452,15 @@ def run_command(
     }
 
 
-@click.group(context_settings=CONTEXT)
+HOST_SECTIONS = (
+    ("Inventory", ("ls", "add", "rm", "show")),
+    ("Connect", ("connect", "copy-id", "check")),
+    ("Fan-out", ("exec",)),
+)
+HostGroup = grouped_class(HOST_SECTIONS, name="HostGroup")
+
+
+@click.group(cls=HostGroup, context_settings=CONTEXT)
 def cli() -> None:
     """Manage the usm SSH inventory."""
 

@@ -62,6 +62,7 @@ from usm_daemon import (
 )
 from usm_signal import SignalError, SignalEvent, SignalQueue
 from usm_daemon import build_watcher as _build_watcher
+from usm_cli import grouped_class
 from usm_publish import (
     PublishError,
     PublishLedger,
@@ -2367,7 +2368,19 @@ def validate_job(job: SyncJob) -> None:
         )
 
 
+AZSYNC_SECTIONS = (
+    ("Define", ("add", "once", "rm")),
+    ("Inspect", ("ls", "status", "logs", "dry-run", "token")),
+    ("Transfer", ("sync", "flush")),
+    ("Lifecycle", ("start", "stop", "restart")),
+    ("Boot", ("enable", "disable")),
+    ("Internal", ("up",)),
+)
+AzsyncGroup = grouped_class(AZSYNC_SECTIONS, name="AzsyncGroup")
+
+
 @click.group(
+    cls=AzsyncGroup,
     help="Persistent local → Azure Blob sync (a watching, batching azcopy).",
     context_settings={"help_option_names": ["-h", "--help"]},
 )

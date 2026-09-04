@@ -33,6 +33,7 @@ from pathlib import Path
 from typing import Optional
 
 import click
+from usm_cli import grouped_class
 from rich.console import Console
 from rich.table import Table
 
@@ -826,7 +827,18 @@ def _common_opts(f):
     return f
 
 
+TUNNEL_SECTIONS = (
+    ("Define", ("local", "remote", "socks", "rm")),
+    ("Inspect", ("ls", "show", "logs")),
+    ("Lifecycle", ("start", "stop", "restart")),
+    ("Boot", ("enable", "disable")),
+    ("Internal", ("up",)),
+)
+TunnelGroup = grouped_class(TUNNEL_SECTIONS, name="TunnelGroup")
+
+
 @click.group(
+    cls=TunnelGroup,
     help="Easier SSH tunnels — wraps ssh -L / -R / -D with persistent state.",
     context_settings={"help_option_names": ["-h", "--help"]},
 )

@@ -5,6 +5,7 @@
       "path": "azsync.py",
       "modules": [
         "usm_azure.py",
+        "usm_cli.py",
         "usm_daemon.py",
         "usm_publish.py",
         "usm_signal.py"
@@ -17,8 +18,8 @@
         "usmo>=0.12.0",
         "watchdog>=4.0.0"
       ],
-      "version": "1.0.9",
-      "hash": "sha256:e3143d64fb2c6586b3b3f653462c40856602e22bcef4cc6077b4786b10a04757"
+      "version": "1.0.10",
+      "hash": "sha256:e2a3aa7f492ec3cc14c92844015095e9487928edd918abaaa5a5a362cdfe9378"
     },
     "bench": {
       "description": "Benchmark CPU / memory / disk / network / GPU.",
@@ -35,6 +36,7 @@
       "description": "Mount Azure Blob with SAS, Azure CLI or Workload Identity.",
       "path": "blobmount.py",
       "modules": [
+        "usm_cli.py",
         "usm_daemon.py",
         "usm_azure.py",
         "usm_fic.py"
@@ -46,8 +48,8 @@
         "rich>=13.0",
         "usmo>=0.12.0"
       ],
-      "version": "1.1.0",
-      "hash": "sha256:8219168be64da0932d6dec1bc81e5b34b3bdb575a45f475f8c990381b96cd384"
+      "version": "1.1.1",
+      "hash": "sha256:8c21db7ed5204ea484c327021503d3c05196ef1cee53cbb8f92d6f0adcf35914"
     },
     "check_py": {
       "description": "Show active Python/pip versions.",
@@ -58,14 +60,17 @@
     "clash": {
       "description": "ClashX-style manager for the mihomo core.",
       "path": "clash.py",
+      "modules": [
+        "usm_cli.py"
+      ],
       "requirements": [
         "click>=8.2.1",
         "pyyaml>=6.0.3",
         "requests>=2.32.4",
         "rich>=13.0"
       ],
-      "version": "1.0.16",
-      "hash": "sha256:ab98519d239c1610f8542617066b5fafdd35d76b59f107cfff9f7bf6c60e162a"
+      "version": "1.0.17",
+      "hash": "sha256:0d5f5fbd2defe8b31d4a7a8bb457c8f1d71ccf53b45391d6f55549c7f714950e"
     },
     "clip": {
       "description": "Clipboard from stdin; OSC52 fallback over SSH.",
@@ -107,12 +112,15 @@
     "disk": {
       "description": "Inspect, partition, format, and mount disks.",
       "path": "disk.py",
+      "modules": [
+        "usm_cli.py"
+      ],
       "requirements": [
         "click>=8.2.1",
         "rich>=13.0"
       ],
-      "version": "1.0.0",
-      "hash": "sha256:81bba632adea7b0854cf23efca480dcd871136fe29772caef9152974b93851ad"
+      "version": "1.0.1",
+      "hash": "sha256:2217de571576d1fdfbedfcc3daa2862874347aa3e9acfa926ca5943a58158a5c"
     },
     "dl": {
       "description": "Resumable download with checksum verification.",
@@ -144,10 +152,11 @@
       "requirements": [
         "click>=8.2.1"
       ],
-      "version": "1.0.6",
-      "hash": "sha256:d785ce899bb451daca65eb2a1845a82f9ba2a6cca9db7e92c4fa0960a72ba17f",
+      "version": "1.0.7",
+      "hash": "sha256:2d4dc6aba076befa4053c1306f6b93ac6de1acde36310e60532181eca8aa585d",
       "modules": [
-        "usm_blocks.py"
+        "usm_blocks.py",
+        "usm_cli.py"
       ]
     },
     "gpu": {
@@ -168,10 +177,11 @@
         "rich>=13.0",
         "usmo>=0.12.0"
       ],
-      "version": "1.0.4",
-      "hash": "sha256:83c00e71974b885cf4fe13fefd5057be49484d4645a4c093c8a18cf4465f3326",
+      "version": "1.0.5",
+      "hash": "sha256:1489ee0378b3ed12d10e2da46004b58ece2517931488d40e3e2e3797efe69381",
       "modules": [
-        "usm_blocks.py"
+        "usm_blocks.py",
+        "usm_cli.py"
       ]
     },
     "init": {
@@ -202,25 +212,31 @@
     "net": {
       "description": "Inspect, diagnose, and monitor host networking.",
       "path": "net.py",
+      "modules": [
+        "usm_cli.py"
+      ],
       "requirements": [
         "click>=8.2.1",
         "httpx[socks]>=0.27.0",
         "psutil>=7.1.3",
         "rich>=13.0"
       ],
-      "version": "1.0.1",
-      "hash": "sha256:11b94c2a2b767d6038d641381fac783efb0dbe99590a06bf4cb55172fa7a9122"
+      "version": "1.0.2",
+      "hash": "sha256:79cab6ff1106e98083d8918d466066edd701fd20987fdbc718001779ebd8a208"
     },
     "notify": {
       "description": "Ping ntfy.sh / Telegram / webhook when a command exits.",
       "path": "notify.py",
+      "modules": [
+        "usm_cli.py"
+      ],
       "requirements": [
         "click>=8.2.1",
         "httpx>=0.27.0",
         "rich>=13.0"
       ],
-      "version": "1.0.5",
-      "hash": "sha256:80ae86902575fa0c8cdf3e43f510de0a3087805b6dbcf6c47256abd18e35660e"
+      "version": "1.0.6",
+      "hash": "sha256:8f661f97e3a44fe7ec4ea754bcc5f54db773373ae2c3bfe99350fb4c3b57cde3"
     },
     "openai-proxy": {
       "description": "Local OpenAI + Anthropic compatible proxy for Microsoft TRAPI.",
@@ -250,13 +266,16 @@
     "proxy": {
       "description": "HTTP/SOCKS/Shadowsocks proxy server or simple Clash client (mihomo).",
       "path": "proxy.py",
+      "modules": [
+        "usm_cli.py"
+      ],
       "requirements": [
         "click>=8.2.1",
         "pyyaml>=6.0.3",
         "rich>=13.0"
       ],
-      "version": "1.0.1",
-      "hash": "sha256:c25c6135837d711225a4fa60159e4d44b7f3724f362fe57da8893a0c4db1bd14"
+      "version": "1.0.2",
+      "hash": "sha256:3fa11d7c087fe3568084b148c89a335f52d8fbd1eedb269919f62c531e45144d"
     },
     "rsync": {
       "description": "rsync wrapper with sensible defaults + auto-excludes.",
@@ -270,13 +289,16 @@
     "secret": {
       "description": "Encrypted local env store; inject secrets into processes.",
       "path": "secret.py",
+      "modules": [
+        "usm_cli.py"
+      ],
       "requirements": [
         "click>=8.2.1",
         "cryptography>=42.0.0",
         "rich>=13.0"
       ],
-      "version": "1.0.3",
-      "hash": "sha256:8fcb71b4bf24463fee38dc28135e6d4d17a1320322f8e5bf9e627740918a5e5b"
+      "version": "1.0.4",
+      "hash": "sha256:95b4ad2438c39267b30fbcfd5806be789be3c09ecb3c98b71aea5dbb29b300dc"
     },
     "serve": {
       "description": "Rich file server via miniserve (uploads, zip, range).",
@@ -291,13 +313,16 @@
     "session": {
       "description": "Inspect and manage logged-in user sessions.",
       "path": "session.py",
+      "modules": [
+        "usm_cli.py"
+      ],
       "requirements": [
         "click>=8.2.1",
         "psutil>=7.1.3",
         "rich>=13.0"
       ],
-      "version": "1.0.0",
-      "hash": "sha256:4b5b95dbd89ff06db2beb220c5c0ac6eb22ca68738a33e9c23458697b42a416f"
+      "version": "1.0.1",
+      "hash": "sha256:4c1bc4f09889fd62376507ed5adfcee7a35a87a0b73f3af7afc0160444676c98"
     },
     "share": {
       "description": "Serve a file/dir over HTTP, optionally via ssh -R.",
@@ -335,6 +360,7 @@
       "description": "Run any command as a managed service.",
       "path": "svc.py",
       "modules": [
+        "usm_cli.py",
         "usm_daemon.py"
       ],
       "requirements": [
@@ -342,8 +368,8 @@
         "rich>=13.0",
         "usmo>=0.12.0"
       ],
-      "version": "1.0.0",
-      "hash": "sha256:006b6eaa1de90026fb5232d1ad4347efa9dc035125f950b47750198e690dda3a"
+      "version": "1.0.1",
+      "hash": "sha256:050c2296f3373a8866cb8dbbac97d1afbbb47af667b73e4647c2bbe4e898faed"
     },
     "sysinfo": {
       "description": "Print system/GPU/CUDA environment summary.",
@@ -354,12 +380,15 @@
     "tunnel": {
       "description": "Manage SSH tunnels (local/remote/SOCKS) with autostart.",
       "path": "tunnel.py",
+      "modules": [
+        "usm_cli.py"
+      ],
       "requirements": [
         "click>=8.2.1",
         "rich>=13.0"
       ],
-      "version": "1.3.8",
-      "hash": "sha256:88a586f351ff2516e4ade54872ccc7881b91dd7a758d61ee8f2b229c97723bf3"
+      "version": "1.3.9",
+      "hash": "sha256:719525e84a5d5ae65dcb6e36e29d5da22c2bdaa6076edf3cb1f8af6fdc7b1324"
     },
     "wait": {
       "description": "Block until host:port / TCP / HTTP is reachable.",

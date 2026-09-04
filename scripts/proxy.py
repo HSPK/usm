@@ -48,6 +48,7 @@ from pathlib import Path
 from typing import Optional
 
 import click
+from usm_cli import grouped_class
 import yaml
 from rich.console import Console
 from rich.table import Table
@@ -751,7 +752,19 @@ def _ensure_free_id(iid: str) -> None:
 # CLI -----------------------------------------------------------------------
 
 
+PROXY_SECTIONS = (
+    ("Define", ("server", "client", "rm")),
+    ("Inspect", ("ls", "show", "url", "logs")),
+    ("Lifecycle", ("start", "stop", "restart")),
+    ("Boot", ("enable", "disable")),
+    ("Setup", ("install",)),
+    ("Internal", ("up",)),
+)
+ProxyGroup = grouped_class(PROXY_SECTIONS, name="ProxyGroup")
+
+
 @click.group(
+    cls=ProxyGroup,
     help=__doc__.splitlines()[0],
     context_settings={"help_option_names": ["-h", "--help"]},
 )

@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterator, Sequence
 
 import click
+from usm_cli import grouped_class
 
 from usm_blocks import BlockError, ManagedBlock
 
@@ -917,7 +918,19 @@ def _global_generated_include() -> bool:
     return str(_generated_path()) in result.stdout.splitlines()
 
 
-@click.group(context_settings={"help_option_names": ["-h", "--help"]})
+GIT_AUTH_SECTIONS = (
+    ("Profiles", ("add", "rm", "set", "unset", "rename", "list", "show")),
+    ("Mappings", ("mappings", "resolve", "use", "reset")),
+    ("Operate", ("test", "status", "exec", "clone", "sync")),
+    ("Setup", ("enable", "disable", "keygen", "doctor")),
+)
+GitAuthGroup = grouped_class(GIT_AUTH_SECTIONS, name="GitAuthGroup")
+
+
+@click.group(
+    cls=GitAuthGroup,
+    context_settings={"help_option_names": ["-h", "--help"]},
+)
 def cli() -> None:
     """Automatically select Git identity and SSH key by directory."""
 

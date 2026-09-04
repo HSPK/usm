@@ -39,6 +39,7 @@ from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 
 import click
+from usm_cli import grouped_class
 import yaml
 from rich.console import Console
 
@@ -1065,7 +1066,19 @@ def parse_target(account: str | None, container: str | None) -> tuple[str, str]:
     return account, container
 
 
+BLOBMOUNT_SECTIONS = (
+    ("Mount", ("mount", "umount", "refresh", "check")),
+    ("Inspect", ("ls", "status", "config", "logs")),
+    ("Lifecycle", ("start", "stop", "rm")),
+    ("Boot", ("enable", "disable")),
+    ("Setup", ("install",)),
+    ("Internal", ("up",)),
+)
+BlobmountGroup = grouped_class(BLOBMOUNT_SECTIONS, name="BlobmountGroup")
+
+
 @click.group(
+    cls=BlobmountGroup,
     help="Mount Azure Blob containers with blobfuse2, keeping the SAS fresh.",
     context_settings={"help_option_names": ["-h", "--help"]},
 )

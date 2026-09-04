@@ -134,6 +134,36 @@ Using the precise one in a column is what makes a row wrap to three lines.
 | `plural(2, "sync")` | `2 syncs` |
 | `joined(a, b, c)` | `a · b · c` |
 
+## Command help
+
+Five subcommands fit in Click's normal flat `Commands` list. Once a command
+family has six visible subcommands, group them by workflow rather than
+alphabetically:
+
+```python
+from usm_cli import grouped_class
+
+SECTIONS = (
+    ("Inspect", ("ls", "status", "logs")),
+    ("Transfer", ("sync", "flush")),
+    ("Lifecycle", ("start", "stop", "restart")),
+)
+MyGroup = grouped_class(SECTIONS, name="MyGroup")
+
+@click.group(cls=MyGroup)
+def cli():
+    ...
+```
+
+Hidden implementation commands do not count toward the threshold or appear
+in help. Every visible command in a large family must be named in exactly one
+section; the repository-wide audit checks this directly from the catalog, so
+adding a sixth command cannot silently fall back to a long flat list.
+
+Section names describe user intent (`Inspect`, `Transfer`, `Lifecycle`,
+`Boot`), not implementation modules. Related pairs such as
+`enable`/`disable` and `sync`/`flush` stay together.
+
 ## Adopting it in a script
 
 Declare `usmo` in the script's requirements:

@@ -34,6 +34,7 @@ from pathlib import Path
 import click
 from usmo import ui
 
+from usm_cli import grouped_class
 from usm_daemon import (
     USM_CACHE_DIR,
     FileLock,
@@ -451,7 +452,21 @@ def print_services(services: list[Service], *, title: str = "Services") -> None:
 # ==========================================================================
 
 
-@click.group(context_settings=CONTEXT_SETTINGS, invoke_without_command=True)
+SVC_SECTIONS = (
+    ("Define", ("add", "rm")),
+    ("Inspect", ("ls", "status", "logs")),
+    ("Lifecycle", ("start", "stop", "restart")),
+    ("Boot", ("enable", "disable")),
+    ("Internal", ("run", "which")),
+)
+SvcGroup = grouped_class(SVC_SECTIONS, name="SvcGroup")
+
+
+@click.group(
+    cls=SvcGroup,
+    context_settings=CONTEXT_SETTINGS,
+    invoke_without_command=True,
+)
 @click.pass_context
 def cli(ctx):
     """Run any command as a managed service."""

@@ -27,6 +27,7 @@ import time
 from pathlib import Path
 
 import click
+from usm_cli import GroupedGroup
 import httpx
 from rich.console import Console
 
@@ -156,10 +157,15 @@ def _fmt(secs: float) -> str:
 # CLI ---------------------------------------------------------------------
 
 
-class _NotifyGroup(click.Group):
+class _NotifyGroup(GroupedGroup):
     """Group that falls through to the `run` subcommand when the first arg
     isn't a known subcommand. Lets `usm notify -- cmd args` work alongside
     `usm notify config ntfy ...` and `usm notify test`."""
+
+    command_sections = (
+        ("Run", ("run", "test")),
+        ("Configure", ("config",)),
+    )
 
     def resolve_command(self, ctx, args):
         if not args:

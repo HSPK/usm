@@ -29,6 +29,7 @@ import sys
 from dataclasses import dataclass, field
 
 import click
+from usm_cli import grouped_class
 from rich.console import Console
 from rich.table import Table
 
@@ -484,40 +485,15 @@ def _render_dashboard(show_all: bool = False) -> None:
 COMMAND_SECTIONS: list[tuple[str, tuple[str, ...]]] = [
     ("Inspect", ("ls", "info", "usage", "fstab")),
     ("Manage", ("partition", "format", "wipe")),
-    ("Mount", ("mount", "unmount", "setup")),
+    ("Mount", ("mount", "unmount", "umount", "setup")),
 ]
 
 
-class GroupedGroup(click.Group):
-    """A click group that renders its commands in labelled sections."""
-
-    def format_commands(self, ctx: click.Context, formatter) -> None:
-        listed: set[str] = set()
-        for title, names in COMMAND_SECTIONS:
-            rows = []
-            for name in names:
-                cmd = self.get_command(ctx, name)
-                if cmd is None or cmd.hidden:
-                    continue
-                listed.add(name)
-                rows.append((name, cmd.get_short_help_str(78)))
-            if rows:
-                with formatter.section(title):
-                    formatter.write_dl(rows)
-        extra = [
-            (n, c)
-            for n in sorted(self.list_commands(ctx))
-            if n not in listed
-            and (c := self.get_command(ctx, n)) is not None
-            and not c.hidden
-        ]
-        if extra:
-            with formatter.section("Other"):
-                formatter.write_dl([(n, c.get_short_help_str(78)) for n, c in extra])
+DiskGroup = grouped_class(COMMAND_SECTIONS, name="DiskGroup")
 
 
 @click.group(
-    cls=GroupedGroup,
+    cls=DiskGroup,
     invoke_without_command=True,
     help=__doc__.splitlines()[0],
     context_settings={"help_option_names": ["-h", "--help"]},

@@ -23,6 +23,7 @@ import sys
 from pathlib import Path
 
 import click
+from usm_cli import grouped_class
 from cryptography.fernet import Fernet, InvalidToken
 from rich.console import Console
 from rich.table import Table
@@ -109,7 +110,15 @@ def _envify(group: dict[str, str]) -> str:
 # CLI ---------------------------------------------------------------------
 
 
+SECRET_SECTIONS = (
+    ("Store", ("init", "set", "get", "ls", "rm")),
+    ("Use", ("export", "run")),
+)
+SecretGroup = grouped_class(SECRET_SECTIONS, name="SecretGroup")
+
+
 @click.group(
+    cls=SecretGroup,
     context_settings={"help_option_names": ["-h", "--help"]},
     help="Encrypted local env store.",
 )
