@@ -35,14 +35,15 @@ None of the four know about each other; only the supervisor wires them.
 from __future__ import annotations
 
 import json
+import math
 import os
 import shlex
 import subprocess
 import sys
-import tempfile
 import threading
 import time
 import urllib.parse
+from collections import deque
 from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 from typing import Callable, Iterable
@@ -63,16 +64,14 @@ from usm_daemon import (
 from usm_signal import SignalError, SignalEvent, SignalQueue
 from usm_daemon import build_watcher as _build_watcher
 from usm_cli import grouped_class
+from usm_checkpoint import PublishCoordinator, PublishRun
 from usm_publish import (
     PublishError,
     PublishLedger,
     PublishPolicy,
+    PublishTransportError,
     TreeSnapshot,
-    clean_quarantine,
     discover as discover_publish_candidates,
-    flush_candidates,
-    quarantine,
-    snapshot_unchanged,
 )
 
 from usm_azure import (
@@ -120,12 +119,9 @@ SUPERVISE_ENV = "USM_AZSYNC_SUPERVISE_ID"
 
 # Defaults for the trigger policy. See decide() for what each one does.
 DEFAULT_QUIET_PERIOD = 5.0
-DEFAULT_BATCH_FILES = 200
-DEFAULT_BATCH_BYTES = 256 * 1024 * 1024
 DEFAULT_MAX_DELAY = 300.0
 DEFAULT_INTERVAL = 3600.0
 DEFAULT_MIN_GAP = 30.0
-DEFAULT_MIN_FILES = 1
 
 
 BACKOFF_BASE = 30.0
@@ -138,8 +134,6 @@ WATCH_MODES = ("auto", "inotify", "poll")
 
 
 # Data model ----------------------------------------------------------------
-
-WATCH_MODES = ("auto", "inotify", "poll")
 
 
 @dataclass
@@ -159,12 +153,9 @@ class SyncJob:
 
     # trigger policy
     quiet_period: float = DEFAULT_QUIET_PERIOD
-    batch_files: int = DEFAULT_BATCH_FILES
-    batch_bytes: int = DEFAULT_BATCH_BYTES
     max_delay: float = DEFAULT_MAX_DELAY
     interval: float = DEFAULT_INTERVAL
     min_gap: float = DEFAULT_MIN_GAP
-    min_files: int = DEFAULT_MIN_FILES
 
     # watching
     watch_mode: str = "auto"
@@ -214,17 +205,9 @@ class SyncJob:
             conflict=self.publish_conflict,
         )
 
-    def retain_exclude_spec(self) -> ExcludeSpec:
-        """Ordinary sync must never publish an incomplete checkpoint."""
-        extra = list(self.excludes)
-        policy = self.publish_policy()
-        if policy.enabled:
-            if policy.paths:
-                extra.extend(path.rstrip("/") + "/" for path in policy.paths)
-            else:
-                extra.extend(policy.patterns)
-            extra.append(".azsync-moved/")
-        return ExcludeSpec.build(extra, defaults=self.default_excludes)
+    @property
+    def is_publisher(self) -> bool:
+        return self.publish_policy().enabled
 
     def watch_exclude_spec(self) -> ExcludeSpec:
         """Watch checkpoint writes, but never our own quarantine cleanup."""
@@ -245,7 +228,7 @@ class SyncJob:
 
 @dataclass
 class RuntimeState:
-    """Daemon-owned counters. Never written by the CLI (avoids lost updates)."""
+    """One job, one mode, one retry clock."""
 
     state: str = "stopped"  # stopped|idle|syncing|backoff|failed
     pid: int | None = None
@@ -265,19 +248,21 @@ class RuntimeState:
     last_result: str | None = None
     last_error: str | None = None
     last_job_id: str | None = None
-
     total_syncs: int = 0
     total_failures: int = 0
     consecutive_failures: int = 0
     backoff_until: float | None = None
 
-    sas_expires_at: float | None = None
-    next_deadline: float | None = None
     publish_pending: int = 0
     publish_ready: int = 0
     publish_last_path: str | None = None
     publish_last_at: float | None = None
-    publish_last_error: str | None = None
+    published: int = 0
+    deleted: int = 0
+    retained: int = 0
+
+    sas_expires_at: float | None = None
+    next_deadline: float | None = None
     signal_pending: int = 0
     signal_last_kind: str | None = None
     signal_last_at: float | None = None
@@ -395,10 +380,7 @@ def load_state(job_id: str) -> RuntimeState:
     raw = read_json(_state_path(job_id))
     if not isinstance(raw, dict):
         return RuntimeState()
-    try:
-        return _from_dict(RuntimeState, raw)
-    except TypeError:
-        return RuntimeState()
+    return _from_dict(RuntimeState, raw)
 
 
 def delete_job(job_id: str) -> None:
@@ -520,18 +502,65 @@ class ChangeStat:
         return self.files > 0
 
 
+@dataclass
+class DirtyPath:
+    bytes: int = 0
+    deleted: bool = False
+    first_at: float | None = None
+    last_at: float | None = None
+
+
 class ChangeAccumulator:
-    """Thread-safe ChangeStat: watcher threads write, supervisor drains."""
+    """Thread-safe diagnostic counts; scheduling depends only on timestamps."""
 
     def __init__(self) -> None:
         self._stat = ChangeStat()
+        self._dirty: dict[str, DirtyPath] = {}
+        self._known_sizes: dict[str, int] = {}
         self._lock = threading.Lock()
         self._degraded = False
         self.updated = threading.Event()
 
-    def record(self, now: float, *, size: int = 0, deleted: bool = False) -> None:
+    def record(
+        self,
+        now: float,
+        *,
+        path: str | None = None,
+        size: int = 0,
+        previous_size: int | None = None,
+        created: bool = False,
+        deleted: bool = False,
+    ) -> None:
         with self._lock:
-            self._stat.record(now, size=size, deleted=deleted)
+            if path is None:
+                self._stat.record(now, size=size, deleted=deleted)
+            else:
+                old_size = (
+                    previous_size
+                    if previous_size is not None
+                    else self._known_sizes.get(path)
+                )
+                if deleted:
+                    growth = 0
+                    self._known_sizes.pop(path, None)
+                else:
+                    if created:
+                        growth = max(0, size)
+                    elif old_size is not None:
+                        growth = max(0, size - old_size)
+                    else:
+                        # A first modification tells us the current size, not
+                        # how many bytes were appended since the last sync.
+                        growth = 0
+                    self._known_sizes[path] = max(0, size)
+                    if len(self._known_sizes) > DEFAULT_MAX_INDEX_FILES:
+                        # A size baseline is only a reporting hint. Bound it
+                        # for training jobs that create millions of paths.
+                        self._known_sizes.pop(next(iter(self._known_sizes)))
+                dirty = self._dirty.setdefault(path, DirtyPath(first_at=now))
+                dirty.bytes += growth
+                dirty.deleted = dirty.deleted or deleted
+                dirty.last_at = now
         self.updated.set()
 
     def mark_degraded(self) -> None:
@@ -547,13 +576,28 @@ class ChangeAccumulator:
 
     def snapshot(self) -> ChangeStat:
         with self._lock:
-            return self._stat.copy()
+            return self._snapshot_locked()
+
+    def _snapshot_locked(self) -> ChangeStat:
+        result = self._stat.copy()
+        for item in self._dirty.values():
+            result.merge(
+                ChangeStat(
+                    files=1,
+                    bytes=item.bytes,
+                    deletes=int(item.deleted),
+                    first_at=item.first_at,
+                    last_at=item.last_at,
+                )
+            )
+        return result
 
     def take(self) -> ChangeStat:
         """Atomically remove and return the batch (called at job start)."""
         with self._lock:
-            taken = self._stat.copy()
+            taken = self._snapshot_locked()
             self._stat.clear()
+            self._dirty.clear()
             self._degraded = False
             self.updated.clear()
             return taken
@@ -566,307 +610,6 @@ class ChangeAccumulator:
             self.updated.set()
 
 
-# Gated checkpoint publication ---------------------------------------------
-
-
-@dataclass
-class PublishRun:
-    discovered: int = 0
-    ready: int = 0
-    published: int = 0
-    deleted: int = 0
-    retained: int = 0
-    bytes: int = 0
-    error: str | None = None
-    waiting: list[dict] = field(default_factory=list)
-
-
-class PublishCoordinator:
-    """Publish payload → verify → manifest → marker, then optionally delete.
-
-    A checkpoint marker is a remote visibility barrier, not merely permission
-    to remove the local copy.  Ordinary sync excludes the publish namespace;
-    this coordinator is the only code allowed to upload it, and uploads the
-    marker last.
-    """
-
-    def __init__(
-        self,
-        job: SyncJob,
-        engine: "AzcopyEngine",
-        *,
-        ledger_path: Path | None = None,
-        clock: Callable[[], float] = time.time,
-        log: Callable[[str], None] | None = None,
-    ) -> None:
-        self.job = job
-        self.engine = engine
-        self.policy = job.publish_policy()
-        self.ledger_path = ledger_path or publish_ledger_path(job.id)
-        self.clock = clock
-        self.log = log or (lambda _message: None)
-        self.ledger = PublishLedger.load(self.ledger_path)
-        self.next_wake: float | None = None
-
-    def _save(self) -> None:
-        self.ledger.save(self.ledger_path)
-
-    def scan(self) -> list:
-        now = self.clock()
-        candidates = discover_publish_candidates(
-            self.job.source_path(), self.policy, self.ledger, now
-        )
-        deadlines = []
-        for candidate in candidates:
-            if candidate.ready or candidate.reason == "waiting for marker":
-                continue
-            tx = self.ledger.transactions[candidate.snapshot.relpath]
-            mtime = candidate.snapshot.mtime_ns / 1_000_000_000
-            deadlines.append(
-                max(
-                    tx.observed_at + self.policy.stable,
-                    mtime + self.policy.stable,
-                    mtime + self.policy.min_age,
-                )
-            )
-        self.next_wake = min(deadlines) if deadlines else None
-        self._save()
-        return candidates
-
-    def _transition(
-        self, snapshot: TreeSnapshot, state: str, *, error: str | None = None
-    ) -> None:
-        self.ledger.transition(snapshot.relpath, state, self.clock(), error=error)
-        self._save()
-
-    def _payload_verified(self, snapshot: TreeSnapshot, result: SyncResult) -> bool:
-        if result.status != OK or result.failed:
-            return False
-        if self.policy.verify == "azcopy":
-            return True
-        # overwrite=true makes every payload file a completed transfer.  The
-        # job summary is Azure's acknowledgement of both count and bytes.
-        if result.completed < snapshot.file_count:
-            return False
-        if result.bytes < snapshot.bytes:
-            return False
-        return True
-
-    def _run_exact(
-        self, source: Path, remote_relpath: str, token: SasToken
-    ) -> SyncResult:
-        argv = self.engine.build_exact_copy_argv(
-            source, remote_relpath, token.token or None
-        )
-        return self.engine.run(argv)
-
-    def publish_one(self, candidate, token: SasToken) -> PublishRun:
-        snapshot = candidate.snapshot
-        tx = self.ledger.transactions[snapshot.relpath]
-        result = PublishRun(discovered=1, ready=1)
-        if snapshot.unit == "directory":
-            remote_marker = f"{snapshot.relpath}/{self.policy.ready_marker}"
-        else:
-            remote_marker = snapshot.relpath + self.policy.ready_marker
-        exists = getattr(self.engine, "remote_exists", None)
-        if exists is not None:
-            try:
-                marker_exists = exists(remote_marker, token.token or None)
-            except PublishError as exc:
-                self._transition(snapshot, "failed", error=str(exc))
-                result.error = str(exc)
-                return result
-            if marker_exists:
-                if self.policy.conflict == "fail":
-                    message = (
-                        f"remote checkpoint already has {self.policy.ready_marker}; "
-                        "use --publish-conflict replace to republish it"
-                    )
-                    self._transition(snapshot, "conflict", error=message)
-                    result.error = message
-                    return result
-                removed = self.engine.remove_remote(remote_marker, token.token or None)
-                if not removed.ok:
-                    message = removed.error or "cannot remove old ready marker"
-                    self._transition(snapshot, "failed", error=message)
-                    result.error = message
-                    return result
-        self.log(
-            f"publish start {snapshot.relpath} "
-            f"({snapshot.file_count} files, {human_bytes(snapshot.bytes)})"
-        )
-
-        self._transition(snapshot, "uploading_payload")
-        upload = self.engine.run(
-            self.engine.build_publish_argv(
-                snapshot, token.token or None, marker=self.policy.ready_marker
-            )
-        )
-        if not self._payload_verified(snapshot, upload):
-            message = upload.error or (
-                f"payload verification failed: {upload.completed}/"
-                f"{snapshot.file_count} files, {upload.bytes}/{snapshot.bytes} bytes"
-            )
-            self._transition(snapshot, "failed", error=message)
-            result.error = message
-            return result
-
-        self._transition(snapshot, "verifying_payload")
-        if not snapshot_unchanged(self.job.source_path(), snapshot, self.policy):
-            message = "checkpoint changed while its payload was uploading"
-            self._transition(snapshot, "failed", error=message)
-            result.error = message
-            return result
-
-        self._transition(snapshot, "publishing_manifest")
-        with tempfile.TemporaryDirectory(prefix="usm-azsync-publish-") as tmp:
-            manifest = Path(tmp) / ".azsync-manifest.json"
-            manifest.write_text(json.dumps(snapshot.manifest(tx.transaction), indent=2))
-            remote_manifest = f"{snapshot.relpath}/.azsync-manifest.json"
-            manifest_result = self._run_exact(manifest, remote_manifest, token)
-            if not manifest_result.ok:
-                message = manifest_result.error or "manifest upload failed"
-                self._transition(snapshot, "failed", error=message)
-                result.error = message
-                return result
-
-        if not snapshot_unchanged(self.job.source_path(), snapshot, self.policy):
-            message = "checkpoint changed before its marker was published"
-            self._transition(snapshot, "failed", error=message)
-            result.error = message
-            return result
-
-        marker = candidate.marker
-        if marker is None:
-            message = "ready marker disappeared before publication"
-            self._transition(snapshot, "failed", error=message)
-            result.error = message
-            return result
-        self._transition(snapshot, "publishing_marker")
-        marker_result = self._run_exact(marker, remote_marker, token)
-        if not marker_result.ok:
-            message = marker_result.error or "ready marker upload failed"
-            self._transition(snapshot, "failed", error=message)
-            result.error = message
-            return result
-
-        self._transition(snapshot, "published")
-        result.published = 1
-        result.bytes = snapshot.bytes
-        self.log(f"published {snapshot.relpath} (marker last)")
-
-        if self.policy.after_publish == "delete" and candidate.keep_local:
-            result.retained = 1
-            self.log(
-                f"retained {snapshot.relpath} locally (latest {self.policy.keep_last})"
-            )
-        elif self.policy.after_publish == "delete":
-            if not snapshot_unchanged(self.job.source_path(), snapshot, self.policy):
-                message = "checkpoint changed after publication; kept locally"
-                self._transition(snapshot, "failed", error=message)
-                result.error = message
-                return result
-            try:
-                quarantine(
-                    self.job.source_path(),
-                    snapshot,
-                    tx.transaction,
-                    ready_marker=self.policy.ready_marker,
-                )
-                quarantine_root = (
-                    self.job.source_path() / ".azsync-moved" / tx.transaction
-                )
-                self.ledger.transition(
-                    snapshot.relpath,
-                    "quarantined",
-                    self.clock(),
-                    quarantined_path=str(quarantine_root),
-                )
-                self._save()
-                clean_quarantine(quarantine_root)
-                self._transition(snapshot, "deleted")
-                result.deleted = 1
-                self.log(
-                    f"moved {snapshot.relpath}; reclaimed {human_bytes(snapshot.bytes)}"
-                )
-            except PublishError as exc:
-                self._transition(snapshot, "failed", error=str(exc))
-                result.error = str(exc)
-        return result
-
-    def run(
-        self,
-        token: SasToken,
-        *,
-        flush_checkpoint: str | None = None,
-        flush_settle: float | None = None,
-        sleep=time.sleep,
-    ) -> PublishRun:
-        if not self.policy.enabled:
-            return PublishRun()
-        # A crash after the atomic rename leaves a safe, already-published
-        # checkpoint in quarantine.  Finishing that deletion is idempotent.
-        for tx in list(self.ledger.transactions.values()):
-            if tx.state != "quarantined" or not tx.quarantined_path:
-                continue
-            try:
-                clean_quarantine(Path(tx.quarantined_path))
-                self.ledger.transition(tx.path, "deleted", self.clock())
-            except PublishError as exc:
-                tx.error = str(exc)
-        # A process can die after the atomic rename but before persisting the
-        # quarantined state.  The transaction id was persisted at discovery,
-        # so a matching directory is safe to finish; unknown directories are
-        # deliberately left for a human.
-        quarantine_root = self.job.source_path() / ".azsync-moved"
-        for tx in list(self.ledger.transactions.values()):
-            orphan = quarantine_root / tx.transaction
-            if not orphan.exists() or tx.state not in ("published", "deleted"):
-                continue
-            try:
-                clean_quarantine(orphan)
-                self.ledger.transition(tx.path, "deleted", self.clock())
-            except PublishError as exc:
-                tx.error = str(exc)
-        self._save()
-        try:
-            if flush_settle is None:
-                candidates = self.scan()
-            else:
-                candidates = flush_candidates(
-                    self.job.source_path(),
-                    self.policy,
-                    self.ledger,
-                    checkpoint=flush_checkpoint,
-                    settle=flush_settle,
-                    clock=self.clock,
-                    sleep=sleep,
-                )
-                self._save()
-        except PublishError as exc:
-            return PublishRun(error=str(exc))
-        total = PublishRun(
-            discovered=len(candidates),
-            ready=sum(1 for item in candidates if item.ready),
-            waiting=[
-                {"path": item.snapshot.relpath, "reason": item.reason}
-                for item in candidates
-                if not item.ready
-            ],
-        )
-        for candidate in candidates:
-            if not candidate.ready:
-                continue
-            one = self.publish_one(candidate, token)
-            total.published += one.published
-            total.deleted += one.deleted
-            total.retained += one.retained
-            total.bytes += one.bytes
-            if one.error:
-                total.error = one.error
-        return total
-
-
 # Trigger policy ------------------------------------------------------------
 
 WAIT = "wait"
@@ -876,23 +619,17 @@ SYNC = "sync"
 @dataclass(frozen=True)
 class TriggerConfig:
     quiet_period: float = DEFAULT_QUIET_PERIOD
-    batch_files: int = DEFAULT_BATCH_FILES
-    batch_bytes: int = DEFAULT_BATCH_BYTES
     max_delay: float = DEFAULT_MAX_DELAY
     interval: float = DEFAULT_INTERVAL
     min_gap: float = DEFAULT_MIN_GAP
-    min_files: int = DEFAULT_MIN_FILES
 
     @classmethod
     def from_job(cls, job: SyncJob) -> "TriggerConfig":
         return cls(
             quiet_period=job.quiet_period,
-            batch_files=job.batch_files,
-            batch_bytes=job.batch_bytes,
             max_delay=job.max_delay,
             interval=job.interval,
             min_gap=job.min_gap,
-            min_files=job.min_files,
         )
 
 
@@ -949,36 +686,27 @@ def decide(
     if rt.degraded:
         return Decision(SYNC, "degraded")
 
+    if now >= heartbeat_at:
+        return Decision(SYNC, "heartbeat")
     if not acc.files:
-        if now >= heartbeat_at:
-            return Decision(SYNC, "heartbeat")
         return Decision(WAIT, "idle", heartbeat_at)
 
-    if acc.files >= cfg.batch_files or (
-        cfg.batch_bytes and acc.bytes >= cfg.batch_bytes
-    ):
-        return Decision(SYNC, "volume")
-
-    max_delay_at = (acc.first_at or now) + cfg.max_delay
+    max_delay_at = (acc.first_at if acc.first_at is not None else now) + cfg.max_delay
     if now >= max_delay_at:
         return Decision(SYNC, "max-delay")
 
-    quiet_at = (acc.last_at or now) + cfg.quiet_period
-    if now >= quiet_at and acc.files >= cfg.min_files:
+    quiet_at = (acc.last_at if acc.last_at is not None else now) + cfg.quiet_period
+    if now >= quiet_at:
         return Decision(SYNC, "quiet")
 
-    # Not enough yet: wake at whichever deadline arrives first.
-    candidates = [max_delay_at, heartbeat_at]
-    if acc.files >= cfg.min_files:
-        candidates.append(quiet_at)
-    return Decision(WAIT, "debounce", min(candidates))
+    return Decision(WAIT, "debounce", min(max_delay_at, quiet_at, heartbeat_at))
 
 
 def backoff_delay(consecutive_failures: int) -> float:
     """Exponential backoff, capped. 1 failure → 30s, 2 → 60s, … ≤ 15m."""
     if consecutive_failures <= 0:
         return 0.0
-    return min(BACKOFF_MAX, BACKOFF_BASE * (2 ** (consecutive_failures - 1)))
+    return min(BACKOFF_MAX, BACKOFF_BASE * (2 ** min(consecutive_failures - 1, 10)))
 
 
 # ==========================================================================
@@ -1171,24 +899,45 @@ def classify_failure(text: str, exit_code: int) -> str:
 def interpret_result(
     summary: dict, errors: list[str], exit_code: int, duration: float
 ) -> SyncResult:
+    try:
+        counts = []
+        for key in (
+            "TransfersCompleted",
+            "TransfersFailed",
+            "TransfersSkipped",
+            "TotalBytesTransferred",
+        ):
+            raw = summary.get(key, 0)
+            if isinstance(raw, bool) or not isinstance(raw, (int, str)):
+                raise ValueError("invalid transfer counter")
+            counts.append(int(raw))
+        if any(value < 0 for value in counts):
+            raise ValueError("negative transfer counter")
+    except (TypeError, ValueError, OverflowError):
+        return SyncResult(
+            status=FATAL,
+            exit_code=exit_code,
+            error="invalid azcopy transfer counters",
+            duration=duration,
+        )
     result = SyncResult(
         exit_code=exit_code,
         job_id=summary.get("JobID") or None,
-        completed=int(summary.get("TransfersCompleted") or 0),
-        failed=int(summary.get("TransfersFailed") or 0),
-        skipped=int(summary.get("TransfersSkipped") or 0),
-        bytes=int(summary.get("TotalBytesTransferred") or 0),
+        completed=counts[0],
+        failed=counts[1],
+        skipped=counts[2],
+        bytes=counts[3],
         job_status=summary.get("JobStatus") or None,
         duration=duration,
     )
     text = "\n".join([str(summary.get("ErrorMsg") or ""), *errors[-20:]]).strip()
     result.error = redact(text)[-2000:] or None
 
-    if exit_code == 0 and not result.failed:
-        result.status = OK
-        return result
-    if result.job_status and result.job_status.lower() == "cancelled":
+    job_status = str(result.job_status or "").lower()
+    if job_status == "cancelled":
         result.status = CANCELLED
+        return result
+    if exit_code == 0 and not result.failed and job_status in ("", "completed"):
         return result
 
     classified = classify_failure(text, exit_code)
@@ -1201,6 +950,11 @@ def interpret_result(
         result.status = classified
     if result.status == OK and result.failed:
         result.status = PARTIAL
+    if result.status == OK and job_status not in ("", "completed"):
+        result.status = NETWORK
+        result.error = (
+            result.error or f"azcopy job did not complete: {result.job_status}"
+        )
     return result
 
 
@@ -1217,6 +971,9 @@ class AzcopyEngine:
         self.job = job
         self._binary = binary
         self.work_dir = state_dir or azcopy_dir(job.id)
+        self.on_start = None
+        self.log = None
+        self.stopped: Callable[[], bool] = lambda: False
 
     @property
     def binary(self) -> str:
@@ -1240,6 +997,8 @@ class AzcopyEngine:
 
     def build_argv(self, sas: str | None, *, dry_run: bool = False) -> list[str]:
         job = self.job
+        if job.is_publisher:
+            raise PublishError("publisher jobs cannot run ordinary azcopy sync")
         source = str(Path(job.source))
         dest = join_sas(split_sas(job.dest)[0], sas)
         argv = [
@@ -1257,7 +1016,7 @@ class AzcopyEngine:
             argv.append("--put-md5")
         elif job.put_md5:
             argv.append("--put-md5")
-        argv += job.retain_exclude_spec().to_azcopy_flags()
+        argv += job.exclude_spec().to_azcopy_flags()
         if job.cap_mbps:
             argv += ["--cap-mbps", str(job.cap_mbps)]
         if job.block_size_mb:
@@ -1284,15 +1043,47 @@ class AzcopyEngine:
             "--output-type=json",
             "--log-level=ERROR",
         ]
-        proc = subprocess.run(
-            argv,
-            capture_output=True,
-            text=True,
-            env=self.env(),
-        )
+        if self.stopped():
+            raise InterruptedError("stop requested")
+        try:
+            proc = subprocess.run(
+                argv,
+                capture_output=True,
+                text=True,
+                env=self.env(),
+                timeout=30,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise PublishError(
+                f"cannot check remote marker: {redact(str(exc))}"
+            ) from exc
         text = "\n".join((proc.stdout, proc.stderr)).strip()
         if proc.returncode == 0:
-            return bool(text)
+            # Azcopy prints Info banners even for an empty result. Only an
+            # actual ListObject is evidence that the marker exists.
+            for line in proc.stdout.splitlines():
+                try:
+                    event = json.loads(line)
+                except ValueError as exc:
+                    raise PublishError("invalid azcopy list JSON") from exc
+                if not isinstance(event, dict):
+                    raise PublishError("invalid azcopy list event")
+                if event.get("MessageType") == "Error":
+                    raise PublishError(redact(str(event.get("MessageContent"))))
+                if event.get("MessageType") == "ListObject":
+                    content = event.get("MessageContent")
+                    try:
+                        item = (
+                            json.loads(content) if isinstance(content, str) else content
+                        )
+                    except ValueError as exc:
+                        raise PublishError("invalid azcopy ListObject") from exc
+                    if not isinstance(item, dict) or "Path" not in item:
+                        raise PublishError("invalid azcopy ListObject")
+                    if item["Path"] in ("", remote_relpath, Path(remote_relpath).name):
+                        return True
+                    raise PublishError("marker probe returned a different object")
+            return False
         lowered = text.lower()
         if any(
             marker in lowered
@@ -1305,9 +1096,10 @@ class AzcopyEngine:
             )
         ):
             return False
-        raise PublishError(
+        raise PublishTransportError(
             f"cannot check remote marker {remote_relpath}: "
-            f"{redact(text)[-500:] or f'azcopy exited {proc.returncode}'}"
+            f"{redact(text)[-500:] or f'azcopy exited {proc.returncode}'}",
+            classify_failure(text, proc.returncode),
         )
 
     def remove_remote(self, remote_relpath: str, sas: str | None) -> SyncResult:
@@ -1336,26 +1128,11 @@ class AzcopyEngine:
         dry_run: bool = False,
     ) -> list[str]:
         """Upload one checkpoint payload, deliberately excluding its marker."""
-        source = str(Path(self.job.source))
-        dest = join_sas(split_sas(self.job.dest)[0], sas)
-        argv = [
-            self.binary,
-            "copy",
-            source,
-            dest,
-            "--recursive",
-            "--overwrite=true",
-            "--output-type=json",
-            "--log-level=ERROR",
-            "--include-path",
-            snapshot.relpath,
-        ]
-        marker_name = (
-            marker
-            if snapshot.unit == "directory"
-            else Path(snapshot.relpath).name + marker
+        argv = self.build_exact_copy_argv(
+            Path(self.job.source) / snapshot.relpath, snapshot.relpath, sas
         )
-        argv += ["--exclude-pattern", marker_name]
+        if snapshot.unit == "directory":
+            argv += ["--recursive", "--as-subdir=false", "--exclude-pattern", marker]
         if self.job.publish_verify == "md5":
             argv.append("--put-md5")
         if self.job.cap_mbps:
@@ -1370,17 +1147,13 @@ class AzcopyEngine:
         self, source: Path, remote_relpath: str, sas: str | None
     ) -> list[str]:
         """Upload exactly one file; used for manifest then marker."""
-        base = split_sas(self.job.dest)[0].rstrip("/")
-        quoted = "/".join(
-            urllib.parse.quote(part, safe="") for part in Path(remote_relpath).parts
-        )
-        dest = join_sas(f"{base}/{quoted}", sas)
         return [
             self.binary,
             "copy",
             str(source),
-            dest,
+            self._remote_url(remote_relpath, sas),
             "--overwrite=true",
+            "--check-length=true",
             "--output-type=json",
             "--log-level=ERROR",
         ]
@@ -1396,6 +1169,10 @@ class AzcopyEngine:
         timeout: float | None = None,
     ) -> SyncResult:
         started = time.time()
+        if self.stopped():
+            return SyncResult(status=CANCELLED, error="stop requested")
+        on_start = on_start or self.on_start
+        log = log or self.log
         try:
             proc = subprocess.Popen(
                 argv,
@@ -1405,7 +1182,7 @@ class AzcopyEngine:
                 text=True,
                 env=self.env(),
             )
-        except FileNotFoundError as exc:
+        except OSError as exc:
             return SyncResult(status=FATAL, exit_code=127, error=str(exc), duration=0.0)
         if on_start is not None:
             on_start(proc)
@@ -1427,7 +1204,7 @@ class AzcopyEngine:
             watchdog.daemon = True
             watchdog.start()
 
-        lines: list[str] = []
+        lines = deque(maxlen=200)
         try:
             assert proc.stdout is not None
             for line in proc.stdout:
@@ -1447,6 +1224,13 @@ class AzcopyEngine:
                 exit_code=-1,
                 error=f"azcopy exceeded the {timeout:g}s timeout",
                 duration=time.time() - started,
+            )
+        if self.stopped():
+            return SyncResult(
+                status=CANCELLED,
+                exit_code=proc.returncode or 0,
+                duration=time.time() - started,
+                error="stop requested",
             )
         summary, errors = parse_azcopy_json(lines)
         return interpret_result(
@@ -1525,17 +1309,28 @@ class Supervisor:
         self.watcher = watcher
         self.clock = clock
         self._log = log or self._default_log
-        self.state = RuntimeState()
-        self.publisher = publisher or PublishCoordinator(
-            job, self.engine, clock=clock, log=self.log
-        )
+        validate_job(job)
+        self.state = load_state(job.id)
+        self._stop = threading.Event()
+        self.publisher = publisher
+        if job.is_publisher and self.publisher is None:
+            self.publisher = PublishCoordinator(
+                job,
+                self.engine,
+                ledger_path=publish_ledger_path(job.id),
+                clock=clock,
+                log=self.log,
+                stopped=self._stop.is_set,
+            )
         self.signals = signals or signal_queue(job.id)
         self._active_signal: SignalEvent | None = None
-        self._last_publish = PublishRun()
-        self._stop = threading.Event()
         self._forced = False
         self._child: subprocess.Popen | None = None
         self._running = False
+        if isinstance(self.engine, AzcopyEngine):
+            self.engine.on_start = self._track_child
+            self.engine.log = self._azcopy_line
+            self.engine.stopped = self._stop.is_set
 
     # -- plumbing ----------------------------------------------------------
 
@@ -1588,12 +1383,10 @@ class Supervisor:
             return None
         if event is None:
             return None
-        if event.kind not in ("sync", "flush"):
-            self.signals.complete(
-                event,
-                "invalid",
-                {"error": f"unknown signal kind: {event.kind}"},
-            )
+        try:
+            self._validate_signal(event)
+        except (ValueError, PublishError) as exc:
+            self.signals.complete(event, "invalid", {"error": str(exc)})
             self.state.signal_last_kind = event.kind
             self.state.signal_last_at = self.clock()
             self.state.signal_last_result = "invalid"
@@ -1603,131 +1396,219 @@ class Supervisor:
         self.log(f"signal {event.kind} {event.id} received")
         return event
 
-    def _complete_signal(self, event: SignalEvent, result: SyncResult) -> None:
-        published = self._last_publish
-        status = result.status
-        if (
-            event.kind == "flush"
-            and result.status == OK
-            and published.waiting
-            and not published.published
-        ):
-            status = "waiting"
+    def _validate_signal(self, event: SignalEvent) -> None:
+        if event.kind not in ("sync", "flush"):
+            raise ValueError(f"unknown signal kind: {event.kind}")
+        if event.kind == "flush":
+            if not self.job.is_publisher:
+                raise ValueError("flush requires a publisher job")
+            settle = event.payload.get("settle", 1.0)
+            if isinstance(settle, bool) or not isinstance(settle, (int, float)):
+                raise ValueError("flush settle must be a finite nonnegative number")
+            if not math.isfinite(settle) or settle < 0:
+                raise ValueError("flush settle must be a finite nonnegative number")
+            checkpoint = event.payload.get("checkpoint")
+            if checkpoint is not None and (
+                not isinstance(checkpoint, str)
+                or not checkpoint
+                or Path(checkpoint).is_absolute()
+                or ".." in Path(checkpoint).parts
+            ):
+                raise ValueError("checkpoint must be a source-relative path")
+
+    def _complete_signal(
+        self, event: SignalEvent, result: SyncResult | PublishRun
+    ) -> None:
         detail = {
-            "sync": {
-                "status": result.status,
-                "completed": result.completed,
-                "bytes": result.bytes,
-                "error": result.error,
-            },
-            "publish": {
-                "discovered": published.discovered,
-                "ready": published.ready,
-                "published": published.published,
-                "deleted": published.deleted,
-                "retained": published.retained,
-                "bytes": published.bytes,
-                "waiting": published.waiting,
-                "error": published.error,
-            },
+            "mode": "publisher" if self.job.is_publisher else "normal",
+            "sync": asdict(result) if isinstance(result, SyncResult) else None,
+            "publish": asdict(result) if isinstance(result, PublishRun) else None,
         }
-        try:
-            self.signals.complete(event, status, detail)
-        except SignalError as exc:
-            self.log(f"cannot persist result for signal {event.id}: {exc}")
+        self.signals.complete(event, result.status, detail)
         self.state.signal_last_kind = event.kind
         self.state.signal_last_at = self.clock()
-        self.state.signal_last_result = status
+        self.state.signal_last_result = result.status
         self._active_signal = None
-
-    # -- one transfer ------------------------------------------------------
+        self._persist()
 
     def _needed_lifetime(self) -> float:
         return self.sas.needed_lifetime(self.state.last_duration)
 
+    def _transfer(
+        self, token: SasToken, event: SignalEvent | None, previous=None
+    ) -> SyncResult | PublishRun:
+        if not self.job.is_publisher:
+            return (
+                self._retry_after_refresh(token, previous)
+                if previous is not None
+                else self._execute(token)
+            )
+        assert self.publisher is not None
+        payload = event.payload if event and event.kind == "flush" else {}
+        return self.publisher.run(
+            token,
+            flush_checkpoint=payload.get("checkpoint"),
+            flush_settle=payload.get("settle", 1.0)
+            if event and event.kind == "flush"
+            else None,
+            sleep=self._flush_sleep,
+        )
+
+    def _flush_sleep(self, seconds: float) -> None:
+        if self._stop.wait(seconds):
+            raise InterruptedError("publication cancelled during flush settle")
+
     def run_sync(
         self, reason: str, signal_event: SignalEvent | None = None
-    ) -> SyncResult:
-        """Run one transfer end to end, including SAS refresh and recovery."""
-        now = self.clock()
+    ) -> SyncResult | PublishRun:
+        """Execute exactly one mode; share auth, lifecycle and result handling."""
+        if signal_event:
+            self._validate_signal(signal_event)
         batch = self.acc.take()
+        started = self.clock()
         self._running = True
-        self.state.state = "syncing"
-        self.state.last_reason = reason
-        self.state.last_sync_at = now
+        state = self.state
+        state.state = "publishing" if self.job.is_publisher else "syncing"
+        state.last_sync_at = started
+        state.last_reason = reason
+        self._persist()
+        result_type = PublishRun if self.job.is_publisher else SyncResult
+        try:
+            if self._stop.is_set():
+                result = result_type(status=CANCELLED)
+            else:
+                token = self.sas.ensure(started, need=self._needed_lifetime())
+                result = self._transfer(token, signal_event)
+                if result.status == AUTH_EXPIRED and self.sas.provider.refreshable:
+                    token = self.sas.ensure(
+                        self.clock(), need=self._needed_lifetime(), force=True
+                    )
+                    result = self._transfer(token, signal_event, result)
+        except SasError as exc:
+            result = result_type(status=AUTH_INVALID, error=redact(str(exc)))
+        except InterruptedError as exc:
+            result = result_type(status=CANCELLED, error=str(exc))
+        except (OSError, PublishError, AzcopyNotFound) as exc:
+            result = result_type(status=FATAL, error=redact(str(exc)))
+        finally:
+            self._running = False
+            self._child = None
+
+        result.duration = max(0.0, self.clock() - started)
+        self._finish(result, batch)
+        return result
+
+    def _finish(self, result: SyncResult | PublishRun, batch: ChangeStat) -> None:
+        state = self.state
+        now = self.clock()
+        state.last_sync_end = now
+        state.last_duration = result.duration
+        state.last_result = result.status
+        state.last_error = result.error
+        state.last_job_id = result.job_id if isinstance(result, SyncResult) else None
+        state.total_syncs += 1
+        state.backoff_until = None
+        progress = result.status in (OK, "waiting") or (
+            not self.job.is_publisher and result.status == PARTIAL
+        )
+        if result.status == CANCELLED:
+            self.acc.give_back(batch)
+            state.state = "idle"
+        elif progress:
+            state.consecutive_failures = 0
+            state.state = "idle"
+            state.total_failures += int(result.status == PARTIAL)
+        else:
+            self.acc.give_back(batch)
+            state.total_failures += 1
+            state.consecutive_failures += 1
+            state.backoff_until = now + backoff_delay(state.consecutive_failures)
+            state.state = "failed" if result.status == FATAL else "backoff"
+        if isinstance(result, PublishRun):
+            state.publish_pending, state.publish_ready = result.discovered, result.ready
+            state.published, state.deleted, state.retained = (
+                result.published,
+                result.deleted,
+                result.retained,
+            )
+            if result.published:
+                state.publish_last_at = now
+                assert self.publisher is not None
+                completed = [
+                    tx
+                    for tx in self.publisher.ledger.transactions.values()
+                    if tx.published_at is not None
+                ]
+                if completed:
+                    state.publish_last_path = max(
+                        completed, key=lambda tx: tx.published_at
+                    ).path
+        mode = "publisher" if self.job.is_publisher else "normal"
+        self.log(f"{mode} {result.status}: {result.summary()}")
+        if result.error:
+            self.log(redact(result.error))
+        append_history(
+            self.job.id,
+            {
+                "at": now,
+                "reason": state.last_reason,
+                "mode": mode,
+                "status": result.status,
+                "duration": result.duration,
+                "files": batch.files,
+                "completed": result.completed
+                if isinstance(result, SyncResult)
+                else result.published,
+                "bytes": result.bytes,
+                "error": result.error,
+                "result": asdict(result),
+            },
+        )
         self._persist()
 
-        detail = (
-            f"{batch.files} change(s), {human_bytes(batch.bytes)}"
-            if batch.files
-            else "no local changes"
+    def _policy_input(self) -> PolicyInput:
+        return PolicyInput(
+            running=self._running,
+            forced=self._forced,
+            degraded=self.acc.degraded,
+            last_end=self.state.last_sync_end,
+            backoff_until=self.state.backoff_until,
         )
-        self.log(f"sync start ({reason}; {detail})")
 
-        try:
-            token = self.sas.ensure(now, need=self._needed_lifetime())
-        except SasError as exc:
-            self.acc.give_back(batch)
-            self._running = False
-            return self._finish(
-                SyncResult(status=AUTH_INVALID, error=str(exc)), batch, reason
-            )
-
-        if (
-            self.sas.enabled
-            and token.expires_at
-            and not self.sas.provider.refreshable
-            and token.remaining(now) is not None
-            and token.remaining(now) < self.job.sas_min_remaining
-        ):
-            self.log(
-                f"warning: inline SAS expires in "
-                f"{human_duration(token.remaining(now))} and cannot be rotated."
-            )
-
-        result = self._execute(token)
-
-        if result.status == AUTH_EXPIRED and self.sas.provider.refreshable:
-            self.log("credential rejected; refreshing SAS and resuming")
-            try:
-                fresh = self.sas.ensure(
-                    self.clock(), need=self._needed_lifetime(), force=True
+    def tick(self) -> Decision:
+        self._consume_trigger_file()
+        self._claim_signal()
+        now = self.clock()
+        decision = decide(now, self.acc.snapshot(), self._policy_input(), self.cfg)
+        deadlines = []
+        if self.state.backoff_until is not None:
+            deadlines.append(self.state.backoff_until)
+        if self.job.is_publisher and self.publisher is not None:
+            if self.publisher.next_wake is not None:
+                deadlines.append(self.publisher.next_wake)
+        if deadlines and not self._running:
+            # Retry/stability deadlines obey rate limiting and backoff, but
+            # are not starved by the absence of new filesystem events.
+            wake = min(deadlines)
+            wake = max(wake, self.state.backoff_until or wake)
+            if self.state.last_sync_end is not None:
+                wake = max(wake, self.state.last_sync_end + self.cfg.min_gap)
+            if wake <= now and not decision.should_sync:
+                decision = Decision(
+                    SYNC, "retry" if self.state.backoff_until else "checkpoint ready"
                 )
-            except SasError as exc:
-                result = SyncResult(status=AUTH_INVALID, error=str(exc))
-            else:
-                result = self._retry_after_refresh(fresh, result)
-                token = fresh
+            elif decision.wake_at is None or wake < decision.wake_at:
+                decision = Decision(decision.action, decision.reason, wake)
+        self.state.next_deadline = decision.wake_at
+        if decision.should_sync and not self._stop.is_set():
+            self._forced = False
+            event = self._active_signal
+            result = self.run_sync(decision.reason, event)
+            if event:
+                self._complete_signal(event, result)
+        return decision
 
-        self._last_publish = PublishRun()
-        if result.status == OK and self.job.publish_policy().enabled:
-            flush = signal_event is not None and signal_event.kind == "flush"
-            payload = signal_event.payload if flush else {}
-            published = self.publisher.run(
-                token,
-                flush_checkpoint=payload.get("checkpoint") if flush else None,
-                flush_settle=float(payload.get("settle", 1.0)) if flush else None,
-            )
-            self._last_publish = published
-            self.state.publish_pending = published.discovered
-            self.state.publish_ready = published.ready
-            self.state.publish_last_error = published.error
-            if published.published:
-                self.state.publish_last_at = self.clock()
-                ledger = self.publisher.ledger.transactions
-                completed = [
-                    tx.path
-                    for tx in ledger.values()
-                    if tx.state in ("published", "deleted")
-                ]
-                self.state.publish_last_path = completed[-1] if completed else None
-            if published.error:
-                result.status = PARTIAL
-                result.error = published.error
-                self.log(f"publish incomplete: {published.error}")
-
-        self._running = False
-        return self._finish(result, batch, reason)
+    # -- one transfer ------------------------------------------------------
 
     def _execute(self, token: SasToken) -> SyncResult:
         argv = self.engine.build_argv(token.token or None)
@@ -1747,110 +1628,19 @@ class Supervisor:
 
     def _track_child(self, proc: subprocess.Popen) -> None:
         self._child = proc
+        if self._stop.is_set() and proc.poll() is None:
+            proc.terminate()
 
     def _azcopy_line(self, line: str) -> None:
         # azcopy's JSON stream is noisy; only surface what a human needs.
-        if '"MessageType":"Error"' in line or '"JobStatus"' in line:
-            self.log(f"azcopy: {line[:400]}")
-
-    def _finish(self, result: SyncResult, batch: ChangeStat, reason: str) -> SyncResult:
-        self._child = None
-        now = self.clock()
-        self.state.last_sync_end = now
-        self.state.last_duration = result.duration or None
-        self.state.last_result = result.status
-        self.state.last_error = result.error
-        self.state.last_job_id = result.job_id
-        self.state.total_syncs += 1
-
-        if result.status in (OK, PARTIAL):
-            if result.status == PARTIAL:
-                self.state.total_failures += 1
-                self.state.consecutive_failures += 1
-            else:
-                self.state.consecutive_failures = 0
-            self.state.backoff_until = None
-            self.state.state = "idle"
-            self.log(f"sync {result.status} ({result.summary()})")
-        elif result.status == CANCELLED:
-            self.acc.give_back(batch)
-            self.state.state = "idle"
-            self.log("sync cancelled")
-        else:
-            # Nothing reached the destination we can rely on: put the batch
-            # back so its changes still count towards the next decision.
-            self.acc.give_back(batch)
-            self.state.total_failures += 1
-            self.state.consecutive_failures += 1
-            delay = backoff_delay(self.state.consecutive_failures)
-            self.state.backoff_until = now + delay
-            self.state.state = "failed" if result.status == FATAL else "backoff"
-            self.log(
-                f"sync failed ({result.status}): "
-                f"{(result.error or 'no detail').splitlines()[-1][:300]}"
-            )
-            if result.status != FATAL:
-                self.log(f"retrying in {human_duration(delay)}")
-
-        append_history(
-            self.job.id,
-            {
-                "at": now,
-                "reason": reason,
-                "status": result.status,
-                "duration": round(result.duration, 3),
-                "files": batch.files,
-                "completed": result.completed,
-                "failed": result.failed,
-                "skipped": result.skipped,
-                "bytes": result.bytes,
-                "job_id": result.job_id,
-                "error": (result.error or "")[:500] or None,
-            },
-        )
-        self._persist()
-        return result
+        if (
+            '"MessageType":"Error"' in line
+            or '"MessageType": "Error"' in line
+            or '"JobStatus"' in line
+        ):
+            self.log(f"azcopy: {redact(line)[:400]}")
 
     # -- the loop ----------------------------------------------------------
-
-    def _policy_input(self) -> PolicyInput:
-        return PolicyInput(
-            running=self._running,
-            forced=self._forced,
-            degraded=self.acc.degraded,
-            last_end=self.state.last_sync_end,
-            backoff_until=self.state.backoff_until,
-        )
-
-    def tick(self) -> Decision:
-        """Evaluate once. Split out from run() so tests can drive it."""
-        self._consume_trigger_file()
-        self._claim_signal()
-        decision = decide(
-            self.clock(), self.acc.snapshot(), self._policy_input(), self.cfg
-        )
-        publish_wake = self.publisher.next_wake
-        if (
-            publish_wake is not None
-            and publish_wake <= self.clock()
-            and not self._running
-            and not (
-                self.state.backoff_until and self.state.backoff_until > self.clock()
-            )
-        ):
-            decision = Decision(SYNC, "checkpoint ready", self.clock())
-        elif publish_wake is not None and (
-            decision.wake_at is None or publish_wake < decision.wake_at
-        ):
-            decision = Decision(decision.action, decision.reason, publish_wake)
-        self.state.next_deadline = decision.wake_at
-        if decision.should_sync:
-            self._forced = False
-            event = self._active_signal
-            result = self.run_sync(decision.reason, event)
-            if event is not None:
-                self._complete_signal(event, result)
-        return decision
 
     def run(self) -> int:
         job = self.job
@@ -1892,8 +1682,8 @@ class Supervisor:
             self.state.watch_backend = self.watcher.backend
             self.watcher.start()
 
-        # An initial reconcile makes `azsync add` do something visible and
-        # picks up whatever changed while the daemon was down.
+        # Preserve a saved backoff across restarts; a forced first scan must
+        # not turn a repeatedly crashing service into a retry storm.
         self._forced = True
         try:
             while not self._stop.is_set():
@@ -1943,7 +1733,10 @@ def spawn_daemon(job: SyncJob) -> int:
     else:  # pragma: no cover - windows
         kwargs["creationflags"] = getattr(subprocess, "DETACHED_PROCESS", 0)
     argv = [sys.executable, str(Path(__file__).resolve()), "up", job.id]
-    proc = subprocess.Popen(argv, **kwargs)
+    try:
+        proc = subprocess.Popen(argv, **kwargs)
+    finally:
+        log.close()
     return proc.pid
 
 
@@ -2021,15 +1814,20 @@ def run_supervisor(job_id: str) -> int:
         console.print(f"[red]✗[/red] {job_id} is already running.")
         return 1
 
-    supervisor = Supervisor(job)
-    if os.name == "posix":
-        signal.signal(signal.SIGTERM, lambda *_: supervisor.request_stop())
-        signal.signal(signal.SIGINT, lambda *_: supervisor.request_stop())
-        if hasattr(signal, "SIGUSR1"):
-            signal.signal(signal.SIGUSR1, lambda *_: supervisor.request_sync())
+    previous = {}
     try:
+        supervisor = Supervisor(job)
+        if os.name == "posix":
+            for sig in (signal.SIGTERM, signal.SIGINT):
+                previous[sig] = signal.signal(sig, lambda *_: supervisor.request_stop())
+            if hasattr(signal, "SIGUSR1"):
+                previous[signal.SIGUSR1] = signal.signal(
+                    signal.SIGUSR1, lambda *_: supervisor.request_sync()
+                )
         return supervisor.run()
     finally:
+        for sig, handler in previous.items():
+            signal.signal(sig, handler)
         lock.release()
 
 
@@ -2068,6 +1866,7 @@ def _state_label(job: SyncJob) -> str:
         return "[dim]stopped[/dim]"
     return {
         "syncing": "[cyan]syncing[/cyan]",
+        "publishing": "[cyan]publishing[/cyan]",
         "backoff": "[yellow]backoff[/yellow]",
         "failed": "[red]failed[/red]",
     }.get(state.state, "[green]watching[/green]")
@@ -2135,20 +1934,6 @@ def _sync_options(fn):
                 help="Wait for writes to settle this long before transferring.",
             ),
             click.option(
-                "--batch-files",
-                type=int,
-                default=DEFAULT_BATCH_FILES,
-                show_default=True,
-                help="Transfer immediately once this many files changed.",
-            ),
-            click.option(
-                "--batch-bytes",
-                type=int,
-                default=DEFAULT_BATCH_BYTES,
-                show_default=True,
-                help="Transfer immediately once this many bytes changed.",
-            ),
-            click.option(
                 "--max-delay",
                 type=float,
                 default=DEFAULT_MAX_DELAY,
@@ -2168,13 +1953,6 @@ def _sync_options(fn):
                 default=DEFAULT_MIN_GAP,
                 show_default=True,
                 help="Minimum idle time between two transfers.",
-            ),
-            click.option(
-                "--min-files",
-                type=int,
-                default=DEFAULT_MIN_FILES,
-                show_default=True,
-                help="Don't transfer for fewer changes than this (until --max-delay).",
             ),
             click.option(
                 "--watch-mode",
@@ -2335,12 +2113,9 @@ def _job_from_options(source: Path, dest: str, opts: dict) -> SyncJob:
         sas_ttl_hours=opts["sas_ttl_hours"],
         sas_min_remaining=opts["sas_min_remaining"],
         quiet_period=opts["quiet_period"],
-        batch_files=opts["batch_files"],
-        batch_bytes=opts["batch_bytes"],
         max_delay=opts["max_delay"],
         interval=opts["interval"],
         min_gap=opts["min_gap"],
-        min_files=opts["min_files"],
         watch_mode=opts["watch_mode"],
         poll_interval=opts["poll_interval"],
         excludes=list(opts.get("excludes") or []),
@@ -2365,14 +2140,50 @@ def _job_from_options(source: Path, dest: str, opts: dict) -> SyncJob:
 
 
 def validate_job(job: SyncJob) -> None:
+    for name in ("quiet_period", "max_delay", "interval", "min_gap", "poll_interval"):
+        value = getattr(job, name)
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(value)
+            or value < 0
+            or (name in ("interval", "poll_interval") and value == 0)
+        ):
+            raise click.ClickException(
+                f"{name.replace('_', '-')} must be finite and positive"
+                if name in ("interval", "poll_interval")
+                else f"{name.replace('_', '-')} must be finite and nonnegative"
+            )
     try:
         job.publish_policy().validate(job.source_path())
     except PublishError as exc:
         raise click.ClickException(str(exc)) from exc
+    publish_modifier = (
+        bool(job.publish_excludes)
+        or job.publish_unit != "directory"
+        or job.ready_marker != ".complete"
+        or job.publish_stable != 120.0
+        or job.publish_min_age != 0.0
+        or job.publish_keep_last != 2
+        or job.publish_order != "mtime"
+        or job.after_publish != "keep"
+        or job.publish_verify != "size"
+        or job.publish_conflict != "fail"
+    )
+    if publish_modifier and not job.is_publisher:
+        raise click.ClickException(
+            "publish options need --publish-path or --publish-pattern to "
+            "select checkpoint units."
+        )
     if job.publish_policy().enabled and job.delete_destination:
         raise click.ClickException(
             "--publish-* and --delete cannot be combined: checkpoints that "
             "intentionally disappear locally would be deleted remotely next sync."
+        )
+    if job.is_publisher and job.compare_hash:
+        raise click.ClickException(
+            "--compare-hash belongs to normal sync; use --publish-verify md5 "
+            "for a publisher job."
         )
 
 
@@ -2422,7 +2233,13 @@ def cmd_add(source, dest, no_start, **opts):
         )
     save_job(job)
     save_state(job.id, RuntimeState())
-    console.print(f"[green]✓[/green] {job.id}: {job.route()}")
+    mode = "publisher" if job.is_publisher else "normal"
+    console.print(f"[green]✓[/green] {job.id} [dim]({mode})[/dim]: {job.route()}")
+    if job.is_publisher:
+        console.print(
+            "[dim]This job publishes checkpoints only. Create a separate "
+            "normal job for logs and exclude this checkpoint path there.[/dim]"
+        )
     if no_start:
         console.print(f"[dim]Start it with: usm azsync start {job.id}[/dim]")
         return
@@ -2471,8 +2288,11 @@ def cmd_ls():
     # them into uselessness. `status` always shows the full picture.
     show_source = width >= 110
     show_boot = width >= 90
+    show_mode = width >= 80
 
     columns = [("ID", {"min_width": 6})]
+    if show_mode:
+        columns.append(("mode", {"min_width": 7}))
     if show_source:
         columns.append(("source", {"min_width": 10, "max_width": 26}))
     columns += [
@@ -2480,7 +2300,7 @@ def cmd_ls():
         ("destination", {"min_width": 14, "ratio": 1}),
         ("status", {"min_width": 8}),
         ("pending", {"justify": "right", "min_width": 10}),
-        ("last sync", {"min_width": 9}),
+        ("last run", {"min_width": 9}),
         ("SAS", {"justify": "right", "min_width": 4}),
     ]
     if show_boot:
@@ -2505,6 +2325,8 @@ def cmd_ls():
         else:
             last = "[dim]never[/dim]"
         row = [job.id]
+        if show_mode:
+            row.append("publish" if job.is_publisher else "normal")
         if show_source:
             row.append(shorten_path(job.source))
         row += [
@@ -2525,7 +2347,6 @@ def cmd_ls():
 def _trigger_summary(job: SyncJob) -> str:
     return (
         f"quiet {compact_duration(job.quiet_period)} · "
-        f"batch {job.batch_files} files / {human_bytes(job.batch_bytes)} · "
         f"max-delay {compact_duration(job.max_delay)} · "
         f"heartbeat {compact_duration(job.interval)} · "
         f"min-gap {compact_duration(job.min_gap)}"
@@ -2558,9 +2379,13 @@ def cmd_status(job_id, history):
             last_sync += f" (took {human_duration(state.last_duration)})"
 
     rows = [
+        ("mode", "publisher" if job.is_publisher else "normal"),
         ("source", shorten_path(job.source)),
         ("destination", short_blob_target(job.dest)),
-        SECTION,
+        (
+            SECTION,
+            "Publisher" if job.is_publisher else "Normal sync",
+        ),
         ("status", _state_label(job)),
         ("watcher", state.watch_backend or f"{job.watch_mode} (not started)"),
         (
@@ -2573,15 +2398,23 @@ def cmd_status(job_id, history):
             if state.pending_files
             else "nothing queued",
         ),
-        ("last sync", last_sync),
-        ("syncs / failures", f"{state.total_syncs} / {state.total_failures}"),
+        ("last run", last_sync),
+        ("runs / failures", f"{state.total_syncs} / {state.total_failures}"),
+        (
+            "backoff",
+            (
+                f"{human_duration(state.backoff_until - now)} remaining"
+                if state.backoff_until and state.backoff_until > now
+                else "-"
+            ),
+        ),
         (
             "next wake",
             f"in {human_duration(state.next_deadline - now)}"
             if state.next_deadline and state.next_deadline > now
             else "-",
         ),
-        SECTION,
+        (SECTION, "Configuration"),
         (
             "credential",
             job.auth
@@ -2604,7 +2437,7 @@ def cmd_status(job_id, history):
             ",".join(policy.patterns) or "*",
         )
         rows += [
-            SECTION,
+            (SECTION, "Publication"),
             ("publish", selector),
             ("ready marker", policy.ready_marker),
             ("unit / action", f"{policy.unit} / {policy.after_publish}"),
@@ -2620,7 +2453,7 @@ def cmd_status(job_id, history):
             ("last published", state.publish_last_path or "-"),
         ]
     rows += [
-        SECTION,
+        (SECTION, "Signals"),
         ("pending signals", str(state.signal_pending)),
         (
             "last signal",
@@ -2635,11 +2468,6 @@ def cmd_status(job_id, history):
 
     if state.last_error:
         console.print(f"\n[red]last error[/red]  {redact(state.last_error)[:600]}")
-    if state.publish_last_error:
-        console.print(
-            f"\n[yellow]publish error[/yellow]  "
-            f"{redact(state.publish_last_error)[:600]}"
-        )
 
     records = read_history(job.id, history)
     if records:
@@ -2743,46 +2571,44 @@ def cmd_flush(job_id, checkpoint, settle, wait, timeout):
 
 
 def _wait_for_signal(job: SyncJob, event: SignalEvent, timeout: float) -> None:
-    result = signal_queue(job.id).wait(event.id, timeout)
+    try:
+        result = signal_queue(job.id).wait(event.id, timeout)
+    except SignalError as exc:
+        raise click.ClickException(str(exc)) from exc
     if result is None:
         console.print(
             f"[red]✗[/red] Timed out waiting for {event.kind} {event.id}; "
             "the request remains queued or running."
         )
         raise SystemExit(5)
-    detail = result.detail
-    publish = detail.get("publish") or {}
-    if result.status == OK:
-        publish_bits = []
-        if event.kind == "flush":
-            publish_bits.append(
-                f"{publish.get('published', 0)} checkpoint(s) published"
-            )
-            if publish.get("deleted"):
-                publish_bits.append(f"{publish['deleted']} deleted locally")
-            if publish.get("retained"):
-                publish_bits.append(f"{publish['retained']} retained locally")
-        console.print(
-            f"[green]✓[/green] {event.kind} complete"
-            + (f" · {ui.joined(*publish_bits)}" if publish_bits else "")
-        )
-        return
-    if result.status == "waiting":
-        waiting = publish.get("waiting") or []
-        reason = waiting[0].get("reason") if waiting else "not ready"
-        console.print(f"[yellow]![/yellow] checkpoint not published: {reason}")
-        raise SystemExit(2)
-    if result.status == PARTIAL:
-        console.print(
-            f"[yellow]![/yellow] {event.kind} partial: "
-            f"{publish.get('error') or 'some transfers failed'}"
-        )
-        raise SystemExit(3)
-    console.print(
-        f"[red]✗[/red] {event.kind} failed: "
-        f"{publish.get('error') or (detail.get('sync') or {}).get('error') or result.status}"
+    _report_result(
+        result.status,
+        result.detail.get("sync") or {"error": result.detail.get("error")},
+        result.detail.get("publish"),
+        event.kind,
     )
-    raise SystemExit(4)
+
+
+def _report_result(status: str, sync: dict, publish: dict | None, label: str) -> None:
+    data = publish if publish is not None else sync
+    bits = [f"{label} {'complete' if status == OK else status}"]
+    if publish is not None:
+        bits += [f"{publish.get('published', 0)} checkpoint(s) published"]
+        bits += [
+            f"{publish[key]} {word} locally"
+            for key, word in (("deleted", "deleted"), ("retained", "retained"))
+            if publish.get(key)
+        ]
+    if data.get("error"):
+        bits.append(redact(data["error"]))
+    waiting = data.get("waiting") or []
+    if waiting and status == "waiting":
+        bits.append(waiting[0]["reason"])
+    code = {OK: 0, "waiting": 2, PARTIAL: 3, CANCELLED: 130}.get(status, 4)
+    printer = ui.ok if code == 0 else ui.warn if code in (2, 3) else ui.fail
+    printer(ui.joined(*bits))
+    if code:
+        raise SystemExit(code)
 
 
 def _run_once(
@@ -2799,34 +2625,11 @@ def _run_once(
         result = supervisor.run_sync(reason, signal_event)
     finally:
         lock.release()
-    if result.ok:
-        console.print(f"[green]✓[/green] {result.summary()}")
-        if signal_event is not None and signal_event.kind == "flush":
-            publish = supervisor._last_publish
-            if publish.waiting and not publish.published:
-                console.print(
-                    f"[yellow]![/yellow] checkpoint not published: "
-                    f"{publish.waiting[0]['reason']}"
-                )
-                raise SystemExit(2)
-            console.print(
-                "[green]✓[/green] "
-                + ui.joined(
-                    f"{publish.published} checkpoint(s) published",
-                    (f"{publish.deleted} deleted locally" if publish.deleted else ""),
-                    (
-                        f"{publish.retained} retained locally"
-                        if publish.retained
-                        else ""
-                    ),
-                )
-            )
-        return
-    if result.status == PARTIAL:
-        console.print(f"[yellow]![/yellow] {result.summary()}")
-        return
-    raise click.ClickException(
-        f"sync {result.status}: {redact(result.error or 'no detail')[:500]}"
+    _report_result(
+        result.status,
+        asdict(result) if isinstance(result, SyncResult) else {},
+        asdict(result) if isinstance(result, PublishRun) else None,
+        signal_event.kind if signal_event else "sync",
     )
 
 
@@ -2989,15 +2792,16 @@ def cmd_dry_run(job_id):
     engine = AzcopyEngine(job)
     manager = job_sas_manager(job)
     token = manager.ensure(time.time())
-    argv = engine.build_argv(token.token or None, dry_run=True)
-    console.print(f"[dim]{redact(shlex.join(argv))}[/dim]")
-    result = engine.run(argv)
-    if result.ok:
-        console.print(f"[green]✓[/green] {result.summary()}")
-    else:
-        raise click.ClickException(redact(result.error or result.status))
     policy = job.publish_policy()
-    if policy.enabled:
+    if not job.is_publisher:
+        argv = engine.build_argv(token.token or None, dry_run=True)
+        console.print(f"[dim]{redact(shlex.join(argv))}[/dim]")
+        result = engine.run(argv)
+        if result.ok:
+            console.print(f"[green]✓[/green] {result.summary()}")
+        else:
+            raise click.ClickException(redact(result.error or result.status))
+    else:
         ledger = PublishLedger.load(publish_ledger_path(job.id))
         candidates = discover_publish_candidates(
             job.source_path(), policy, ledger, time.time()

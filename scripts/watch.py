@@ -60,7 +60,16 @@ class ChangeFlag:
         self._count = 0
         self.updated = threading.Event()
 
-    def record(self, now: float, *, size: int = 0, deleted: bool = False) -> None:
+    def record(
+        self,
+        now: float,
+        *,
+        path: str | None = None,
+        size: int = 0,
+        previous_size: int | None = None,
+        created: bool = False,
+        deleted: bool = False,
+    ) -> None:
         with self._lock:
             self._count += 1
         self.updated.set()

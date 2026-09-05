@@ -535,7 +535,16 @@ class ChangeSink(Protocol):
     backends below.
     """
 
-    def record(self, now: float, *, size: int = 0, deleted: bool = False) -> None: ...
+    def record(
+        self,
+        now: float,
+        *,
+        path: str | None = None,
+        size: int = 0,
+        previous_size: int | None = None,
+        created: bool = False,
+        deleted: bool = False,
+    ) -> None: ...
 
     def mark_degraded(self) -> None: ...
 
@@ -627,7 +636,8 @@ class InotifyWatcher(Watcher):
                 # A move shows up as one event with both ends; count the
                 # destination (that's the file azcopy will upload).
                 path = getattr(event, "dest_path", None) or event.src_path
-                if watcher._admit(path) is None:
+                rel = watcher._admit(path)
+                if rel is None:
                     return
                 size = 0
                 deleted = kind == "deleted"
@@ -636,7 +646,13 @@ class InotifyWatcher(Watcher):
                         size = os.path.getsize(path)
                     except OSError:
                         size = 0
-                watcher.acc.record(time.time(), size=size, deleted=deleted)
+                watcher.acc.record(
+                    time.time(),
+                    path=rel,
+                    size=size,
+                    created=kind in ("created", "moved"),
+                    deleted=deleted,
+                )
 
         self._observer = Observer()
         self._observer.schedule(_Handler(), str(self.root), recursive=True)
@@ -736,11 +752,22 @@ class PollingWatcher(Watcher):
         for rel, meta in index.items():
             old = previous.get(rel)
             if old is None or old != meta:
-                self.acc.record(now, size=meta[1])
+                self.acc.record(
+                    now,
+                    path=rel,
+                    size=meta[1],
+                    previous_size=old[1] if old is not None else None,
+                    created=old is None,
+                )
                 changed += 1
         for rel in previous:
             if rel not in index:
-                self.acc.record(now, deleted=True)
+                self.acc.record(
+                    now,
+                    path=rel,
+                    previous_size=previous[rel][1],
+                    deleted=True,
+                )
                 changed += 1
 
     def _loop(self) -> None:

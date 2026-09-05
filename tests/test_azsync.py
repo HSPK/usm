@@ -1,33 +1,20 @@
-"""Tests for scripts/azsync.py.
-
-The pure layers (trigger policy, exclude rendering, SAS parsing, azcopy
-argv/NDJSON/classification) are unit-tested directly. The engine and the
-supervisor are driven end to end against a *fake azcopy* — a small script
-injected via ``$USM_AZCOPY_BIN`` that replays canned NDJSON and exit codes —
-so success, partial failure, credential expiry and network backoff are all
-covered without touching Azure.
-"""
+"""Behavioral azsync regression tests; see azsync_support for fixtures."""
 
 from __future__ import annotations
-
 import json
 import os
 import stat
 import time
 from pathlib import Path
-
 import pytest
-
 import azsync
 import usm_azure
 import usm_daemon
-from usm_publish import PublishError, snapshot_unit
 from usm_signal import SignalEvent, SignalResult
 from usm_azure import (
     ExcludeSpec,
     SasError,
     SasManager,
-    SasToken,
     human_bytes,
     human_duration,
     normalize_sas,
@@ -49,9 +36,7 @@ from azsync import (
     ChangeStat,
     PolicyInput,
     PollingWatcher,
-    PublishCoordinator,
     Supervisor,
-    SyncJob,
     TriggerConfig,
     backoff_delay,
     classify_failure,
@@ -60,71 +45,25 @@ from azsync import (
     parse_azcopy_json,
 )
 
-
-def make_checkpoint(
-    job: SyncJob, name: str = "checkpoint-100", *, marker: bool = True
-) -> Path:
-    root = Path(job.source) / "checkpoints" / name
-    root.mkdir(parents=True)
-    (root / "model.bin").write_bytes(b"weights")
-    (root / "state.json").write_text("{}")
-    if marker:
-        (root / ".complete").touch()
-    return root
-
-
-# --- Fixtures --------------------------------------------------------------
-
-
-@pytest.fixture
-def state_dir(tmp_path, monkeypatch):
-    """Point every on-disk path at a throwaway directory.
-
-    The env var matters for the spawned-supervisor tests: that child is a
-    separate process and can only be redirected through the environment.
-    """
-    root = tmp_path / "azsync"
-    root.mkdir()
-    monkeypatch.setattr(azsync, "STATE_DIR", root)
-    monkeypatch.setenv("USM_AZSYNC_STATE_DIR", str(root))
-    return root
-
-
-def make_job(tmp_path, **overrides) -> SyncJob:
-    source = overrides.pop("source", None) or tmp_path / "src"
-    Path(source).mkdir(parents=True, exist_ok=True)
-    job = SyncJob(
-        id=overrides.pop("id", "job1"),
-        source=str(source),
-        dest=overrides.pop("dest", "https://acct.blob.core.windows.net/bucket/path"),
-    )
-    for key, value in overrides.items():
-        setattr(job, key, value)
-    return job
-
-
-def sas_for(expires_in: float, *, now: float | None = None) -> str:
-    import datetime
-
-    now = now if now is not None else time.time()
-    stamp = datetime.datetime.fromtimestamp(
-        now + expires_in, datetime.timezone.utc
-    ).strftime("%Y-%m-%dT%H:%M:%SZ")
-    return f"sv=2021-08-06&se={stamp}&sp=rwdl&sig=ABC123"
-
-
-# --- Trigger policy --------------------------------------------------------
+from azsync_support import (
+    _StubProvider,
+    build_supervisor,
+    envelope,
+    fail_step,
+    invoke,
+    make_job,
+    ok_step,
+    sas_for,
+    wait_until,
+)
 
 
 class TestTriggerPolicy:
     CFG = TriggerConfig(
         quiet_period=5.0,
-        batch_files=200,
-        batch_bytes=256 * 1024 * 1024,
         max_delay=300.0,
         interval=3600.0,
         min_gap=30.0,
-        min_files=1,
     )
 
     def _acc(self, files=0, size=0, first=None, last=None) -> ChangeStat:
@@ -174,24 +113,23 @@ class TestTriggerPolicy:
         d = decide(1006, self._acc(3, first=1000, last=1004), rt, self.CFG)
         assert d.action == WAIT and d.wake_at == 1009
 
-    def test_volume_fires_while_still_churning(self):
-        # Still being written (last_at == now) but 200 files is enough.
+    def test_many_events_do_not_bypass_time_policy(self):
         d = decide(
             1000,
-            self._acc(200, first=999, last=1000),
+            self._acc(200_000, first=999, last=1000),
             PolicyInput(last_end=0),
             self.CFG,
         )
-        assert d.action == SYNC and d.reason == "volume"
+        assert d.action == WAIT and d.reason == "debounce"
 
-    def test_byte_volume_fires(self):
+    def test_many_bytes_do_not_bypass_time_policy(self):
         d = decide(
             1000,
-            self._acc(2, size=300 * 1024 * 1024, first=999, last=1000),
+            self._acc(2, size=10 * 1024**4, first=999, last=1000),
             PolicyInput(last_end=0),
             self.CFG,
         )
-        assert d.action == SYNC and d.reason == "volume"
+        assert d.action == WAIT and d.reason == "debounce"
 
     def test_max_delay_bounds_staleness_under_constant_churn(self):
         # Writes never stop, so the quiet period never elapses.
@@ -219,13 +157,10 @@ class TestTriggerPolicy:
         )
         assert d.action == SYNC and d.reason == "degraded"
 
-    def test_min_files_floor_defers_to_max_delay(self):
-        cfg = TriggerConfig(min_files=5, quiet_period=5, max_delay=300, interval=3600)
+    def test_one_change_is_enough_once_quiet(self):
+        cfg = TriggerConfig(quiet_period=5, max_delay=300, interval=3600)
         rt = PolicyInput(last_end=0)
-        # Two files, quiet — below the floor, so wait for max-delay instead.
-        d = decide(1010, self._acc(2, first=1000, last=1000), rt, cfg)
-        assert d.action == WAIT and d.wake_at == 1300
-        d = decide(1010, self._acc(5, first=1000, last=1000), rt, cfg)
+        d = decide(1010, self._acc(1, first=1000, last=1000), rt, cfg)
         assert d.action == SYNC and d.reason == "quiet"
 
     def test_first_run_has_no_last_end(self):
@@ -286,8 +221,128 @@ class TestChangeAccumulator:
         acc.record(1, deleted=True)
         assert acc.take().deletes == 1
 
+    def test_repeated_events_for_one_path_count_as_one_file(self):
+        acc = ChangeAccumulator()
+        for index in range(500):
+            acc.record(index, path="train.log", size=1000 + index)
+        assert acc.snapshot().files == 1
 
-# --- Excludes --------------------------------------------------------------
+    def test_first_modification_does_not_count_the_whole_existing_file(self):
+        """A first event for a 1GiB log must not instantly hit batch-bytes."""
+        acc = ChangeAccumulator()
+        acc.record(1, path="train.log", size=1 << 30)
+        stat = acc.snapshot()
+        assert stat.files == 1 and stat.bytes == 0
+
+    def test_created_file_counts_its_full_size(self):
+        acc = ChangeAccumulator()
+        acc.record(1, path="checkpoint.tmp", size=4096, created=True)
+        assert acc.snapshot().bytes == 4096
+
+    def test_append_counts_only_growth(self):
+        acc = ChangeAccumulator()
+        acc.record(1, path="train.log", size=1000)
+        acc.record(2, path="train.log", size=1012)
+        assert acc.snapshot().bytes == 12
+
+    def test_polling_previous_size_gives_first_delta(self):
+        acc = ChangeAccumulator()
+        acc.record(
+            1,
+            path="train.log",
+            size=1200,
+            previous_size=1000,
+        )
+        assert acc.snapshot().bytes == 200
+
+    def test_several_appends_sum_real_growth(self):
+        acc = ChangeAccumulator()
+        acc.record(1, path="train.log", size=1000)
+        for size in (1010, 1030, 1035):
+            acc.record(size, path="train.log", size=size)
+        stat = acc.snapshot()
+        assert stat.files == 1 and stat.bytes == 35
+
+    def test_truncation_never_subtracts_bytes(self):
+        acc = ChangeAccumulator()
+        acc.record(1, path="train.log", size=1000)
+        acc.record(2, path="train.log", size=100)
+        assert acc.snapshot().bytes == 0
+
+    def test_two_paths_count_as_two_files(self):
+        acc = ChangeAccumulator()
+        acc.record(1, path="a.log", size=10)
+        acc.record(2, path="b.log", size=10)
+        assert acc.snapshot().files == 2
+
+    def test_take_clears_dirty_paths_but_keeps_size_baseline(self):
+        acc = ChangeAccumulator()
+        acc.record(1, path="train.log", size=1000)
+        acc.take()
+        acc.record(2, path="train.log", size=1025)
+        stat = acc.snapshot()
+        assert stat.files == 1 and stat.bytes == 25
+
+    def test_delete_is_counted_once_per_path(self):
+        acc = ChangeAccumulator()
+        acc.record(1, path="old.log", size=100)
+        acc.record(2, path="old.log", deleted=True)
+        acc.record(3, path="old.log", deleted=True)
+        stat = acc.snapshot()
+        assert stat.files == 1 and stat.deletes == 1
+
+    def test_delete_then_recreate_counts_new_bytes(self):
+        acc = ChangeAccumulator()
+        acc.record(1, path="train.log", size=1000)
+        acc.take()
+        acc.record(2, path="train.log", deleted=True)
+        acc.record(3, path="train.log", size=20, created=True)
+        stat = acc.snapshot()
+        assert stat.files == 1 and stat.deletes == 1 and stat.bytes == 20
+
+    def test_hot_log_does_not_trip_volume_thresholds(self):
+        acc = ChangeAccumulator()
+        now = 1000.0
+        acc.record(now - 100, path="train.log", size=1 << 30)
+        for index in range(500):
+            acc.record(
+                now,
+                path="train.log",
+                size=(1 << 30) + index,
+            )
+        stat = acc.snapshot()
+        assert stat.files == 1
+        assert stat.bytes == 499
+        decision = decide(
+            now,
+            stat,
+            PolicyInput(last_end=900),
+            TestTriggerPolicy.CFG,
+        )
+        assert decision.action == WAIT
+
+    def test_hot_log_still_syncs_at_max_delay(self):
+        acc = ChangeAccumulator()
+        acc.record(1000, path="train.log", size=1 << 30)
+        acc.record(1300, path="train.log", size=(1 << 30) + 1)
+        decision = decide(
+            1300,
+            acc.snapshot(),
+            PolicyInput(last_end=900),
+            TestTriggerPolicy.CFG,
+        )
+        assert decision.action == SYNC and decision.reason == "max-delay"
+
+    def test_hot_log_syncs_after_it_becomes_quiet(self):
+        acc = ChangeAccumulator()
+        acc.record(1000, path="train.log", size=1 << 30)
+        decision = decide(
+            1005,
+            acc.snapshot(),
+            PolicyInput(last_end=900),
+            TestTriggerPolicy.CFG,
+        )
+        assert decision.action == SYNC and decision.reason == "quiet"
 
 
 class TestExcludeSpec:
@@ -375,9 +430,6 @@ class TestExcludeSpec:
         assert any(r.match(rel) for r in regexes)
 
 
-# --- SAS -------------------------------------------------------------------
-
-
 class TestSasParsing:
     def test_parse_expiry(self):
         token = "sv=2021-08-06&se=2030-01-02T03:04:05Z&sig=x"
@@ -442,21 +494,6 @@ class TestSasParsing:
     def test_split_leaves_non_sas_query_alone(self):
         url = "https://a.blob.core.windows.net/c/d?snapshot=1"
         assert split_sas(url) == (url, None)
-
-
-class _StubProvider(usm_azure.SasProvider):
-    kind = "stub"
-
-    def __init__(self, tokens):
-        self.tokens = list(tokens)
-        self.calls = 0
-
-    def fetch(self):
-        self.calls += 1
-        value = self.tokens[min(self.calls - 1, len(self.tokens) - 1)]
-        if isinstance(value, Exception):
-            raise value
-        return value, None
 
 
 class TestSasProviders:
@@ -665,15 +702,6 @@ class TestSasManager:
         assert provider.calls == 2
 
 
-# --- azcopy engine ---------------------------------------------------------
-
-
-def envelope(kind: str, content) -> str:
-    if not isinstance(content, str):
-        content = json.dumps(content)
-    return json.dumps({"MessageType": kind, "MessageContent": content})
-
-
 class TestAzcopyParsing:
     def test_end_of_job_summary(self):
         summary, errors = parse_azcopy_json(
@@ -854,88 +882,6 @@ class TestAzcopyArgv:
         assert engine.env()["AZCOPY_AUTO_LOGIN_TYPE"] == "AZCLI"
 
 
-# --- Fake azcopy driven engine/supervisor ---------------------------------
-
-
-FAKE_AZCOPY = '''#!/usr/bin/env python3
-"""Replay a scripted azcopy response. Driven by $FAKE_PLAN (a JSON file)."""
-import json, os, sys, time
-
-plan_path = os.environ["FAKE_PLAN"]
-with open(plan_path) as fh:
-    plan = json.load(fh)
-
-calls_path = plan_path + ".calls"
-calls = []
-if os.path.exists(calls_path):
-    with open(calls_path) as fh:
-        calls = json.load(fh)
-calls.append(sys.argv[1:])
-with open(calls_path, "w") as fh:
-    json.dump(calls, fh)
-
-steps = plan["steps"]
-step = steps[min(len(calls) - 1, len(steps) - 1)]
-time.sleep(step.get("sleep", 0))
-for line in step.get("lines", []):
-    print(json.dumps(line), flush=True)
-sys.exit(step.get("exit", 0))
-'''
-
-
-@pytest.fixture
-def fake_azcopy(tmp_path, monkeypatch):
-    """Install a scripted azcopy and return a helper to program it."""
-    binary = tmp_path / "fake-azcopy"
-    binary.write_text(FAKE_AZCOPY)
-    binary.chmod(0o755)
-    plan_path = tmp_path / "plan.json"
-    monkeypatch.setenv("USM_AZCOPY_BIN", str(binary))
-    monkeypatch.setenv("FAKE_PLAN", str(plan_path))
-
-    class Fake:
-        path = str(binary)
-
-        def program(self, *steps):
-            plan_path.write_text(json.dumps({"steps": list(steps)}))
-
-        @property
-        def calls(self):
-            calls_file = Path(str(plan_path) + ".calls")
-            if not calls_file.exists():
-                return []
-            return json.loads(calls_file.read_text())
-
-    fake = Fake()
-    fake.program({"lines": [], "exit": 0})
-    return fake
-
-
-def ok_step(completed=2, size=2048, job_id="job-1", **extra):
-    summary = {
-        "JobID": job_id,
-        "TransfersCompleted": completed,
-        "TransfersFailed": 0,
-        "TransfersSkipped": 0,
-        "TotalBytesTransferred": size,
-        "JobStatus": "Completed",
-    }
-    summary.update(extra)
-    return {
-        "lines": [{"MessageType": "EndOfJob", "MessageContent": json.dumps(summary)}],
-        "exit": 0,
-    }
-
-
-def fail_step(message, *, exit_code=1, job_id="job-1", **summary_extra):
-    summary = {"JobID": job_id, "ErrorMsg": message, "JobStatus": "Failed"}
-    summary.update(summary_extra)
-    return {
-        "lines": [{"MessageType": "EndOfJob", "MessageContent": json.dumps(summary)}],
-        "exit": exit_code,
-    }
-
-
 class TestEngineAgainstFakeAzcopy:
     def test_successful_run(self, tmp_path, fake_azcopy):
         fake_azcopy.program(ok_step(completed=3, size=4096))
@@ -961,38 +907,6 @@ class TestEngineAgainstFakeAzcopy:
         engine = AzcopyEngine(job, state_dir=tmp_path / "wd")
         result = engine.run(engine.build_argv("sv=1&sig=abc"))
         assert result.status == AUTH_EXPIRED
-
-
-# --- Supervisor ------------------------------------------------------------
-
-
-class _Clock:
-    def __init__(self, start=1_000_000.0):
-        self.now = start
-
-    def __call__(self):
-        return self.now
-
-    def advance(self, secs):
-        self.now += secs
-
-
-def build_supervisor(tmp_path, fake_azcopy, state_dir, **job_kw):
-    job = make_job(tmp_path, **job_kw)
-    azsync.save_job(job)
-    clock = _Clock()
-    provider = _StubProvider([sas_for(7200, now=clock.now)])
-    manager = SasManager(
-        provider, tmp_path / "cache.sas", min_remaining=job.sas_min_remaining
-    )
-    supervisor = Supervisor(
-        job,
-        engine=AzcopyEngine(job, state_dir=tmp_path / "wd"),
-        sas=manager,
-        clock=clock,
-        log=lambda _m: None,
-    )
-    return supervisor, clock, provider
 
 
 class TestSupervisorSync:
@@ -1160,9 +1074,6 @@ class TestSupervisorSync:
         assert not azsync.trigger_path(sup.job.id).exists()
 
 
-# --- Watcher ---------------------------------------------------------------
-
-
 class TestPollingWatcher:
     def _watcher(self, root, acc, **kw):
         return PollingWatcher(Path(root), ExcludeSpec.build(), acc, **kw)
@@ -1287,9 +1198,6 @@ class TestInotifyWatcher:
         assert acc.snapshot().files == 0
 
 
-# --- Store & helpers -------------------------------------------------------
-
-
 class TestStore:
     def test_roundtrip(self, tmp_path, state_dir):
         job = make_job(tmp_path, id="round", excludes=["*.log"])
@@ -1385,20 +1293,6 @@ class TestFormatting:
     )
     def test_human_duration(self, value, expected):
         assert human_duration(value) == expected
-
-
-# --- CLI -------------------------------------------------------------------
-
-
-@pytest.fixture
-def runner():
-    import click.testing
-
-    return click.testing.CliRunner()
-
-
-def invoke(runner, args, **kw):
-    return runner.invoke(azsync.cli, args, **kw)
 
 
 class TestCli:
@@ -1538,8 +1432,6 @@ class TestCli:
                 "--no-start",
                 "--quiet-period",
                 "2",
-                "--batch-files",
-                "50",
                 "--max-delay",
                 "60",
                 "--interval",
@@ -1553,7 +1445,7 @@ class TestCli:
         )
         assert result.exit_code == 0, result.output
         job = azsync.load_job("src-bucket")
-        assert (job.quiet_period, job.batch_files, job.max_delay) == (2.0, 50, 60.0)
+        assert (job.quiet_period, job.max_delay) == (2.0, 60.0)
         assert (job.interval, job.min_gap) == (900.0, 10.0)
         assert job.delete_destination is True
         assert "*.log" in job.excludes
@@ -1721,18 +1613,6 @@ class TestServiceRendering:
         assert azsync.SERVICE.label("alpha").endswith(".azsync.alpha")
 
 
-# --- Live daemon -----------------------------------------------------------
-
-
-def wait_until(predicate, timeout=25.0, interval=0.1):
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        if predicate():
-            return True
-        time.sleep(interval)
-    return False
-
-
 class TestDaemonLifecycle:
     """Spawn the real supervisor process against the fake azcopy."""
 
@@ -1748,7 +1628,6 @@ class TestDaemonLifecycle:
             min_gap=0.4,
             max_delay=5.0,
             interval=3600.0,
-            batch_files=200,
             watch_mode="poll",
             poll_interval=0.3,
             **kw,
@@ -1872,9 +1751,6 @@ class TestDaemonLifecycle:
         assert usm_daemon.pid_alive(os.getpid()) is True
         assert usm_daemon.pid_alive(None) is False
         assert usm_daemon.pid_alive(999_999_999) is False
-
-
-# --- Binary resolution, destinations, service detection --------------------
 
 
 class TestAzcopyResolution:
@@ -2013,9 +1889,6 @@ class TestDryRunCommand:
         result = invoke(runner, ["dry-run", "alpha"])
         assert result.exit_code == 0, result.output
         assert "--dry-run" in fake_azcopy.calls[0]
-
-
-# --- Error paths, boundaries and output quality ---------------------------
 
 
 class TestStoreResilience:
@@ -2317,7 +2190,7 @@ class TestCliErrorPaths:
         )
         self._define(tmp_path, id="j", auth="aad")
         result = invoke(runner, ["sync", "j"])
-        assert result.exit_code == 0 and "failed" in result.output
+        assert result.exit_code == 3 and "partial" in result.output
 
     def test_enable_reports_a_service_failure(
         self, tmp_path, state_dir, runner, monkeypatch
@@ -2646,10 +2519,10 @@ class TestStatusLabels:
             azsync.save_state(
                 f"j{i}",
                 azsync.RuntimeState(
-                    last_sync_end=time.time() - 30,
-                    last_result=result,
                     pending_files=2,
                     pending_bytes=100,
+                    last_sync_end=time.time() - 30,
+                    last_result=result,
                 ),
             )
         out = invoke(runner, ["ls"]).output
@@ -2700,1265 +2573,3 @@ class TestSupervisorLoop:
         assert supervisor.run() == 0
         state = azsync.load_state("loop2")
         assert state.total_syncs >= 2 and state.total_failures == 0
-
-
-# --- Gated checkpoint publication -----------------------------------------
-
-
-class FakePublishEngine:
-    def __init__(self, job, results=None, on_run=None, remote_marker=None):
-        self.job = job
-        self.results = list(results or [])
-        self.on_run = on_run
-        self.remote_marker = remote_marker
-        self.calls = []
-
-    def remote_exists(self, remote_relpath, sas):
-        self.calls.append(["probe", remote_relpath, sas or ""])
-        if isinstance(self.remote_marker, Exception):
-            raise self.remote_marker
-        return bool(self.remote_marker)
-
-    def remove_remote(self, remote_relpath, sas):
-        self.calls.append(["remove", remote_relpath, sas or ""])
-        self.remote_marker = False
-        return azsync.SyncResult(status=OK)
-
-    def build_publish_argv(self, snapshot, sas, *, marker, dry_run=False):
-        return ["payload", snapshot.relpath, marker, sas or "", str(dry_run)]
-
-    def build_exact_copy_argv(self, source, remote_relpath, sas):
-        return ["exact", str(source), remote_relpath, sas or ""]
-
-    def run(self, argv, **kwargs):
-        self.calls.append(argv)
-        if self.on_run:
-            self.on_run(argv, len(self.calls))
-        if self.results:
-            return self.results.pop(0)
-        if argv[0] == "payload":
-            root = Path(self.job.source) / argv[1]
-            files = [
-                path
-                for path in root.rglob("*")
-                if path.is_file() and path.name != self.job.ready_marker
-            ]
-            return azsync.SyncResult(
-                status=OK,
-                completed=len(files),
-                bytes=sum(path.stat().st_size for path in files),
-            )
-        return azsync.SyncResult(status=OK, completed=1)
-
-
-def publish_job(tmp_path, **overrides):
-    defaults = {
-        "publish_paths": ["checkpoints"],
-        "publish_patterns": ["checkpoint-*"],
-        "publish_unit": "directory",
-        "ready_marker": ".complete",
-        "publish_stable": 0,
-        "publish_keep_last": 0,
-    }
-    defaults.update(overrides)
-    return make_job(tmp_path, **defaults)
-
-
-class TestRetainLaneExcludesCheckpoints:
-    def test_publish_path_is_excluded_from_sync(self, tmp_path):
-        job = publish_job(tmp_path)
-        flags = AzcopyEngine(job, binary="azcopy").build_argv(None)
-        joined = " ".join(flags)
-        assert "checkpoints" in joined
-
-    def test_quarantine_is_always_excluded(self, tmp_path):
-        job = publish_job(tmp_path)
-        assert ".azsync-moved" in " ".join(
-            AzcopyEngine(job, binary="azcopy").build_argv(None)
-        )
-
-    def test_logs_outside_checkpoint_are_not_excluded(self, tmp_path):
-        job = publish_job(tmp_path)
-        flags = AzcopyEngine(job, binary="azcopy").build_argv(None)
-        assert "train.log" not in " ".join(flags)
-
-    def test_plain_jobs_keep_the_old_excludes(self, tmp_path):
-        job = make_job(tmp_path)
-        assert ".azsync-moved" not in " ".join(
-            AzcopyEngine(job, binary="azcopy").build_argv(None)
-        )
-
-    def test_pattern_only_policy_excludes_that_pattern(self, tmp_path):
-        job = make_job(tmp_path, publish_patterns=["*.ckpt"])
-        assert "*.ckpt" in " ".join(AzcopyEngine(job, binary="azcopy").build_argv(None))
-
-    def test_watcher_still_sees_checkpoint_namespace(self, tmp_path):
-        job = publish_job(tmp_path)
-        spec = job.watch_exclude_spec()
-        assert not spec.matches("checkpoints/checkpoint-1/.complete")
-
-    def test_watcher_ignores_our_quarantine(self, tmp_path):
-        job = publish_job(tmp_path)
-        assert job.watch_exclude_spec().matches(
-            ".azsync-moved/tx/checkpoints/checkpoint-1/model.bin"
-        )
-
-
-class TestPublishArgv:
-    def test_payload_uses_copy_not_sync(self, tmp_path):
-        job = publish_job(tmp_path)
-        root = make_checkpoint(job)
-        snap, _ = snapshot_unit(Path(job.source), root, job.publish_policy())
-        argv = AzcopyEngine(job, binary="azcopy").build_publish_argv(
-            snap, "sig=x", marker=".complete"
-        )
-        assert argv[1] == "copy"
-
-    def test_payload_is_limited_to_the_checkpoint(self, tmp_path):
-        job = publish_job(tmp_path)
-        root = make_checkpoint(job)
-        snap, _ = snapshot_unit(Path(job.source), root, job.publish_policy())
-        argv = AzcopyEngine(job, binary="azcopy").build_publish_argv(
-            snap, None, marker=".complete"
-        )
-        index = argv.index("--include-path")
-        assert argv[index + 1] == "checkpoints/checkpoint-100"
-
-    def test_directory_payload_excludes_marker(self, tmp_path):
-        job = publish_job(tmp_path)
-        root = make_checkpoint(job)
-        snap, _ = snapshot_unit(Path(job.source), root, job.publish_policy())
-        argv = AzcopyEngine(job, binary="azcopy").build_publish_argv(
-            snap, None, marker=".complete"
-        )
-        assert argv[argv.index("--exclude-pattern") + 1] == ".complete"
-
-    def test_file_payload_excludes_its_sidecar_marker(self, tmp_path):
-        job = publish_job(
-            tmp_path,
-            publish_unit="file",
-            publish_patterns=["*.ckpt"],
-        )
-        path = Path(job.source) / "checkpoints" / "model.ckpt"
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(b"x")
-        path.with_name("model.ckpt.complete").touch()
-        snap, _ = snapshot_unit(Path(job.source), path, job.publish_policy())
-        argv = AzcopyEngine(job, binary="azcopy").build_publish_argv(
-            snap, None, marker=".complete"
-        )
-        assert argv[argv.index("--exclude-pattern") + 1] == "model.ckpt.complete"
-
-    def test_md5_mode_stores_md5(self, tmp_path):
-        job = publish_job(tmp_path, publish_verify="md5")
-        root = make_checkpoint(job)
-        snap, _ = snapshot_unit(Path(job.source), root, job.publish_policy())
-        assert "--put-md5" in AzcopyEngine(job, binary="azcopy").build_publish_argv(
-            snap, None, marker=".complete"
-        )
-
-    def test_exact_copy_url_encodes_every_segment(self, tmp_path):
-        job = publish_job(tmp_path)
-        argv = AzcopyEngine(job, binary="azcopy").build_exact_copy_argv(
-            tmp_path / "marker", "checkpoints/a b/完成", "sig=x"
-        )
-        assert "a%20b/%E5%AE%8C%E6%88%90" in argv[3]
-        assert "sig=x" in argv[3]
-
-    def test_exact_copy_never_uses_recursive(self, tmp_path):
-        job = publish_job(tmp_path)
-        argv = AzcopyEngine(job, binary="azcopy").build_exact_copy_argv(
-            tmp_path / "marker", "x/.complete", None
-        )
-        assert "--recursive" not in argv
-
-    def test_payload_dry_run(self, tmp_path):
-        job = publish_job(tmp_path)
-        root = make_checkpoint(job)
-        snap, _ = snapshot_unit(Path(job.source), root, job.publish_policy())
-        assert "--dry-run" in AzcopyEngine(job, binary="azcopy").build_publish_argv(
-            snap, None, marker=".complete", dry_run=True
-        )
-
-
-class TestRemoteMarkerProbe:
-    def _completed(self, argv, code=0, stdout="", stderr=""):
-        return azsync.subprocess.CompletedProcess(argv, code, stdout, stderr)
-
-    def test_existing_marker(self, tmp_path, monkeypatch):
-        job = publish_job(tmp_path)
-        monkeypatch.setattr(
-            azsync.subprocess,
-            "run",
-            lambda argv, **kw: self._completed(
-                argv, stdout='{"MessageType":"ListObject"}'
-            ),
-        )
-        assert AzcopyEngine(job, binary="azcopy").remote_exists(
-            "checkpoints/one/.complete", None
-        )
-
-    def test_empty_success_means_absent(self, tmp_path, monkeypatch):
-        job = publish_job(tmp_path)
-        monkeypatch.setattr(
-            azsync.subprocess,
-            "run",
-            lambda argv, **kw: self._completed(argv),
-        )
-        assert not AzcopyEngine(job, binary="azcopy").remote_exists(
-            "checkpoints/one/.complete", None
-        )
-
-    @pytest.mark.parametrize(
-        "message",
-        [
-            "BlobNotFound",
-            "blob not found",
-            "the specified blob does not exist",
-            "statuscode=404",
-            "status code: 404",
-        ],
-    )
-    def test_missing_marker_shapes(self, tmp_path, monkeypatch, message):
-        job = publish_job(tmp_path)
-        monkeypatch.setattr(
-            azsync.subprocess,
-            "run",
-            lambda argv, **kw: self._completed(argv, 1, stderr=message),
-        )
-        assert not AzcopyEngine(job, binary="azcopy").remote_exists(
-            "checkpoints/one/.complete", "sig=x"
-        )
-
-    def test_auth_or_network_failure_is_not_treated_as_absent(
-        self, tmp_path, monkeypatch
-    ):
-        job = publish_job(tmp_path)
-        monkeypatch.setattr(
-            azsync.subprocess,
-            "run",
-            lambda argv, **kw: self._completed(argv, 1, stderr="authentication failed"),
-        )
-        with pytest.raises(PublishError, match="authentication"):
-            AzcopyEngine(job, binary="azcopy").remote_exists(
-                "checkpoints/one/.complete", None
-            )
-
-    def test_sas_is_redacted_from_probe_failure(self, tmp_path, monkeypatch):
-        job = publish_job(tmp_path)
-        secret = "super-secret-signature"
-        monkeypatch.setattr(
-            azsync.subprocess,
-            "run",
-            lambda argv, **kw: self._completed(
-                argv, 1, stderr=f"auth failed sig={secret}"
-            ),
-        )
-        with pytest.raises(PublishError) as raised:
-            AzcopyEngine(job, binary="azcopy").remote_exists(
-                "checkpoints/one/.complete", f"sig={secret}"
-            )
-        assert secret not in str(raised.value)
-
-    def test_probe_uses_machine_readable_json(self, tmp_path, monkeypatch):
-        job = publish_job(tmp_path)
-        calls = []
-
-        def run(argv, **kwargs):
-            calls.append(argv)
-            return self._completed(argv)
-
-        monkeypatch.setattr(azsync.subprocess, "run", run)
-        AzcopyEngine(job, binary="azcopy").remote_exists(
-            "checkpoints/one/.complete", None
-        )
-        assert "--machine-readable" in calls[0]
-        assert "--output-type=json" in calls[0]
-
-
-class TestPublishCoordinator:
-    TOKEN = SasToken("sig=x", None)
-
-    def coordinator(self, job, engine, state_dir):
-        return PublishCoordinator(
-            job,
-            engine,
-            ledger_path=state_dir / "ledger.json",
-            clock=time.time,
-            log=lambda _message: None,
-        )
-
-    def test_payload_manifest_marker_order(self, tmp_path, state_dir):
-        job = publish_job(tmp_path)
-        make_checkpoint(job)
-        engine = FakePublishEngine(job)
-        result = self.coordinator(job, engine, state_dir).run(self.TOKEN)
-        assert result.published == 1
-        assert engine.calls[0][0] == "probe"
-        assert engine.calls[1][0] == "payload"
-        assert engine.calls[2][2].endswith(".azsync-manifest.json")
-        assert engine.calls[3][2].endswith(".complete")
-
-    def test_successful_keep_leaves_local_checkpoint(self, tmp_path, state_dir):
-        job = publish_job(tmp_path)
-        root = make_checkpoint(job)
-        result = self.coordinator(job, FakePublishEngine(job), state_dir).run(
-            self.TOKEN
-        )
-        assert result.published == 1 and result.deleted == 0
-        assert root.exists()
-
-    def test_successful_delete_removes_local_checkpoint(self, tmp_path, state_dir):
-        job = publish_job(tmp_path, after_publish="delete")
-        root = make_checkpoint(job)
-        result = self.coordinator(job, FakePublishEngine(job), state_dir).run(
-            self.TOKEN
-        )
-        assert result.published == 1 and result.deleted == 1
-        assert not root.exists()
-
-    def test_payload_failure_never_uploads_marker(self, tmp_path, state_dir):
-        job = publish_job(tmp_path)
-        root = make_checkpoint(job)
-        engine = FakePublishEngine(
-            job, [azsync.SyncResult(status=NETWORK, error="offline")]
-        )
-        result = self.coordinator(job, engine, state_dir).run(self.TOKEN)
-        assert result.published == 0 and result.error == "offline"
-        assert [call[0] for call in engine.calls] == ["probe", "payload"]
-        assert root.exists()
-
-    def test_partial_payload_never_uploads_marker(self, tmp_path, state_dir):
-        job = publish_job(tmp_path)
-        root = make_checkpoint(job)
-        engine = FakePublishEngine(
-            job,
-            [azsync.SyncResult(status=PARTIAL, completed=1, failed=1, bytes=7)],
-        )
-        result = self.coordinator(job, engine, state_dir).run(self.TOKEN)
-        assert result.published == 0 and root.exists()
-        assert [call[0] for call in engine.calls] == ["probe", "payload"]
-
-    def test_short_file_count_fails_size_verification(self, tmp_path, state_dir):
-        job = publish_job(tmp_path)
-        root = make_checkpoint(job)
-        engine = FakePublishEngine(
-            job, [azsync.SyncResult(status=OK, completed=1, bytes=999)]
-        )
-        result = self.coordinator(job, engine, state_dir).run(self.TOKEN)
-        assert "verification failed" in result.error
-        assert root.exists()
-
-    def test_short_byte_count_fails_size_verification(self, tmp_path, state_dir):
-        job = publish_job(tmp_path)
-        root = make_checkpoint(job)
-        engine = FakePublishEngine(
-            job, [azsync.SyncResult(status=OK, completed=99, bytes=1)]
-        )
-        result = self.coordinator(job, engine, state_dir).run(self.TOKEN)
-        assert "verification failed" in result.error
-        assert root.exists()
-
-    def test_azcopy_verify_only_needs_success(self, tmp_path, state_dir):
-        job = publish_job(tmp_path, publish_verify="azcopy")
-        make_checkpoint(job)
-        engine = FakePublishEngine(
-            job,
-            [
-                azsync.SyncResult(status=OK),
-                azsync.SyncResult(status=OK),
-                azsync.SyncResult(status=OK),
-            ],
-        )
-        assert self.coordinator(job, engine, state_dir).run(self.TOKEN).published == 1
-
-    def test_manifest_failure_never_uploads_marker(self, tmp_path, state_dir):
-        job = publish_job(tmp_path)
-        root = make_checkpoint(job)
-        payload = azsync.SyncResult(status=OK, completed=2, bytes=9)
-        engine = FakePublishEngine(
-            job, [payload, azsync.SyncResult(status=NETWORK, error="manifest")]
-        )
-        result = self.coordinator(job, engine, state_dir).run(self.TOKEN)
-        assert result.error == "manifest"
-        assert [call[0] for call in engine.calls] == [
-            "probe",
-            "payload",
-            "exact",
-        ]
-        assert root.exists()
-
-    def test_marker_failure_keeps_local_checkpoint(self, tmp_path, state_dir):
-        job = publish_job(tmp_path)
-        root = make_checkpoint(job)
-        payload = azsync.SyncResult(status=OK, completed=2, bytes=9)
-        engine = FakePublishEngine(
-            job,
-            [
-                payload,
-                azsync.SyncResult(status=OK),
-                azsync.SyncResult(status=NETWORK, error="marker"),
-            ],
-        )
-        result = self.coordinator(job, engine, state_dir).run(self.TOKEN)
-        assert result.error == "marker" and root.exists()
-
-    def test_change_during_payload_keeps_local_and_no_marker(self, tmp_path, state_dir):
-        job = publish_job(tmp_path)
-        root = make_checkpoint(job)
-
-        def change(argv, call):
-            if argv[0] == "payload":
-                (root / "model.bin").write_bytes(b"changed during upload")
-
-        engine = FakePublishEngine(job, on_run=change)
-        result = self.coordinator(job, engine, state_dir).run(self.TOKEN)
-        assert "changed" in result.error
-        assert [call[0] for call in engine.calls] == ["probe", "payload"]
-        assert root.exists()
-
-    def test_change_after_manifest_keeps_local_and_no_marker(self, tmp_path, state_dir):
-        job = publish_job(tmp_path)
-        root = make_checkpoint(job)
-
-        def change(argv, call):
-            if argv[0] == "exact" and argv[2].endswith(".azsync-manifest.json"):
-                (root / "state.json").write_text('{"new": true}')
-
-        engine = FakePublishEngine(job, on_run=change)
-        result = self.coordinator(job, engine, state_dir).run(self.TOKEN)
-        assert "before its marker" in result.error
-        assert [call[0] for call in engine.calls] == [
-            "probe",
-            "payload",
-            "exact",
-        ]
-        assert root.exists()
-
-    def test_marker_disappears_before_publication(self, tmp_path, state_dir):
-        job = publish_job(tmp_path)
-        root = make_checkpoint(job)
-
-        def remove_marker(argv, call):
-            if argv[0] == "exact" and argv[2].endswith(".azsync-manifest.json"):
-                (root / ".complete").unlink()
-
-        engine = FakePublishEngine(job, on_run=remove_marker)
-        result = self.coordinator(job, engine, state_dir).run(self.TOKEN)
-        assert "changed before" in result.error or "disappeared" in result.error
-        assert [call[0] for call in engine.calls] == [
-            "probe",
-            "payload",
-            "exact",
-        ]
-        assert root.exists()
-
-    def test_does_not_republish_same_fingerprint(self, tmp_path, state_dir):
-        job = publish_job(tmp_path)
-        make_checkpoint(job)
-        engine = FakePublishEngine(job)
-        coordinator = self.coordinator(job, engine, state_dir)
-        assert coordinator.run(self.TOKEN).published == 1
-        count = len(engine.calls)
-        assert coordinator.run(self.TOKEN).published == 0
-        assert len(engine.calls) == count
-
-    def test_existing_remote_marker_is_a_conflict(self, tmp_path, state_dir):
-        job = publish_job(tmp_path)
-        root = make_checkpoint(job)
-        engine = FakePublishEngine(job, remote_marker=True)
-        result = self.coordinator(job, engine, state_dir).run(self.TOKEN)
-        assert "already has" in result.error
-        assert [call[0] for call in engine.calls] == ["probe"]
-        assert root.exists()
-
-    def test_replace_removes_old_marker_before_payload(self, tmp_path, state_dir):
-        job = publish_job(tmp_path, publish_conflict="replace")
-        make_checkpoint(job)
-        engine = FakePublishEngine(job, remote_marker=True)
-        result = self.coordinator(job, engine, state_dir).run(self.TOKEN)
-        assert result.published == 1
-        assert [call[0] for call in engine.calls[:3]] == [
-            "probe",
-            "remove",
-            "payload",
-        ]
-
-    def test_marker_probe_failure_keeps_local(self, tmp_path, state_dir):
-        job = publish_job(tmp_path)
-        root = make_checkpoint(job)
-        engine = FakePublishEngine(
-            job, remote_marker=PublishError("cannot check marker")
-        )
-        result = self.coordinator(job, engine, state_dir).run(self.TOKEN)
-        assert result.error == "cannot check marker"
-        assert root.exists()
-
-    def test_disabled_policy_does_nothing(self, tmp_path, state_dir):
-        job = make_job(tmp_path)
-        engine = FakePublishEngine(job)
-        result = self.coordinator(job, engine, state_dir).run(self.TOKEN)
-        assert result.discovered == 0 and engine.calls == []
-
-    def test_keep_last_publishes_but_retains_local(self, tmp_path, state_dir):
-        job = publish_job(tmp_path, publish_keep_last=1, after_publish="delete")
-        root = make_checkpoint(job)
-        engine = FakePublishEngine(job)
-        result = self.coordinator(job, engine, state_dir).run(self.TOKEN)
-        assert result.ready == 1 and result.published == 1
-        assert result.retained == 1 and result.deleted == 0
-        assert root.exists()
-        assert [call[0] for call in engine.calls] == [
-            "probe",
-            "payload",
-            "exact",
-            "exact",
-        ]
-
-    def test_only_old_checkpoints_are_deleted(self, tmp_path, state_dir):
-        job = publish_job(tmp_path, publish_keep_last=2, after_publish="delete")
-        roots = [
-            make_checkpoint(job, f"checkpoint-{number}") for number in (100, 200, 300)
-        ]
-        now = time.time()
-        for index, root in enumerate(roots):
-            stamp = now - 100 + index
-            for path in root.rglob("*"):
-                if path.is_file():
-                    os.utime(path, (stamp, stamp))
-            os.utime(root / ".complete", (stamp + 0.5, stamp + 0.5))
-        result = self.coordinator(job, FakePublishEngine(job), state_dir).run(
-            self.TOKEN
-        )
-        assert result.published == 3
-        assert result.deleted == 1 and result.retained == 2
-        assert not roots[0].exists()
-        assert roots[1].exists() and roots[2].exists()
-
-    def test_flush_can_publish_the_newest_checkpoint(self, tmp_path, state_dir):
-        job = publish_job(tmp_path, publish_keep_last=1, after_publish="delete")
-        root = make_checkpoint(job)
-        coordinator = self.coordinator(job, FakePublishEngine(job), state_dir)
-        result = coordinator.run(
-            self.TOKEN,
-            flush_checkpoint="checkpoints/checkpoint-100",
-            flush_settle=0,
-            sleep=lambda _: None,
-        )
-        assert result.published == 1 and result.retained == 1
-        assert root.exists()
-
-    def test_quarantine_crash_is_finished_on_next_run(self, tmp_path, state_dir):
-        job = publish_job(tmp_path, after_publish="delete")
-        root = make_checkpoint(job)
-        coordinator = self.coordinator(job, FakePublishEngine(job), state_dir)
-        candidates = coordinator.scan()
-        snap = candidates[0].snapshot
-        tx = coordinator.ledger.transactions[snap.relpath]
-        moved = azsync.quarantine(Path(job.source), snap, tx.transaction)
-        coordinator.ledger.transition(
-            snap.relpath,
-            "quarantined",
-            time.time(),
-            quarantined_path=str(moved),
-        )
-        coordinator._save()
-        coordinator = self.coordinator(job, FakePublishEngine(job), state_dir)
-        coordinator.run(self.TOKEN)
-        assert not moved.exists()
-        assert coordinator.ledger.transactions[snap.relpath].state == "deleted"
-        assert not root.exists()
-
-    def test_ledger_records_failure(self, tmp_path, state_dir):
-        job = publish_job(tmp_path)
-        make_checkpoint(job)
-        coordinator = self.coordinator(
-            job,
-            FakePublishEngine(
-                job, [azsync.SyncResult(status=NETWORK, error="no route")]
-            ),
-            state_dir,
-        )
-        coordinator.run(self.TOKEN)
-        tx = next(iter(coordinator.ledger.transactions.values()))
-        assert tx.state == "failed" and tx.error == "no route"
-
-
-class TestPublishCliValidation:
-    def test_publish_and_delete_destination_are_incompatible(
-        self, tmp_path, state_dir, runner
-    ):
-        src = tmp_path / "src"
-        src.mkdir()
-        result = invoke(
-            runner,
-            [
-                "add",
-                str(src),
-                "https://acct.blob.core.windows.net/bucket",
-                "--publish-path",
-                "checkpoints",
-                "--delete",
-                "--no-start",
-            ],
-        )
-        assert result.exit_code != 0
-        assert "cannot be combined" in result.output
-
-    def test_publish_path_cannot_escape_source(self, tmp_path, state_dir, runner):
-        src = tmp_path / "src"
-        src.mkdir()
-        result = invoke(
-            runner,
-            [
-                "add",
-                str(src),
-                "https://acct.blob.core.windows.net/bucket",
-                "--publish-path",
-                "../outside",
-                "--no-start",
-            ],
-        )
-        assert result.exit_code != 0 and "publish path" in result.output
-
-    def test_options_are_persisted(self, tmp_path, state_dir, runner):
-        src = tmp_path / "src"
-        src.mkdir()
-        result = invoke(
-            runner,
-            [
-                "add",
-                str(src),
-                "https://acct.blob.core.windows.net/bucket",
-                "--publish-path",
-                "checkpoints",
-                "--publish-pattern",
-                "checkpoint-*",
-                "--ready-marker",
-                "DONE",
-                "--publish-stable",
-                "60",
-                "--after-publish",
-                "delete",
-                "--publish-keep-last",
-                "3",
-                "--no-start",
-            ],
-        )
-        assert result.exit_code == 0, result.output
-        job = azsync.list_jobs()[0]
-        assert job.publish_paths == ["checkpoints"]
-        assert job.publish_patterns == ["checkpoint-*"]
-        assert job.ready_marker == "DONE"
-        assert job.after_publish == "delete"
-        assert job.publish_keep_last == 3
-
-    def test_old_job_without_publish_fields_loads(self, state_dir):
-        (state_dir / "old.json").write_text(
-            json.dumps(
-                {
-                    "id": "old",
-                    "source": "/tmp/source",
-                    "dest": "https://acct.blob.core.windows.net/bucket",
-                }
-            )
-        )
-        job = azsync.load_job("old")
-        assert not job.publish_policy().enabled
-
-
-class TestPublishScheduling:
-    def test_scan_registers_the_end_of_the_stability_window(self, tmp_path, state_dir):
-        job = publish_job(tmp_path, publish_stable=60)
-        root = make_checkpoint(job)
-        old = time.time() - 120
-        for path in root.rglob("*"):
-            if path.is_file():
-                os.utime(path, (old, old))
-        (root / ".complete").touch()
-        engine = FakePublishEngine(job)
-        coordinator = PublishCoordinator(
-            job,
-            engine,
-            ledger_path=state_dir / "ledger.json",
-            clock=time.time,
-        )
-        coordinator.scan()
-        assert coordinator.next_wake is not None
-        assert 55 <= coordinator.next_wake - time.time() <= 61
-
-    def test_tick_wakes_at_publish_deadline(self, tmp_path, state_dir):
-        job = publish_job(tmp_path)
-        publisher = type(
-            "Publisher",
-            (),
-            {"next_wake": 105.0, "run": lambda self, token: azsync.PublishRun()},
-        )()
-        clock = _Clock(100)
-        sup = Supervisor(
-            job,
-            publisher=publisher,
-            clock=clock,
-            log=lambda _m: None,
-        )
-        sup.state.last_sync_end = 100
-        decision = sup.tick()
-        assert not decision.should_sync and decision.wake_at == 105
-
-    def test_tick_starts_sync_when_checkpoint_becomes_ready(
-        self, tmp_path, state_dir, monkeypatch
-    ):
-        job = publish_job(tmp_path)
-        publisher = type(
-            "Publisher",
-            (),
-            {"next_wake": 99.0, "run": lambda self, token: azsync.PublishRun()},
-        )()
-        clock = _Clock(100)
-        sup = Supervisor(
-            job,
-            publisher=publisher,
-            clock=clock,
-            log=lambda _m: None,
-        )
-        reasons = []
-        monkeypatch.setattr(
-            sup,
-            "run_sync",
-            lambda reason, event=None: reasons.append(reason)
-            or azsync.SyncResult(status=OK),
-        )
-        assert sup.tick().should_sync
-        assert reasons == ["checkpoint ready"]
-
-    def test_backoff_still_outranks_publish_deadline(self, tmp_path, state_dir):
-        job = publish_job(tmp_path)
-        publisher = type("Publisher", (), {"next_wake": 99.0})()
-        clock = _Clock(100)
-        sup = Supervisor(
-            job,
-            publisher=publisher,
-            clock=clock,
-            log=lambda _m: None,
-        )
-        sup.state.backoff_until = 200
-        decision = sup.tick()
-        assert not decision.should_sync
-        assert decision.reason == "backoff"
-
-
-class TestPublishWithRealAzcopyEngine:
-    def test_supervisor_runs_sync_then_payload_manifest_marker(
-        self, tmp_path, state_dir, fake_azcopy
-    ):
-        job = publish_job(tmp_path)
-        make_checkpoint(job)
-        azsync.save_job(job)
-        fake_azcopy.program(
-            ok_step(completed=0, size=0),  # retain sync
-            fail_step("BlobNotFound"),  # marker probe
-            ok_step(completed=2, size=9),  # payload
-            ok_step(completed=1, size=200),  # manifest
-            ok_step(completed=1, size=0),  # marker
-        )
-        now = time.time()
-        manager = SasManager(
-            _StubProvider([sas_for(7200, now=now)]),
-            tmp_path / "cache.sas",
-        )
-        engine = AzcopyEngine(job, state_dir=tmp_path / "wd")
-        publisher = PublishCoordinator(
-            job,
-            engine,
-            ledger_path=state_dir / "ledger.json",
-            clock=time.time,
-            log=lambda _m: None,
-        )
-        sup = Supervisor(
-            job,
-            engine=engine,
-            sas=manager,
-            publisher=publisher,
-            clock=time.time,
-            log=lambda _m: None,
-        )
-        result = sup.run_sync("manual")
-        assert result.status == OK
-        assert [call[0] for call in fake_azcopy.calls] == [
-            "sync",
-            "list",
-            "copy",
-            "copy",
-            "copy",
-        ]
-        assert fake_azcopy.calls[-1][1].endswith(".complete")
-        assert sup.state.publish_last_path == "checkpoints/checkpoint-100"
-
-    def test_publish_failure_makes_the_run_partial_but_never_deletes(
-        self, tmp_path, state_dir, fake_azcopy
-    ):
-        job = publish_job(tmp_path, after_publish="delete")
-        root = make_checkpoint(job)
-        fake_azcopy.program(
-            ok_step(completed=0, size=0),
-            fail_step("BlobNotFound"),
-            fail_step("connection reset"),
-        )
-        now = time.time()
-        manager = SasManager(
-            _StubProvider([sas_for(7200, now=now)]),
-            tmp_path / "cache.sas",
-        )
-        engine = AzcopyEngine(job, state_dir=tmp_path / "wd")
-        publisher = PublishCoordinator(
-            job,
-            engine,
-            ledger_path=state_dir / "ledger.json",
-            clock=time.time,
-        )
-        sup = Supervisor(
-            job,
-            engine=engine,
-            sas=manager,
-            publisher=publisher,
-            clock=time.time,
-            log=lambda _m: None,
-        )
-        result = sup.run_sync("manual")
-        assert result.status == PARTIAL
-        assert root.exists()
-        assert [call[0] for call in fake_azcopy.calls] == [
-            "sync",
-            "list",
-            "copy",
-        ]
-
-
-class FilesystemPublishEngine(FakePublishEngine):
-    """An azcopy-shaped engine that really copies into a local remote tree."""
-
-    def __init__(self, job, remote):
-        super().__init__(job)
-        self.remote = remote
-        self.phases = []
-
-    def remote_exists(self, remote_relpath, sas):
-        self.phases.append("probe")
-        return (self.remote / remote_relpath).exists()
-
-    def run(self, argv, **kwargs):
-        self.calls.append(argv)
-        if argv[0] == "payload":
-            self.phases.append("payload")
-            rel = argv[1]
-            local = Path(self.job.source) / rel
-            remote = self.remote / rel
-            assert not (remote / self.job.ready_marker).exists()
-            for path in local.rglob("*"):
-                if path.is_file() and path.name != self.job.ready_marker:
-                    target = remote / path.relative_to(local)
-                    target.parent.mkdir(parents=True, exist_ok=True)
-                    target.write_bytes(path.read_bytes())
-            assert not (remote / self.job.ready_marker).exists()
-            files = [p for p in remote.rglob("*") if p.is_file()]
-            return azsync.SyncResult(
-                status=OK,
-                completed=len(files),
-                bytes=sum(p.stat().st_size for p in files),
-            )
-        if argv[0] == "exact":
-            source, rel = Path(argv[1]), argv[2]
-            target = self.remote / rel
-            target.parent.mkdir(parents=True, exist_ok=True)
-            if target.name == ".azsync-manifest.json":
-                self.phases.append("manifest")
-                assert not target.with_name(self.job.ready_marker).exists()
-            else:
-                self.phases.append("marker")
-                assert target.name == self.job.ready_marker
-                assert target.with_name(".azsync-manifest.json").exists()
-            target.write_bytes(source.read_bytes())
-            return azsync.SyncResult(
-                status=OK, completed=1, bytes=source.stat().st_size
-            )
-        raise AssertionError(f"unexpected command: {argv}")
-
-
-class TestPublishFilesystemRoundTrip:
-    TOKEN = SasToken("", None)
-
-    def test_marker_is_last_and_delete_is_after_marker(self, tmp_path, state_dir):
-        job = publish_job(tmp_path, after_publish="delete")
-        local = make_checkpoint(job)
-        remote = tmp_path / "remote"
-        engine = FilesystemPublishEngine(job, remote)
-        coordinator = PublishCoordinator(
-            job,
-            engine,
-            ledger_path=state_dir / "ledger.json",
-            clock=time.time,
-        )
-        result = coordinator.run(self.TOKEN)
-        published = remote / "checkpoints" / "checkpoint-100"
-        assert engine.phases == ["probe", "payload", "manifest", "marker"]
-        assert (published / "model.bin").read_bytes() == b"weights"
-        assert json.loads((published / ".azsync-manifest.json").read_text())[
-            "fingerprint"
-        ]
-        assert (published / ".complete").exists()
-        assert not local.exists()
-        assert result.published == 1 and result.deleted == 1
-
-    def test_keep_leaves_identical_local_and_remote_payload(self, tmp_path, state_dir):
-        job = publish_job(tmp_path, after_publish="keep")
-        local = make_checkpoint(job)
-        remote = tmp_path / "remote"
-        result = PublishCoordinator(
-            job,
-            FilesystemPublishEngine(job, remote),
-            ledger_path=state_dir / "ledger.json",
-            clock=time.time,
-        ).run(self.TOKEN)
-        published = remote / "checkpoints" / "checkpoint-100"
-        assert (published / "model.bin").read_bytes() == (
-            local / "model.bin"
-        ).read_bytes()
-        assert result.published == 1 and result.deleted == 0
-
-
-# --- Durable immediate-sync signals ---------------------------------------
-
-
-class TestSupervisorSignalQueue:
-    def _supervisor(self, job, state_dir, publisher=None):
-        queue = azsync.SignalQueue(state_dir / "signals")
-        publisher = (
-            publisher
-            or type(
-                "Publisher",
-                (),
-                {
-                    "next_wake": None,
-                    "run": lambda self, token, **kwargs: azsync.PublishRun(),
-                    "ledger": type("Ledger", (), {"transactions": {}})(),
-                },
-            )()
-        )
-        return Supervisor(
-            job,
-            publisher=publisher,
-            signals=queue,
-            log=lambda _m: None,
-        ), queue
-
-    def test_sync_event_forces_next_tick(self, tmp_path, state_dir, monkeypatch):
-        job = make_job(tmp_path)
-        sup, queue = self._supervisor(job, state_dir)
-        event = queue.submit("sync")
-        calls = []
-        monkeypatch.setattr(
-            sup,
-            "run_sync",
-            lambda reason, signal=None: calls.append((reason, signal))
-            or azsync.SyncResult(status=OK),
-        )
-        decision = sup.tick()
-        assert decision.reason == "manual"
-        assert calls[0][1].id == event.id
-        assert queue.read_result(event.id).status == OK
-
-    def test_flush_payload_reaches_publisher(self, tmp_path, state_dir):
-        job = publish_job(tmp_path)
-        make_checkpoint(job)
-        seen = {}
-
-        class Publisher:
-            next_wake = None
-            ledger = type("Ledger", (), {"transactions": {}})()
-
-            def run(self, token, **kwargs):
-                seen.update(kwargs)
-                return azsync.PublishRun(published=1)
-
-        sup, queue = self._supervisor(job, state_dir, Publisher())
-        event = queue.submit(
-            "flush",
-            {"checkpoint": "checkpoints/checkpoint-100", "settle": 0.25},
-        )
-        # Avoid transport; this test is about event semantics.
-        sup.sas = type(
-            "Sas",
-            (),
-            {
-                "enabled": False,
-                "ensure": lambda self, now, **kw: SasToken("", None),
-                "current": lambda self: None,
-                "needed_lifetime": lambda self, duration: 1,
-                "provider": type("P", (), {"refreshable": False})(),
-            },
-        )()
-        sup.engine = type(
-            "Engine",
-            (),
-            {
-                "build_argv": lambda self, token: ["sync"],
-                "run": lambda self, argv, **kw: azsync.SyncResult(status=OK),
-            },
-        )()
-        sup.tick()
-        assert seen == {
-            "flush_checkpoint": "checkpoints/checkpoint-100",
-            "flush_settle": 0.25,
-        }
-        assert queue.read_result(event.id).detail["publish"]["published"] == 1
-
-    def test_unknown_event_is_completed_invalid(self, tmp_path, state_dir, monkeypatch):
-        sup, queue = self._supervisor(make_job(tmp_path), state_dir)
-        sup.state.last_sync_end = time.time()
-        event = queue.submit("dance")
-        monkeypatch.setattr(
-            sup,
-            "run_sync",
-            lambda *a, **kw: pytest.fail("invalid event must not sync"),
-        )
-        sup.tick()
-        assert queue.read_result(event.id).status == "invalid"
-
-    def test_waiting_flush_result_is_distinct(self, tmp_path, state_dir):
-        job = publish_job(tmp_path)
-        sup, queue = self._supervisor(job, state_dir)
-        event = queue.submit("flush")
-        sup._last_publish = azsync.PublishRun(
-            discovered=1,
-            waiting=[{"path": "x", "reason": "waiting for marker"}],
-        )
-        sup._complete_signal(event, azsync.SyncResult(status=OK))
-        assert queue.read_result(event.id).status == "waiting"
-
-    def test_partial_result_is_preserved(self, tmp_path, state_dir):
-        sup, queue = self._supervisor(make_job(tmp_path), state_dir)
-        sup.state.last_sync_end = time.time()
-        event = queue.submit("sync")
-        sup._complete_signal(event, azsync.SyncResult(status=PARTIAL))
-        assert queue.read_result(event.id).status == PARTIAL
-
-    def test_result_updates_runtime_state(self, tmp_path, state_dir):
-        sup, queue = self._supervisor(make_job(tmp_path), state_dir)
-        event = queue.submit("sync")
-        sup._complete_signal(event, azsync.SyncResult(status=OK))
-        assert sup.state.signal_last_kind == "sync"
-        assert sup.state.signal_last_result == OK
-        assert sup.state.signal_last_at is not None
-
-    def test_corrupt_event_does_not_kill_supervisor(
-        self, tmp_path, state_dir, monkeypatch
-    ):
-        sup, queue = self._supervisor(make_job(tmp_path), state_dir)
-        sup.state.last_sync_end = time.time()
-        queue._prepare()
-        (queue.pending / "bad.json").write_text("{")
-        monkeypatch.setattr(
-            sup,
-            "run_sync",
-            lambda *a, **kw: pytest.fail("corrupt event must not sync"),
-        )
-        assert not sup.tick().should_sync
-
-    def test_legacy_trigger_file_still_forces_sync(
-        self, tmp_path, state_dir, monkeypatch
-    ):
-        job = make_job(tmp_path)
-        sup, _queue = self._supervisor(job, state_dir)
-        azsync.trigger_path(job.id).write_text("legacy")
-        calls = []
-        monkeypatch.setattr(
-            sup,
-            "run_sync",
-            lambda reason, event=None: calls.append((reason, event))
-            or azsync.SyncResult(status=OK),
-        )
-        sup.tick()
-        assert calls == [("manual", None)]
-        assert not azsync.trigger_path(job.id).exists()
-
-
-class TestSignalCli:
-    def _define(self, tmp_path, **kwargs):
-        job = publish_job(tmp_path, id="training", **kwargs)
-        azsync.save_job(job)
-        azsync.save_state(job.id, azsync.RuntimeState())
-        return job
-
-    def test_flush_submits_event_to_live_daemon(
-        self, tmp_path, state_dir, runner, monkeypatch
-    ):
-        self._define(tmp_path)
-        monkeypatch.setattr(azsync, "is_running", lambda _id: True)
-        submitted = []
-
-        def submit(job_id, kind, payload=None):
-            submitted.append((job_id, kind, payload))
-            return SignalEvent.create(kind, payload), True
-
-        monkeypatch.setattr(azsync, "submit_daemon_signal", submit)
-        result = invoke(
-            runner,
-            [
-                "flush",
-                "training",
-                "--checkpoint",
-                "checkpoints/checkpoint-100",
-                "--settle",
-                "0.5",
-            ],
-        )
-        assert result.exit_code == 0
-        assert submitted[0][1:] == (
-            "flush",
-            {"checkpoint": "checkpoints/checkpoint-100", "settle": 0.5},
-        )
-
-    def test_flush_requires_publish_policy(self, tmp_path, state_dir, runner):
-        job = make_job(tmp_path, id="plain")
-        azsync.save_job(job)
-        result = invoke(runner, ["flush", "plain"])
-        assert result.exit_code != 0 and "no --publish" in result.output
-
-    def test_flush_wait_success(self, tmp_path, state_dir, runner, monkeypatch):
-        self._define(tmp_path)
-        monkeypatch.setattr(azsync, "is_running", lambda _id: True)
-        event = SignalEvent.create("flush")
-        monkeypatch.setattr(
-            azsync,
-            "submit_daemon_signal",
-            lambda *a, **kw: (event, True),
-        )
-        monkeypatch.setattr(
-            azsync.SignalQueue,
-            "wait",
-            lambda self, event_id, timeout: SignalResult(
-                event_id,
-                OK,
-                time.time(),
-                {"publish": {"published": 1, "retained": 1, "deleted": 0}},
-            ),
-        )
-        result = invoke(runner, ["flush", "training", "--wait"])
-        assert result.exit_code == 0 and "1 checkpoint" in result.output
-        assert "1 retained locally" in result.output
-
-    @pytest.mark.parametrize(
-        "status,expected",
-        [("waiting", 2), (PARTIAL, 3), (NETWORK, 4)],
-    )
-    def test_flush_wait_exit_codes(
-        self, tmp_path, state_dir, runner, monkeypatch, status, expected
-    ):
-        self._define(tmp_path)
-        monkeypatch.setattr(azsync, "is_running", lambda _id: True)
-        event = SignalEvent.create("flush")
-        monkeypatch.setattr(
-            azsync,
-            "submit_daemon_signal",
-            lambda *a, **kw: (event, True),
-        )
-        detail = {
-            "publish": {
-                "waiting": [{"reason": "not stable"}],
-                "error": "publish failed",
-            },
-            "sync": {"error": "sync failed"},
-        }
-        monkeypatch.setattr(
-            azsync.SignalQueue,
-            "wait",
-            lambda self, event_id, timeout: SignalResult(
-                event_id, status, time.time(), detail
-            ),
-        )
-        assert invoke(runner, ["flush", "training", "--wait"]).exit_code == expected
-
-    def test_flush_wait_timeout_is_five(self, tmp_path, state_dir, runner, monkeypatch):
-        self._define(tmp_path)
-        monkeypatch.setattr(azsync, "is_running", lambda _id: True)
-        event = SignalEvent.create("flush")
-        monkeypatch.setattr(
-            azsync,
-            "submit_daemon_signal",
-            lambda *a, **kw: (event, True),
-        )
-        monkeypatch.setattr(
-            azsync.SignalQueue,
-            "wait",
-            lambda self, event_id, timeout: None,
-        )
-        result = invoke(runner, ["flush", "training", "--wait", "--timeout", "0"])
-        assert result.exit_code == 5 and "Timed out" in result.output
-
-    def test_unacknowledged_flush_remains_queued(
-        self, tmp_path, state_dir, runner, monkeypatch
-    ):
-        self._define(tmp_path)
-        monkeypatch.setattr(azsync, "is_running", lambda _id: True)
-        monkeypatch.setattr(
-            azsync,
-            "submit_daemon_signal",
-            lambda *a, **kw: (SignalEvent.create("flush"), False),
-        )
-        result = invoke(runner, ["flush", "training"])
-        assert result.exit_code == 0 and "remains queued" in result.output
-
-
-class TestFlushAcrossARealSupervisorProcess:
-    def test_training_complete_signal_reaches_daemon_and_returns_result(
-        self, tmp_path, state_dir, fake_azcopy
-    ):
-        job = publish_job(
-            tmp_path,
-            id="training",
-            auth="aad",
-            publish_stable=3600,
-        )
-        make_checkpoint(job)
-        azsync.save_job(job)
-        azsync.save_state(job.id, azsync.RuntimeState())
-        fake_azcopy.program(
-            ok_step(completed=0, size=0),  # initial retain sync
-            ok_step(completed=0, size=0),  # flush retain sync
-            fail_step("BlobNotFound"),  # remote marker probe
-            ok_step(completed=2, size=9),  # payload
-            ok_step(completed=1, size=300),  # manifest
-            ok_step(completed=1, size=0),  # marker
-        )
-        pid = azsync.spawn_daemon(job)
-        try:
-            assert wait_until(
-                lambda: azsync.load_state(job.id).total_syncs >= 1,
-                timeout=20,
-            )
-            event, acknowledged = azsync.submit_daemon_signal(
-                job.id,
-                "flush",
-                {
-                    "checkpoint": "checkpoints/checkpoint-100",
-                    "settle": 0.05,
-                },
-            )
-            assert acknowledged
-            result = azsync.signal_queue(job.id).wait(event.id, 30, interval=0.05)
-            assert result is not None
-            assert result.status == OK
-            assert result.detail["publish"]["published"] == 1
-            calls = fake_azcopy.calls
-            assert [call[0] for call in calls[:6]] == [
-                "sync",
-                "sync",
-                "list",
-                "copy",
-                "copy",
-                "copy",
-            ]
-            assert calls[-1][1].endswith(".complete")
-        finally:
-            azsync.stop_daemon(job.id)
-        assert wait_until(lambda: not usm_daemon.pid_alive(pid), timeout=15)

@@ -12,6 +12,7 @@ from usmo import core
 # Make scripts/ importable (so tests can `import openai_proxy`).
 _ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_ROOT / "scripts"))
+pytest_plugins = ["azsync_support"]
 
 
 @pytest.fixture

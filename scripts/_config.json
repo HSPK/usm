@@ -5,6 +5,7 @@
       "path": "azsync.py",
       "modules": [
         "usm_azure.py",
+        "usm_checkpoint.py",
         "usm_cli.py",
         "usm_daemon.py",
         "usm_publish.py",
@@ -18,8 +19,8 @@
         "usmo>=0.12.0",
         "watchdog>=4.0.0"
       ],
-      "version": "1.0.11",
-      "hash": "sha256:af46542bcf436ef38e15a89aa27378040955f3a8623b49add2b0545137a67590"
+      "version": "1.0.13",
+      "hash": "sha256:bf95be879a5076ce201caaf1b53291bd82588b3234764f82f6cb616318509282"
     },
     "bench": {
       "description": "Benchmark CPU / memory / disk / network / GPU.",
@@ -48,8 +49,8 @@
         "rich>=13.0",
         "usmo>=0.12.0"
       ],
-      "version": "1.1.1",
-      "hash": "sha256:8c21db7ed5204ea484c327021503d3c05196ef1cee53cbb8f92d6f0adcf35914"
+      "version": "1.1.2",
+      "hash": "sha256:18cd9b5680911b0507c0ecb1f1427e6973e4f3f17861e696526ccd5628e09665"
     },
     "check_py": {
       "description": "Show active Python/pip versions.",
@@ -368,8 +369,8 @@
         "rich>=13.0",
         "usmo>=0.12.0"
       ],
-      "version": "1.0.1",
-      "hash": "sha256:050c2296f3373a8866cb8dbbac97d1afbbb47af667b73e4647c2bbe4e898faed"
+      "version": "1.0.2",
+      "hash": "sha256:679fd924d919c68b70d7f30dbac4b291101336c4e61de6008b8d487eb9623a06"
     },
     "sysinfo": {
       "description": "Print system/GPU/CUDA environment summary.",
@@ -413,8 +414,8 @@
         "usmo>=0.12.0",
         "watchdog>=4.0.0"
       ],
-      "version": "1.0.0",
-      "hash": "sha256:d18b5888541e3a3ace34b44dc5e71501ca6547c40693bdc4a78125ce5ac3ad41"
+      "version": "1.0.1",
+      "hash": "sha256:1ebfd6db0a682f27eb140e33a15a60046ba4e8a7c9e65c7b4bc49c4eddeac02c"
     }
   }
 }

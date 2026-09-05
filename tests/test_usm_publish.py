@@ -85,6 +85,17 @@ def ready_candidates(source, policy, ledger=None, *, now=None):
 
 
 class TestPolicyValidation:
+    @pytest.mark.parametrize("field", ["stable", "min_age"])
+    @pytest.mark.parametrize("value", [float("nan"), float("inf"), "120", True])
+    def test_publish_durations_are_finite_numbers(self, field, value):
+        with pytest.raises(PublishError, match="finite"):
+            PublishPolicy(paths=("checkpoints",), **{field: value}).validate()
+
+    @pytest.mark.parametrize("value", [1.5, True, "2"])
+    def test_retention_count_is_an_integer(self, value):
+        with pytest.raises(PublishError, match="integer"):
+            PublishPolicy(paths=("checkpoints",), keep_last=value).validate()
+
     def test_disabled_policy_is_valid(self, source):
         PublishPolicy().validate(source)
 
@@ -125,7 +136,9 @@ class TestPolicyValidation:
         with pytest.raises(PublishError, match="cannot be negative"):
             PublishPolicy(paths=("x",), **{field: -1}).validate(source)
 
-    @pytest.mark.parametrize("marker", ["", "a/b", r"a\b"])
+    @pytest.mark.parametrize(
+        "marker", ["", "a/b", r"a\b", "*.done", "ready?", "ready[", "ready;"]
+    )
     def test_bad_markers(self, source, marker):
         with pytest.raises(PublishError, match="marker"):
             PublishPolicy(paths=("x",), ready_marker=marker).validate(source)
@@ -240,17 +253,54 @@ class TestSnapshot:
         with pytest.raises(PublishError, match="non-regular"):
             snapshot_unit(source, root, policy)
 
-    def test_symlink_marker_is_not_ready(self, source, policy, tmp_path):
+    def test_symlink_marker_is_refused(self, source, policy, tmp_path):
         root = checkpoint(source, marker=False)
         target = tmp_path / "done"
         target.touch()
         (root / ".complete").symlink_to(target)
-        _, marker = snapshot_unit(source, root, policy)
-        assert marker is None
+        with pytest.raises(PublishError, match="non-regular"):
+            snapshot_unit(source, root, policy)
 
     def test_semicolon_path_is_refused(self, source, policy):
         root = checkpoint(source, "checkpoint-1;checkpoint-2")
         with pytest.raises(PublishError, match="semicolon|';'"):
+            snapshot_unit(source, root, policy)
+
+    @pytest.mark.parametrize(
+        "location,character",
+        [
+            ("source", "*"),
+            ("selector", "?"),
+            ("unit", "["),
+            ("unit", "*"),
+            ("unit", "?"),
+            ("marker", "?"),
+            ("member", "["),
+        ],
+    )
+    def test_azcopy_glob_source_paths_are_refused(
+        self, source, policy, location, character
+    ):
+        root = checkpoint(source)
+        path = {
+            "source": source,
+            "selector": root.parent,
+            "unit": root,
+            "marker": root / ".complete",
+            "member": root / "model.bin",
+        }[location]
+        changed = path.with_name(path.name + character)
+        path.rename(changed)
+        if location == "source":
+            source = changed
+            root = source / "checkpoints" / root.name
+        elif location == "selector":
+            root = changed / root.name
+        elif location == "unit":
+            root = changed
+        elif location == "marker":
+            policy = replace(policy, ready_marker=changed.name)
+        with pytest.raises(PublishError, match="azcopy cannot select safely"):
             snapshot_unit(source, root, policy)
 
     def test_file_unit_uses_sidecar_marker(self, source):
@@ -566,10 +616,11 @@ class TestLedger:
         assert PublishLedger.load(tmp_path / "none").transactions == {}
 
     @pytest.mark.parametrize("body", ["not json", "[]", "null", '{"transactions": []}'])
-    def test_corrupt_shapes_are_empty(self, tmp_path, body):
+    def test_corrupt_shapes_fail_visibly(self, tmp_path, body):
         path = tmp_path / "ledger.json"
         path.write_text(body)
-        assert PublishLedger.load(path).transactions == {}
+        with pytest.raises(PublishError, match="ledger"):
+            PublishLedger.load(path)
 
     def test_observe_creates_a_transaction(self, source, policy):
         snap, _ = snapshot_unit(source, checkpoint(source), policy)
@@ -739,18 +790,26 @@ class TestQuarantine:
 
     def test_cleanup_removes_a_directory(self, source, policy):
         snap, _ = snapshot_unit(source, checkpoint(source), policy)
-        target = quarantine(source, snap, "tx1")
-        clean_quarantine(target)
+        proof = []
+        target = quarantine(source, snap, "tx1", record=proof.append)
+        clean_quarantine(
+            source / ".azsync-moved" / "tx1",
+            source=source,
+            transaction="tx1",
+            manifest=proof[0],
+        )
         assert not target.exists()
 
-    def test_cleanup_removes_a_file(self, tmp_path):
+    def test_cleanup_refuses_unowned_file(self, tmp_path):
         path = tmp_path / "one"
         path.write_text("x")
-        clean_quarantine(path)
-        assert not path.exists()
+        with pytest.raises(PublishError, match="owned manifest"):
+            clean_quarantine(path)
+        assert path.read_text() == "x"
 
-    def test_cleanup_missing_path_is_idempotent(self, tmp_path):
-        clean_quarantine(tmp_path / "gone")
+    def test_cleanup_missing_unowned_path_is_refused(self, tmp_path):
+        with pytest.raises(PublishError, match="owned manifest"):
+            clean_quarantine(tmp_path / "gone")
 
     def test_quarantine_refuses_missing_source(self, source, policy):
         root = checkpoint(source)
