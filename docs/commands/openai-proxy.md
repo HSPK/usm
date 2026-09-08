@@ -212,6 +212,55 @@ handshake. Set `--retry-429 0` to disable retries.
 
 ## Using it
 
+### Browser clients and SSH forwarding
+
+CORS applies to actual HTTP responses, not only to `OPTIONS` preflight.
+The proxy adds its own CORS headers to ordinary JSON, SSE streams, API-key
+rejections, validation errors and upstream/internal failures. A browser can
+read `Retry-After` and `X-Request-ID` too. Browser `Origin` is not forwarded
+to TRAPI, and upstream `Access-Control-*` headers cannot override the
+local proxy's policy.
+
+The policy allows any origin, matching the existing preflight behavior.
+Cookie credentials are not enabled; use the supported API-key headers.
+**CORS is not authentication.** Set `--api-key` when making your
+identity-backed proxy available to browser apps or untrusted clients.
+
+Private Network Access preflights are supported through Starlette's
+`allow_private_network` option. This does not bypass the browser's own
+local-network permission prompt or mixed-content policy. Allow local-network
+access for a trusted page if your browser requests it.
+
+SSH forwards TCP; it does not change a page's origin. For example, a page on
+`https://hspk.github.io` calling a forwarded
+`http://127.0.0.1:8080/v1` still uses CORS. Forward the API port on the computer
+running the browser:
+
+```bash
+ssh -N -L 8080:127.0.0.1:8080 your-ssh-host
+```
+
+To inspect the actual response headers without dumping the model catalogue:
+
+```bash
+curl -sS -D - -o /dev/null \
+  -H 'Origin: https://hspk.github.io' \
+  http://127.0.0.1:8080/v1/models
+```
+
+After editing a local checkout, the already-running proxy must be restarted.
+Run the local script from the repository root, preserving any original
+endpoint, instance and authentication options:
+
+```bash
+uv run usm --debug openai-proxy --port 8080
+```
+
+A plain `usm openai-proxy` can use a cached released script; `--debug` selects
+the local `scripts/openai_proxy.py`.
+
+### SDK clients
+
 In one terminal:
 
 ```bash

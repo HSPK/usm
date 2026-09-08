@@ -42,9 +42,11 @@ import uvicorn
 import websockets
 from starlette.applications import Starlette
 from starlette.background import BackgroundTask
+from starlette.middleware.cors import CORSMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response, StreamingResponse
 from starlette.routing import Route, WebSocketRoute
+from starlette.types import ASGIApp
 from starlette.websockets import WebSocket
 from websockets.exceptions import InvalidStatus
 
@@ -64,6 +66,7 @@ HOP_REQ = {
     "authorization",
     "api-key",
     "x-api-key",
+    "origin",
     "expect",
 }
 HOP_RES = {
@@ -76,7 +79,6 @@ HOP_RES = {
     "upgrade",
 }
 HOP_WS_REQ = HOP_REQ | {
-    "origin",
     "sec-websocket-extensions",
     "sec-websocket-key",
     "sec-websocket-protocol",
@@ -2313,7 +2315,11 @@ async def proxy(request: Request) -> Response:
 
 def _response_headers(resp: httpx.Response) -> dict[str, str]:
     """Headers safe to relay from an upstream response."""
-    return {k: v for k, v in resp.headers.items() if k.lower() not in HOP_RES}
+    return {
+        k: v
+        for k, v in resp.headers.items()
+        if k.lower() not in HOP_RES and not k.lower().startswith("access-control-")
+    }
 
 
 async def _drain(resp: httpx.Response) -> bytes:
@@ -3232,7 +3238,7 @@ def build_app(
     retry_random: Callable[[], float] | None = None,
     retry_now: Callable[[], float] | None = None,
     log_stream=None,
-) -> Starlette:
+) -> ASGIApp:
     """Build the ASGI app.
 
     Test seams: pass *token_provider* and/or *client* to skip the real
@@ -3324,7 +3330,15 @@ def build_app(
         ),
     ]
 
-    app = Starlette(lifespan=lifespan, routes=routes)
+    # Wrap outside Starlette's error middleware so even unhandled 500s get CORS.
+    app: ASGIApp = CORSMiddleware(
+        Starlette(lifespan=lifespan, routes=routes),
+        allow_origins=["*"],
+        allow_methods=["*"],
+        allow_headers=["*"],
+        allow_private_network=True,
+        expose_headers=["Retry-After", "X-Request-ID"],
+    )
     if cfg.get("access_log", True):
         # Wrapped rather than added via add_middleware so the log sees the
         # raw ASGI events, including for the WebSocket routes.

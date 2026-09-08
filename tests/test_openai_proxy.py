@@ -727,6 +727,163 @@ class TestBuiltinEndpoints:
         assert "X-Custom" in r.headers["access-control-allow-headers"]
 
 
+class TestCORS:
+    ORIGIN = "https://hspk.github.io"
+
+    @pytest.mark.parametrize(
+        ("method", "path", "payload", "status"),
+        [
+            ("GET", "/health", None, 200),
+            ("GET", "/status", None, 200),
+            ("GET", "/v1/models", None, 200),
+            ("GET", "/anthropic/v1/models", None, 200),
+            ("POST", "/v1/chat/completions", {"model": "m", "messages": []}, 200),
+            ("POST", "/v1/responses", {"model": "m", "input": "hello"}, 200),
+            (
+                "POST",
+                "/v1/messages",
+                {
+                    "model": "m",
+                    "max_tokens": 10,
+                    "messages": [{"role": "user", "content": "hello"}],
+                },
+                200,
+            ),
+            ("POST", "/v1/chat/completions", {"messages": []}, 400),
+            ("POST", "/v1/responses", {}, 400),
+            ("POST", "/v1/messages", {}, 400),
+        ],
+    )
+    async def test_actual_responses_have_cors(
+        self, client, upstream, method, path, payload, status
+    ):
+        _, captured, responses = upstream
+        responses["/openai/models"] = _json_reply({"data": [{"id": "m"}]})
+        responses["/openai/deployments/m/chat/completions"] = _json_reply(CHAT_OK)
+        response = await client.request(
+            method, path, json=payload, headers={"Origin": self.ORIGIN}
+        )
+        assert response.status_code == status
+        assert response.headers.get_list("access-control-allow-origin") == ["*"]
+        assert "access-control-allow-credentials" not in response.headers
+        assert all("origin" not in request["headers"] for request in captured)
+
+    @pytest.mark.parametrize("private_network", [False, True])
+    async def test_browser_preflight_needs_no_api_key(self, upstream, private_network):
+        upstream_url, captured, _ = upstream
+        app, _ = _build_for(upstream_url, api_key="browser-test-key")
+        headers = {
+            "Origin": self.ORIGIN,
+            "Access-Control-Request-Method": "POST",
+            "Access-Control-Request-Headers": "Authorization,Content-Type,X-Api-Key",
+        }
+        if private_network:
+            headers["Access-Control-Request-Private-Network"] = "true"
+        async with (
+            LifespanManager(app),
+            httpx.AsyncClient(
+                transport=httpx.ASGITransport(app), base_url="http://test"
+            ) as client,
+        ):
+            response = await client.options("/v1/chat/completions", headers=headers)
+        assert 200 <= response.status_code < 300
+        assert response.headers["access-control-allow-origin"] == "*"
+        assert "POST" in response.headers["access-control-allow-methods"]
+        allowed_headers = response.headers["access-control-allow-headers"].lower()
+        for header in ("authorization", "content-type", "x-api-key"):
+            assert header in allowed_headers
+        if private_network:
+            assert response.headers["access-control-allow-private-network"] == "true"
+        else:
+            assert "access-control-allow-private-network" not in response.headers
+        assert captured == []
+
+    async def test_auth_errors_remain_readable_without_disabling_the_gate(
+        self, upstream
+    ):
+        upstream_url, captured, _ = upstream
+        app, _ = _build_for(upstream_url, api_key="browser-test-key")
+        async with (
+            LifespanManager(app),
+            httpx.AsyncClient(
+                transport=httpx.ASGITransport(app), base_url="http://test"
+            ) as client,
+        ):
+            response = await client.post(
+                "/v1/chat/completions",
+                json={"model": "m"},
+                headers={"Origin": self.ORIGIN},
+            )
+        assert response.status_code == 401
+        assert response.json()["error"]["code"] == "invalid_api_key"
+        assert response.headers["access-control-allow-origin"] == "*"
+        assert captured == []
+
+    @pytest.mark.parametrize("status", [403, 429, 500])
+    async def test_upstream_errors_keep_body_and_metadata_but_not_upstream_cors(
+        self, client, upstream, status
+    ):
+        _, captured, responses = upstream
+        payload = {"error": {"message": "upstream fixture failure"}}
+        responses["/openai/deployments/m/chat/completions"] = _error_reply(
+            status,
+            payload,
+            headers={
+                "Retry-After": "2",
+                "X-Request-ID": "fixture-request",
+                "Access-Control-Allow-Origin": "https://upstream.example",
+                "Access-Control-Allow-Credentials": "true",
+                "Access-Control-Expose-Headers": "X-Upstream-Only",
+            },
+        )
+        response = await client.post(
+            "/v1/chat/completions",
+            json={"model": "m", "messages": []},
+            headers={"Origin": self.ORIGIN},
+        )
+        assert response.status_code == status
+        assert response.json() == payload
+        assert response.headers.get_list("access-control-allow-origin") == ["*"]
+        assert "access-control-allow-credentials" not in response.headers
+        assert response.headers["retry-after"] == "2"
+        assert response.headers["x-request-id"] == "fixture-request"
+        exposed = response.headers["access-control-expose-headers"].lower()
+        assert "retry-after" in exposed and "x-request-id" in exposed
+        assert "x-upstream-only" not in exposed
+        assert "origin" not in captured[-1]["headers"]
+
+    @pytest.mark.parametrize("access_log", [False, True])
+    async def test_unhandled_500_is_wrapped_outside_starlette_error_handling(
+        self, upstream, monkeypatch, access_log
+    ):
+        async def broken_health(_request):
+            raise RuntimeError("unexpected fixture failure")
+
+        monkeypatch.setattr(openai_proxy, "health", broken_health)
+        upstream_url, _, _ = upstream
+        _, cfg = _build_for(upstream_url)
+        cfg["access_log"] = access_log
+        app = build_app(cfg, token_provider=_fake_token, log_stream=io.StringIO())
+        async with (
+            LifespanManager(app),
+            httpx.AsyncClient(
+                transport=httpx.ASGITransport(app, raise_app_exceptions=False),
+                base_url="http://test",
+            ) as client,
+        ):
+            response = await client.get("/health", headers={"Origin": self.ORIGIN})
+        assert response.status_code == 500
+        assert response.headers["access-control-allow-origin"] == "*"
+
+    async def test_requests_without_origin_do_not_gain_browser_credentials(
+        self, client
+    ):
+        response = await client.get("/health")
+        assert response.status_code == 200
+        assert "access-control-allow-origin" not in response.headers
+        assert "access-control-allow-credentials" not in response.headers
+
+
 # --- End-to-end proxying --------------------------------------------------
 
 
@@ -1076,8 +1233,12 @@ class TestStreaming:
                 "POST",
                 f"{base}/v1/chat/completions",
                 json={"model": "m", "stream": True},
+                headers={"Origin": TestCORS.ORIGIN},
             ) as r,
         ):
+            assert r.headers["access-control-allow-origin"] == "*"
+            assert r.headers["cache-control"] == "no-cache"
+            assert r.headers["x-accel-buffering"] == "no"
             async for _ in r.aiter_raw():
                 ts.append(time.time())
         span = ts[-1] - ts[0]
