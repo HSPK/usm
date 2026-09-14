@@ -2110,6 +2110,26 @@ class TestSupervisorLoopAndStart:
         finally:
             blobmount.stop_supervisor("m")
 
+    def test_start_does_not_report_transient_health(
+        self, tmp_path, state_dir, runner, monkeypatch
+    ):
+        mount = make_mount(tmp_path, id="m")
+        blobmount.save_mount(mount)
+        blobmount.save_state(
+            "m", MountState(state="remounting", health=UNMOUNTED, supervisor_pid=42)
+        )
+        monkeypatch.setattr(blobmount, "supervisor_running", lambda _ident: False)
+        monkeypatch.setattr(blobmount.SERVICE, "enabled_kind", lambda _ident: None)
+        monkeypatch.setattr(blobmount, "spawn_supervisor", lambda _mount: 42)
+        monkeypatch.setattr(blobmount, "pid_alive", lambda _pid: True)
+        monkeypatch.setattr(blobmount.time, "sleep", lambda _seconds: None)
+
+        result = invoke(runner, ["start", "m"])
+
+        assert result.exit_code == 0, result.output
+        assert "unmounted" not in result.output
+        assert "health" not in result.output
+
     def test_start_reports_a_supervisor_that_dies_immediately(
         self, tmp_path, state_dir, fake_blobfuse, runner, monkeypatch
     ):

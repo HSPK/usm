@@ -1152,10 +1152,7 @@ def _start(mount: Mount) -> None:
             f"{mount.id} exited during startup.\n"
             + "\n".join(_tail(log_path(mount.id), 15))
         )
-    console.print(
-        f"[green]✓[/green] {mount.id}: {mount.route()} "
-        f"[dim](health: {state.health or 'checking'})[/dim]"
-    )
+    console.print(f"[green]✓[/green] {mount.id}: {mount.route()}")
 
 
 def _tail(path: Path, n: int) -> list[str]:

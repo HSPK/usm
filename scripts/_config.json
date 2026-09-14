@@ -49,8 +49,8 @@
         "rich>=13.0",
         "usmo>=0.12.0"
       ],
-      "version": "1.1.2",
-      "hash": "sha256:18cd9b5680911b0507c0ecb1f1427e6973e4f3f17861e696526ccd5628e09665"
+      "version": "1.1.3",
+      "hash": "sha256:95a4a511087cae7d2afcc860153545565d0af8aaedb407d30d9e9a320f265528"
     },
     "check_py": {
       "description": "Show active Python/pip versions.",
