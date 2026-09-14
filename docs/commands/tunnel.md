@@ -134,6 +134,9 @@ startup failures still fail loudly so bad ports, auth, or host keys do not loop
 forever. The supervisor is detached from the terminal, so closing the terminal
 after `usm tunnel local` / `remote` / `socks` does not stop the tunnel; use
 `usm tunnel stop <id>` when you want to close it.
+On Windows, both the supervisor and `ssh` run without opening an additional
+console window, `ls` checks their process handles without signaling them, and
+`stop` terminates both processes so no orphan keeps the forwarded port open.
 
 ## State files
 

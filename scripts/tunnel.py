@@ -54,6 +54,10 @@ DEFAULT_SSH_OPTS = (
     "ServerAliveCountMax=3",
     "StrictHostKeyChecking=accept-new",
 )
+WINDOWS_CREATE_NO_WINDOW = 0x08000000
+WINDOWS_PROCESS_TERMINATE = 0x0001
+WINDOWS_PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+WINDOWS_STILL_ACTIVE = 259
 
 try:
     _SIGKILL = signal.SIGKILL
@@ -211,12 +215,80 @@ def _build_argv(t: Tunnel) -> list[str]:
     return argv
 
 
+def _is_windows() -> bool:
+    return sys.platform == "win32"
+
+
+def _win32_kernel32():
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.GetExitCodeProcess.argtypes = [
+        wintypes.HANDLE,
+        ctypes.POINTER(wintypes.DWORD),
+    ]
+    kernel32.GetExitCodeProcess.restype = wintypes.BOOL
+    kernel32.TerminateProcess.argtypes = [wintypes.HANDLE, wintypes.UINT]
+    kernel32.TerminateProcess.restype = wintypes.BOOL
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    return kernel32
+
+
+def _windows_pid_alive(pid: int) -> bool:
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = _win32_kernel32()
+    handle = kernel32.OpenProcess(WINDOWS_PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+    if not handle:
+        return False
+    try:
+        exit_code = wintypes.DWORD()
+        return bool(
+            kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code))
+            and exit_code.value == WINDOWS_STILL_ACTIVE
+        )
+    finally:
+        kernel32.CloseHandle(handle)
+
+
+def _windows_terminate_pid(pid: int) -> bool:
+    kernel32 = _win32_kernel32()
+    handle = kernel32.OpenProcess(WINDOWS_PROCESS_TERMINATE, False, pid)
+    if not handle:
+        return False
+    try:
+        return bool(kernel32.TerminateProcess(handle, 1))
+    finally:
+        kernel32.CloseHandle(handle)
+
+
 def _pid_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    if _is_windows():
+        return _windows_pid_alive(pid)
     try:
         os.kill(pid, 0)
     except (OSError, ProcessLookupError):
         return False
     return True
+
+
+def _platform_popen_kwargs(*, detached: bool = False) -> dict:
+    if _is_windows():
+        return {
+            "creationflags": getattr(
+                subprocess, "CREATE_NO_WINDOW", WINDOWS_CREATE_NO_WINDOW
+            )
+        }
+    if detached and os.name == "posix":
+        return {"start_new_session": True}
+    return {}
 
 
 # service helpers ----------------------------------------------------------
@@ -633,6 +705,7 @@ def _supervise(tid: str) -> int:
                     stdin=subprocess.DEVNULL,
                     stdout=log,
                     stderr=subprocess.STDOUT,
+                    **_platform_popen_kwargs(),
                 )
             except FileNotFoundError:
                 log.write(f"{argv[0]} not found on PATH.\n".encode())
@@ -685,11 +758,8 @@ def _start(t: Tunnel, *, new: bool = False) -> None:
         "stdin": subprocess.DEVNULL,
         "stdout": log,
         "stderr": subprocess.STDOUT,
+        **_platform_popen_kwargs(detached=True),
     }
-    if os.name == "posix":
-        popen_kwargs["start_new_session"] = True
-    else:
-        popen_kwargs["creationflags"] = getattr(subprocess, "DETACHED_PROCESS", 0)
 
     try:
         proc = subprocess.Popen(argv, **popen_kwargs)
@@ -728,6 +798,29 @@ def _start(t: Tunnel, *, new: bool = False) -> None:
 
 def _kill_pid(t: Tunnel) -> bool:
     """SIGTERM then SIGKILL the recorded pid. Returns True if it was alive."""
+    if _is_windows():
+        pids = list(
+            dict.fromkeys(
+                pid for pid in (t.supervisor_pid, t.pid) if pid and _pid_alive(pid)
+            )
+        )
+        if not pids:
+            return False
+        for pid in pids:
+            if not _windows_terminate_pid(pid) and _pid_alive(pid):
+                raise click.ClickException(f"Could not stop process {pid}.")
+        deadline = time.time() + 5
+        while time.time() < deadline:
+            remaining = [pid for pid in pids if _pid_alive(pid)]
+            if not remaining:
+                return True
+            time.sleep(0.1)
+        remaining = [pid for pid in pids if _pid_alive(pid)]
+        if remaining:
+            joined = ", ".join(str(pid) for pid in remaining)
+            raise click.ClickException(f"Could not stop process(es): {joined}.")
+        return True
+
     pid = t.supervisor_pid or t.pid
     if not pid:
         return False

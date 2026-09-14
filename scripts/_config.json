@@ -388,8 +388,8 @@
         "click>=8.2.1",
         "rich>=13.0"
       ],
-      "version": "1.3.9",
-      "hash": "sha256:719525e84a5d5ae65dcb6e36e29d5da22c2bdaa6076edf3cb1f8af6fdc7b1324"
+      "version": "1.3.10",
+      "hash": "sha256:aa7528168a706fb54439e0dab28e6337e0fa6c7f5ca1fd0440e2c8c6971b4f26"
     },
     "wait": {
       "description": "Block until host:port / TCP / HTTP is reachable.",
