@@ -44,6 +44,30 @@ usm serve ~/data --tunnel u@bastion       # push: serve locally, expose on basti
 | `--auth` | none | Set with `USER:PASS`; see miniserve docs for hashed form. |
 | archives | on | Three download buttons (`.tar`, `.tar.gz`, `.zip`) at the top of every folder page; pass `--no-archive` to disable. |
 | `--upgrade` (`-U`) | — | Force re-download of the miniserve binary on this run. |
+| `--ssh-timeout` | `30` | Seconds per remote setup command, including connection/authentication. Binary installation allows at least 180 seconds. |
+
+## SSH setup timeouts
+
+A `path/platform probe timed out` error happens **before miniserve starts**.
+The timeout covers connection, authentication, remote shell startup, and the
+path/platform command; it does not identify which stage stalled. Increase the
+budget for a slow host or jump connection:
+
+```powershell
+usm serve li2:~ --ssh-timeout 90
+```
+
+Setup commands use non-interactive SSH (`BatchMode=yes`): key/agent
+authentication must already work. They disable TTY allocation, configured
+`RemoteCommand`, and inherited port forwards, while still using the host alias,
+user, identity, and proxy settings in your SSH config. The serving session also
+disables TTY allocation and `RemoteCommand`, but keeps its requested `-L` tunnel.
+
+On timeout, `serve` includes any captured SSH stderr and a matching `ssh -vvv`
+diagnostic command. Run that command in the **same terminal/environment** as
+`usm`. If it also stalls, inspect the last verbose messages for proxy,
+authentication, or remote shell startup problems; increasing a timeout will
+not fix a blocked login or shell startup script.
 
 ## Local vs. remote — picking the right command
 

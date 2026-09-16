@@ -308,8 +308,8 @@
         "click>=8.2.1",
         "rich>=13.0"
       ],
-      "version": "1.0.5",
-      "hash": "sha256:70321a5c70f82028df09fe8cdab2ab8b6da9e00dfcc968ee688beebd80e47e52"
+      "version": "1.0.6",
+      "hash": "sha256:25bd736be69df6992ae1f4b553b97e72bd198d4c9c608cf25aa9a219454cd94a"
     },
     "session": {
       "description": "Inspect and manage logged-in user sessions.",

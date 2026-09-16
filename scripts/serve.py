@@ -17,6 +17,7 @@ downloads the pinned version into ``~/.cache/usm/bin/miniserve`` (chmod
 from __future__ import annotations
 
 import contextlib
+import math
 import os
 import platform
 import random
@@ -45,6 +46,13 @@ LOCAL_BIN_DIR = USM_CACHE_DIR / "bin"
 LOCAL_MINISERVE = LOCAL_BIN_DIR / "miniserve"
 REMOTE_BIN_DIR = "~/.cache/usm/bin"
 REMOTE_MINISERVE = f"{REMOTE_BIN_DIR}/miniserve"
+DEFAULT_SSH_TIMEOUT = 30
+
+_SSH_COMMAND: tuple[str, ...] = (
+    "-T",
+    "-o",
+    "RemoteCommand=none",
+)
 
 _SSH_KEEPALIVE: tuple[str, ...] = (
     "-o",
@@ -57,12 +65,13 @@ _SSH_KEEPALIVE: tuple[str, ...] = (
     "StrictHostKeyChecking=accept-new",
 )
 _SSH_QUICK: tuple[str, ...] = (
+    *_SSH_COMMAND,
     "-o",
     "BatchMode=yes",
     "-o",
     "StrictHostKeyChecking=accept-new",
     "-o",
-    "ConnectTimeout=10",
+    "ClearAllForwardings=yes",
 )
 
 
@@ -161,17 +170,52 @@ def ensure_local_miniserve(*, upgrade: bool = False) -> Path:
 
 
 def _ssh_run(
-    target: str, snippet: str, *, timeout: float = 60
+    target: str,
+    snippet: str,
+    *,
+    timeout: float = DEFAULT_SSH_TIMEOUT,
+    operation: str = "command",
 ) -> subprocess.CompletedProcess:
+    argv = [
+        "ssh",
+        *_SSH_QUICK,
+        "-o",
+        f"ConnectTimeout={math.ceil(timeout)}",
+        target,
+        snippet,
+    ]
     try:
         return subprocess.run(
-            ["ssh", *_SSH_QUICK, target, snippet],
+            argv,
+            stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
+            errors="replace",
             timeout=timeout,
         )
-    except (subprocess.TimeoutExpired, OSError) as e:
-        raise click.ClickException(f"ssh {target} failed: {e}") from e
+    except subprocess.TimeoutExpired as e:
+        diagnostic = [*argv[:-1], "echo usm-ssh-ok"]
+        diagnostic.insert(1, "-vvv")
+        command = (
+            subprocess.list2cmdline(diagnostic)
+            if os.name == "nt"
+            else shlex.join(diagnostic)
+        )
+        msg = (
+            f"ssh {target} {operation} timed out after {timeout:g}s. "
+            "The connection, authentication, or remote shell may be stalled.\n"
+            f"Diagnose with: {command}\n"
+            "For a slow connection, increase --ssh-timeout (seconds). "
+            "BatchMode requires non-interactive authentication (e.g. a key/agent)."
+        )
+        stderr = e.stderr
+        if isinstance(stderr, bytes):
+            stderr = stderr.decode(errors="replace")
+        if stderr and stderr.strip():
+            msg += f"\nSSH stderr:\n{stderr.strip()[-2000:]}"
+        raise click.ClickException(msg) from e
+    except OSError as e:
+        raise click.ClickException(f"ssh {target} {operation} failed: {e}") from e
 
 
 @dataclass(frozen=True)
@@ -185,7 +229,9 @@ class RemoteProbe:
         return Target(self.system, self.machine)
 
 
-def probe_remote(ssh_target: str, path: str) -> RemoteProbe:
+def probe_remote(
+    ssh_target: str, path: str, *, timeout: float = DEFAULT_SSH_TIMEOUT
+) -> RemoteProbe:
     quoted = _quote_remote_path(path)
     snippet = (
         f"if [ -d {quoted} ]; then K=dir; "
@@ -194,7 +240,7 @@ def probe_remote(ssh_target: str, path: str) -> RemoteProbe:
         "OS=$(uname -s); ARCH=$(uname -m); "
         'echo "$K $OS $ARCH"'
     )
-    r = _ssh_run(ssh_target, snippet, timeout=30)
+    r = _ssh_run(ssh_target, snippet, timeout=timeout, operation="path/platform probe")
     if r.returncode != 0:
         msg = r.stderr.strip() or f"exit {r.returncode}"
         raise click.ClickException(f"ssh {ssh_target} probe failed: {msg}")
@@ -208,7 +254,11 @@ def probe_remote(ssh_target: str, path: str) -> RemoteProbe:
 
 
 def ensure_remote_miniserve(
-    ssh_target: str, probe: RemoteProbe, *, upgrade: bool = False
+    ssh_target: str,
+    probe: RemoteProbe,
+    *,
+    upgrade: bool = False,
+    timeout: float = DEFAULT_SSH_TIMEOUT,
 ) -> str:
     """Return remote path to a usable miniserve, installing it via ssh if needed.
 
@@ -228,9 +278,17 @@ def ensure_remote_miniserve(
         f"fi; "
         f"[ -x {REMOTE_MINISERVE} ] && echo managed && exit 0; "
         "echo missing",
-        timeout=15,
+        timeout=timeout,
+        operation="miniserve lookup",
     )
-    if check.returncode == 0 and not upgrade:
+    if check.returncode != 0:
+        msg = check.stderr.strip() or f"exit {check.returncode}"
+        raise click.ClickException(f"ssh {ssh_target} miniserve lookup failed: {msg}")
+    if not check.stdout.strip():
+        raise click.ClickException(
+            f"ssh {ssh_target} miniserve lookup returned no output"
+        )
+    if not upgrade:
         out = check.stdout.strip().splitlines()[-1]
         if out == "managed":
             return REMOTE_MINISERVE
@@ -255,7 +313,12 @@ def ensure_remote_miniserve(
         f"  echo 'no curl, wget, or python3 on remote' >&2; exit 1; "
         f'fi && chmod +x "$TMP" && mv "$TMP" {REMOTE_MINISERVE} && echo ok'
     )
-    r = _ssh_run(ssh_target, install_snippet, timeout=180)
+    r = _ssh_run(
+        ssh_target,
+        install_snippet,
+        timeout=max(180, timeout),
+        operation="miniserve installation",
+    )
     if r.returncode != 0 or "ok" not in r.stdout:
         msg = r.stderr.strip() or r.stdout.strip() or f"exit {r.returncode}"
         raise click.ClickException(f"remote install failed on {ssh_target}: {msg}")
@@ -416,7 +479,7 @@ def open_forward_serve(
         if bind == "127.0.0.1"
         else f"{bind}:{lport}:127.0.0.1:{rport}"
     )
-    argv = ["ssh", "-T", *_SSH_KEEPALIVE]
+    argv = ["ssh", *_SSH_COMMAND, *_SSH_KEEPALIVE]
     if bind not in ("127.0.0.1", "localhost"):
         argv.append("-g")
     argv += ["-L", forward, ssh_target, remote_cmd]
@@ -553,15 +616,20 @@ class RemoteServe:
     ssh_target: str
     remote_path: str
     upgrade: bool = False
+    ssh_timeout: int = DEFAULT_SSH_TIMEOUT
 
     def open(self, port: int, bind: str, opts: MiniserveOpts) -> Session:
-        probe = probe_remote(self.ssh_target, self.remote_path)
+        probe = probe_remote(
+            self.ssh_target, self.remote_path, timeout=self.ssh_timeout
+        )
         if probe.kind == "file":
             raise click.ClickException(
                 f"miniserve serves directories; {self.remote_path!r} is a file. "
                 "Point at the parent directory instead."
             )
-        binary = ensure_remote_miniserve(self.ssh_target, probe, upgrade=self.upgrade)
+        binary = ensure_remote_miniserve(
+            self.ssh_target, probe, upgrade=self.upgrade, timeout=self.ssh_timeout
+        )
         proc, rport = open_forward_serve(
             self.ssh_target,
             self.remote_path,
@@ -586,7 +654,13 @@ class RemoteServe:
         return sess
 
 
-def make_source(spec: str, tunnel: str | None, upgrade: bool) -> Source:
+def make_source(
+    spec: str,
+    tunnel: str | None,
+    upgrade: bool,
+    *,
+    ssh_timeout: int = DEFAULT_SSH_TIMEOUT,
+) -> Source:
     remote = parse_remote(spec)
     if remote is not None:
         if tunnel:
@@ -594,7 +668,9 @@ def make_source(spec: str, tunnel: str | None, upgrade: bool) -> Source:
                 "--tunnel can't be combined with a remote source (user@host:/path)."
             )
         ssh_target, remote_path = remote
-        return RemoteServe(ssh_target, remote_path, upgrade=upgrade)
+        return RemoteServe(
+            ssh_target, remote_path, upgrade=upgrade, ssh_timeout=ssh_timeout
+        )
     path = Path(spec)
     if not path.exists():
         raise click.ClickException(f"path not found: {spec}")
@@ -681,6 +757,14 @@ def run_until_done(sess: Session) -> None:
     "Push mode; mutually exclusive with a remote source.",
 )
 @click.option(
+    "--ssh-timeout",
+    type=click.IntRange(min=1),
+    default=DEFAULT_SSH_TIMEOUT,
+    show_default=True,
+    help="Timeout in seconds per remote SSH setup command (connection included). "
+    "Binary installation allows at least 180 seconds.",
+)
+@click.option(
     "-U",
     "--upgrade",
     is_flag=True,
@@ -698,6 +782,7 @@ def cli(
     archive,
     verbose,
     tunnel,
+    ssh_timeout,
     upgrade,
 ):
     opts = MiniserveOpts(
@@ -709,7 +794,7 @@ def cli(
         verbose=verbose,
         enable_archive=archive,
     )
-    source = make_source(path, tunnel, upgrade)
+    source = make_source(path, tunnel, upgrade, ssh_timeout=ssh_timeout)
     sess = source.open(resolve_port(port), bind, opts)
     run_until_done(sess)
 
