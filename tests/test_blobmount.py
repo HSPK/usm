@@ -87,6 +87,7 @@ def sas_for(expires_in: float, *, now: float | None = None) -> str:
 FAKE_BLOBFUSE = '''#!/usr/bin/env python3
 """Scripted blobfuse2. $FAKE_BLOBFUSE_PLAN holds the responses."""
 import json, os, sys
+import yaml
 
 plan_path = os.environ["FAKE_BLOBFUSE_PLAN"]
 with open(plan_path) as fh:
@@ -108,6 +109,15 @@ if step.get("stdout"):
 if step.get("stderr"):
     print(step["stderr"], file=sys.stderr)
 if verb == "mount" and step.get("exit", 0) == 0:
+    config_path = sys.argv[sys.argv.index("--config-file") + 1]
+    with open(config_path) as fh:
+        config = yaml.safe_load(fh)
+    cache = config["file_cache"]["path"]
+    if os.listdir(cache) and not config["file_cache"].get("allow-non-empty-temp"):
+        print("config error in file_cache [temp directory not empty]", file=sys.stderr)
+        sys.exit(1)
+    with open(os.path.join(cache, "cached-file"), "w") as fh:
+        fh.write("retained cache data")
     # Record that a mount "happened" so the test can flip is_mountpoint.
     marker = os.environ.get("FAKE_MOUNT_MARKER")
     if marker:
@@ -129,6 +139,19 @@ def fake_blobfuse(tmp_path, monkeypatch):
     binary.chmod(0o755)
     plan_path = tmp_path / "bf_plan.json"
     marker = tmp_path / "mounted.marker"
+    supervisor_python = tmp_path / "supervisor-python"
+    supervisor_python.write_text(
+        "#!/usr/bin/env python3\n"
+        "import os, sys\n"
+        "from pathlib import Path\n"
+        "sys.path.insert(0, str(Path(sys.argv[1]).parent))\n"
+        "import blobmount\n"
+        "blobmount.is_mountpoint = lambda _path: Path(os.environ['FAKE_MOUNT_MARKER']).exists()\n"
+        "blobmount.cli(args=sys.argv[2:])\n"
+    )
+    supervisor_python.chmod(0o755)
+    # The child needs the same fake mountpoint check as the parent.
+    monkeypatch.setattr(blobmount.sys, "executable", str(supervisor_python))
     monkeypatch.setenv("USM_BLOBFUSE2_BIN", str(binary))
     monkeypatch.setenv("FAKE_BLOBFUSE_PLAN", str(plan_path))
     monkeypatch.setenv("FAKE_MOUNT_MARKER", str(marker))
@@ -297,10 +320,15 @@ class TestRenderConfig:
         config = yaml.safe_load(render_config(mount, None))
         assert config["file_cache"]["max-size-mb"] == 4096
         assert config["file_cache"]["path"] == str(tmp_path / "c")
+        assert config["file_cache"]["allow-non-empty-temp"] is True
+        assert config["file_cache"]["cleanup-on-start"] is False
 
-    def test_default_cache_path_is_per_container(self, tmp_path, state_dir):
+    def test_default_paths_are_per_mount(self, tmp_path, state_dir):
         mount = make_mount(tmp_path)
-        assert mount.cache_path().name == "acct-bucket"
+        other = make_mount(tmp_path, id="other", mount_dir=tmp_path / "other")
+        assert mount.cache_path().name == "data-acct-bucket"
+        assert mount.cache_path() != other.cache_path()
+        assert mount.config_path() != other.config_path()
 
     def test_config_written_owner_only(self, tmp_path, state_dir):
         mount = make_mount(tmp_path)
@@ -470,6 +498,99 @@ class TestDoMount:
         assert "SECRET123" not in str(exc.value), "SAS leaked into the error"
         assert "sig=***" in str(exc.value)
 
+    def test_nonempty_cache_error_is_actionable(
+        self, tmp_path, state_dir, fake_blobfuse
+    ):
+        mount = make_mount(tmp_path)
+        mount.cache_path().mkdir(parents=True)
+        cached = mount.cache_path() / "pending-write"
+        cached.write_text("do not delete")
+        fake_blobfuse.program(
+            mount=[
+                {
+                    "exit": 1,
+                    "stderr": "config error in file_cache [temp directory not empty]",
+                }
+            ]
+        )
+        with pytest.raises(BlobmountError) as exc:
+            blobmount.do_mount(mount, sas_for(3600))
+        message = str(exc.value)
+        assert mount.mount_dir in message
+        assert str(mount.cache_path()) in message
+        assert "--cache-dir" in message
+        assert cached.read_text() == "do not delete"
+
+    def test_shared_active_cache_is_rejected(self, tmp_path, state_dir, fake_blobfuse):
+        cache = tmp_path / "shared-cache"
+        other = make_mount(
+            tmp_path, id="other", mount_dir=tmp_path / "other", cache_dir=str(cache)
+        )
+        blobmount.save_mount(other)
+        fake_blobfuse.set_mounted(True)
+        mount = make_mount(tmp_path, cache_dir=str(cache))
+        with pytest.raises(BlobmountError, match="in use by 'other'"):
+            blobmount.do_mount(mount, sas_for(3600))
+        assert fake_blobfuse.calls_for("mount") == []
+        assert not mount.config_path().exists()
+
+    def test_cache_for_another_container_is_rejected(
+        self, tmp_path, state_dir, fake_blobfuse
+    ):
+        cache = tmp_path / "shared-cache"
+        other = make_mount(
+            tmp_path,
+            id="other",
+            mount_dir=tmp_path / "other",
+            container="different",
+            cache_dir=str(cache),
+        )
+        blobmount.save_mount(other)
+        with pytest.raises(BlobmountError, match="belongs to 'other'"):
+            blobmount.do_mount(
+                make_mount(tmp_path, cache_dir=str(cache)), sas_for(3600)
+            )
+
+    def test_cache_inside_mountpoint_is_rejected(
+        self, tmp_path, state_dir, fake_blobfuse
+    ):
+        mount = make_mount(tmp_path, cache_dir=str(tmp_path / "mnt" / "cache"))
+        with pytest.raises(BlobmountError, match="must be separate"):
+            blobmount.do_mount(mount, sas_for(3600))
+
+    def test_overlapping_cache_directories_are_rejected(
+        self, tmp_path, state_dir, fake_blobfuse
+    ):
+        cache = tmp_path / "shared-cache"
+        other = make_mount(
+            tmp_path, id="other", mount_dir=tmp_path / "other", cache_dir=str(cache)
+        )
+        blobmount.save_mount(other)
+        mount = make_mount(tmp_path, cache_dir=str(cache / "nested"))
+        with pytest.raises(BlobmountError, match="overlaps the cache"):
+            blobmount.do_mount(mount, sas_for(3600))
+
+    def test_home_directory_is_not_a_cache(self, tmp_path, state_dir, fake_blobfuse):
+        mount = make_mount(tmp_path, cache_dir=str(Path.home()))
+        with pytest.raises(BlobmountError, match="must be separate"):
+            blobmount.do_mount(mount, sas_for(3600))
+
+    def test_config_sas_is_not_overridden_by_child_environment(
+        self, tmp_path, state_dir, fake_blobfuse, monkeypatch
+    ):
+        monkeypatch.setenv("AZURE_STORAGE_SAS_TOKEN", "inherited-secret")
+        original_run = blobmount.run
+        environments = []
+
+        def capture_env(*args, **kwargs):
+            environments.append(kwargs["env"])
+            return original_run(*args, **kwargs)
+
+        monkeypatch.setattr(blobmount, "run", capture_env)
+        blobmount.do_mount(make_mount(tmp_path), sas_for(3600))
+        assert "AZURE_STORAGE_SAS_TOKEN" not in environments[0]
+        assert os.environ["AZURE_STORAGE_SAS_TOKEN"] == "inherited-secret"
+
     def test_unwritable_parent_is_rejected(self, tmp_path, state_dir, fake_blobfuse):
         parent = tmp_path / "locked"
         parent.mkdir()
@@ -620,6 +741,25 @@ class TestSupervisorDecisions:
         sup.sas.ensure(clock.now)
         assert sup.next_deadline(clock.now) >= clock.now + 1
 
+    def test_refresh_interval_applies_without_an_expiry(
+        self, tmp_path, state_dir, fake_blobfuse, stub_sas
+    ):
+        sup, clock, _ = build_supervisor(
+            tmp_path, fake_blobfuse, stub_sas, "sv=1&sp=rl&sig=SECRET123"
+        )
+        sup.sas.ensure(clock.now)
+        sup.state.health = OK
+        sup.state.last_refresh_at = clock.now - sup.mount.refresh_interval
+        assert sup.needs_refresh(clock.now) == (True, "refresh interval")
+
+    def test_aad_deadline_does_not_spin_after_refresh_interval(
+        self, tmp_path, state_dir, fake_blobfuse
+    ):
+        mount = make_mount(tmp_path, auth="aad", refresh_interval=1)
+        sup = MountSupervisor(mount, clock=_Clock(), log=lambda _message: None)
+        sup.state.last_refresh_at = sup.clock() - 100
+        assert sup.next_deadline(sup.clock()) == sup.clock() + mount.probe_interval
+
 
 class TestSupervisorRemount:
     def test_successful_rotation(self, tmp_path, state_dir, fake_blobfuse, stub_sas):
@@ -631,7 +771,7 @@ class TestSupervisorRemount:
             sas_for(7200, now=1_000_000.0),
         )
         fake_blobfuse.set_mounted(True)
-        assert sup.remount("test") is True
+        assert sup.refresh("test", remount=True) is True
         assert provider.calls >= 1
         assert fake_blobfuse.calls_for("unmount"), "should unmount before remounting"
         assert fake_blobfuse.calls_for("mount")
@@ -646,7 +786,7 @@ class TestSupervisorRemount:
 
         fresh = sas_for(7200, now=1_000_000.0)
         sup, _, _ = build_supervisor(tmp_path, fake_blobfuse, stub_sas, fresh)
-        sup.remount("test")
+        sup.refresh("test", remount=True)
         config = yaml.safe_load(sup.mount.config_path().read_text())
         assert config["azstorage"]["sas"] == fresh
 
@@ -655,7 +795,7 @@ class TestSupervisorRemount:
     ):
         sup, _, _ = build_supervisor(tmp_path, fake_blobfuse, stub_sas)
         fake_blobfuse.set_mounted(False)
-        sup.remount("initial")
+        sup.refresh("initial", remount=True)
         assert fake_blobfuse.calls_for("unmount") == []
 
     def test_sas_failure_aborts_before_touching_the_mount(
@@ -665,7 +805,7 @@ class TestSupervisorRemount:
             tmp_path, fake_blobfuse, stub_sas, SasError("no credentials")
         )
         fake_blobfuse.set_mounted(True)
-        assert sup.remount("test") is False
+        assert sup.refresh("test", remount=True) is False
         assert sup.state.state == "failed"
         assert "no credentials" in sup.state.last_error
         assert fake_blobfuse.calls == [], "must not unmount when it can't remount"
@@ -677,12 +817,12 @@ class TestSupervisorRemount:
             unmount=[{"exit": 0}], mount=[{"exit": 1, "stderr": "boom"}]
         )
         sup, _, _ = build_supervisor(tmp_path, fake_blobfuse, stub_sas)
-        assert sup.remount("test") is False
+        assert sup.refresh("test", remount=True) is False
         assert sup.state.state == "failed"
         assert sup.state.failures == 1
         assert "boom" in sup.state.last_error
 
-    def test_unmount_failure_still_attempts_the_mount(
+    def test_unmount_failure_preserves_the_existing_mount(
         self, tmp_path, state_dir, fake_blobfuse, stub_sas
     ):
         fake_blobfuse.program(unmount=[{"exit": 1}], mount=[{"exit": 0}])
@@ -690,24 +830,113 @@ class TestSupervisorRemount:
         logs = []
         sup, _, _ = build_supervisor(tmp_path, fake_blobfuse, stub_sas)
         sup._log = logs.append
-        assert sup.remount("test") is True
-        assert any("unmount reported failure" in m for m in logs)
+        assert sup.refresh("test", remount=True) is False
+        assert fake_blobfuse.calls_for("mount") == []
+        assert fake_blobfuse.marker_path.exists()
+        assert sup.state.remounts == 0
+        assert sup.state.state == "failed"
+        assert any("could not unmount" in m for m in logs)
 
     def test_forced_flag_is_cleared_after_success(
         self, tmp_path, state_dir, fake_blobfuse, stub_sas
     ):
         sup, clock, _ = build_supervisor(tmp_path, fake_blobfuse, stub_sas)
         sup.request_refresh()
-        sup.remount("manual")
+        sup.refresh("manual", remount=True)
         sup.state.health = OK
         assert sup.needs_refresh(clock.now)[0] is False
 
     def test_state_is_persisted(self, tmp_path, state_dir, fake_blobfuse, stub_sas):
         sup, _, _ = build_supervisor(tmp_path, fake_blobfuse, stub_sas)
-        sup.remount("test")
+        sup.refresh("test", remount=True)
         persisted = blobmount.load_state(sup.mount.id)
         assert persisted.state == "mounted" and persisted.refreshes == 1
         assert persisted.sas_expires_at is not None
+
+
+class TestSupervisorRefresh:
+    def test_sas_reload_does_not_unmount(
+        self, tmp_path, state_dir, fake_blobfuse, stub_sas
+    ):
+        import yaml
+
+        old = sas_for(3600, now=1_000_000.0)
+        fresh = sas_for(7200, now=1_000_000.0)
+        sup, clock, provider = build_supervisor(
+            tmp_path, fake_blobfuse, stub_sas, old, fresh
+        )
+        sup.sas.ensure(clock.now)
+        blobmount.do_mount(sup.mount, old)
+        cached = sup.mount.cache_path() / "pending-write"
+        cached.write_text("keep me")
+        assert sup.refresh("manual") is True
+        assert provider.calls == 2
+        assert len(fake_blobfuse.calls_for("mount")) == 1
+        assert fake_blobfuse.calls_for("unmount") == []
+        assert sup.state.refreshes == 1 and sup.state.remounts == 0
+        assert (
+            yaml.safe_load(sup.mount.config_path().read_text())["azstorage"]["sas"]
+            == fresh
+        )
+        assert cached.read_text() == "keep me"
+
+    def test_mount_option_change_requires_remount(
+        self, tmp_path, state_dir, fake_blobfuse, stub_sas
+    ):
+        sup, clock, _ = build_supervisor(tmp_path, fake_blobfuse, stub_sas)
+        token = sup.sas.ensure(clock.now)
+        blobmount.do_mount(sup.mount, token.token)
+        sup.mount.read_only = True
+        assert sup.refresh("options changed") is True
+        assert fake_blobfuse.calls_for("unmount")
+        assert "--read-only" in fake_blobfuse.calls_for("mount")[-1]
+
+    def test_provider_failure_preserves_live_config(
+        self, tmp_path, state_dir, fake_blobfuse, stub_sas
+    ):
+        old = sas_for(7200, now=1_000_000.0)
+        sup, clock, _ = build_supervisor(
+            tmp_path, fake_blobfuse, stub_sas, old, SasError("provider unavailable")
+        )
+        sup.sas.ensure(clock.now)
+        blobmount.do_mount(sup.mount, old)
+        previous = sup.mount.config_path().read_text()
+        assert sup.refresh("manual") is False
+        assert sup.mount.config_path().read_text() == previous
+        assert fake_blobfuse.calls_for("unmount") == []
+        assert sup.needs_refresh(clock.now) == (True, "retry failed refresh")
+
+    def test_unhealthy_reload_is_not_reported_as_success(
+        self, tmp_path, state_dir, fake_blobfuse, stub_sas, monkeypatch
+    ):
+        sup, clock, _ = build_supervisor(tmp_path, fake_blobfuse, stub_sas)
+        token = sup.sas.ensure(clock.now)
+        blobmount.do_mount(sup.mount, token.token)
+        health = iter([(OK, "readable"), (DENIED, "permission denied")])
+        monkeypatch.setattr(
+            blobmount, "probe_mount", lambda *_args, **_kwargs: next(health)
+        )
+        monkeypatch.setattr(blobmount, "PROBE_TIMEOUT", 0)
+        assert sup.refresh("manual") is False
+        assert sup.state.state == "failed"
+        assert "config updated" in sup.state.last_error
+        assert "--force" in sup.state.last_error
+        assert fake_blobfuse.calls_for("unmount") == []
+
+    def test_successful_mount_command_still_requires_readable_mount(
+        self, tmp_path, state_dir, fake_blobfuse, stub_sas, monkeypatch
+    ):
+        sup, _clock, _provider = build_supervisor(tmp_path, fake_blobfuse, stub_sas)
+        health = iter([(UNMOUNTED, "not mounted"), (DENIED, "permission denied")])
+        monkeypatch.setattr(
+            blobmount, "probe_mount", lambda *_args, **_kwargs: next(health)
+        )
+        monkeypatch.setattr(blobmount, "PROBE_TIMEOUT", 0)
+        assert sup.refresh("initial mount") is False
+        assert len(fake_blobfuse.calls_for("mount")) == 1
+        assert sup.state.state == "failed"
+        assert sup.state.refreshes == 0
+        assert "is still denied" in sup.state.last_error
 
 
 class TestSupervisorTick:
@@ -795,6 +1024,20 @@ class TestSupervisorRun:
         sup.request_stop()
         assert sup.run() == 0
         assert fake_blobfuse.calls_for("mount") == []
+
+    def test_restart_retries_a_failed_refresh(
+        self, tmp_path, state_dir, fake_blobfuse, stub_sas
+    ):
+        sup, clock, provider = build_supervisor(tmp_path, fake_blobfuse, stub_sas)
+        token = sup.sas.ensure(clock.now)
+        blobmount.do_mount(sup.mount, token.token)
+        sup.state.state = "failed"
+        sup.request_stop()
+        assert sup.run() == 0
+        assert provider.calls == 2
+        assert sup.state.refreshes == 1
+        assert len(fake_blobfuse.calls_for("mount")) == 1
+        assert fake_blobfuse.calls_for("unmount") == []
 
 
 # --- Store -----------------------------------------------------------------
@@ -931,14 +1174,180 @@ class TestCliMount:
         assert result.exit_code != 0
         assert "already a mountpoint" in result.output
 
-    def test_refuses_a_duplicate_definition(
-        self, tmp_path, state_dir, fake_blobfuse, runner, env_sas
+    def test_repeated_mount_refreshes_the_original_definition(
+        self, tmp_path, state_dir, fake_blobfuse, runner, env_sas, monkeypatch
     ):
         target = tmp_path / "mnt"
         args = ["mount", str(target), "acct", "bucket", "--no-supervise", *env_sas]
         assert invoke(runner, args).exit_code == 0
+        fresh = sas_for(14400)
+        monkeypatch.setenv("BM_SAS", fresh)
         second = invoke(runner, args)
-        assert second.exit_code != 0 and "already managed" in second.output
+        assert second.exit_code == 0, second.output
+        assert [m.id for m in blobmount.list_mounts()] == ["mnt"]
+        assert len(fake_blobfuse.calls_for("mount")) == 1
+        assert fake_blobfuse.calls_for("unmount") == []
+        import yaml
+
+        config = yaml.safe_load(blobmount.load_mount("mnt").config_path().read_text())
+        assert config["azstorage"]["sas"] == fresh
+
+    def test_repeated_mount_preserves_omitted_options(
+        self, tmp_path, state_dir, fake_blobfuse, runner, env_sas
+    ):
+        target = tmp_path / "mnt"
+        cache = tmp_path / "custom-cache"
+        args = ["mount", str(target), "acct", "bucket", "--no-supervise"]
+        first = invoke(
+            runner,
+            [
+                *args,
+                *env_sas,
+                "--read-only",
+                "--no-allow-other",
+                "--cache-dir",
+                str(cache),
+                "--cache-size-mb",
+                "512",
+                "--probe-interval",
+                "12",
+            ],
+        )
+        assert first.exit_code == 0, first.output
+        second = invoke(runner, args)
+        assert second.exit_code == 0, second.output
+        mount = blobmount.load_mount("mnt")
+        assert mount.auth == "env" and mount.sas_spec == "BM_SAS"
+        assert mount.read_only and not mount.allow_other
+        assert mount.cache_dir == str(cache) and mount.cache_size_mb == 512
+        assert mount.probe_interval == 12
+        assert len(fake_blobfuse.calls_for("mount")) == 1
+
+    def test_path_alias_reuses_the_original_id(
+        self, tmp_path, state_dir, fake_blobfuse, runner, env_sas
+    ):
+        target = tmp_path / "mnt"
+        args = ["acct", "bucket", "--no-supervise", *env_sas]
+        assert invoke(runner, ["mount", str(target), *args]).exit_code == 0
+        alias = tmp_path / "alias"
+        alias.symlink_to(target, target_is_directory=True)
+        result = invoke(runner, ["mount", str(alias), *args])
+        assert result.exit_code == 0, result.output
+        assert [m.id for m in blobmount.list_mounts()] == ["mnt"]
+        assert len(fake_blobfuse.calls_for("mount")) == 1
+
+    def test_repeated_mount_reads_the_new_sas_source(
+        self, tmp_path, state_dir, fake_blobfuse, runner, env_sas, monkeypatch
+    ):
+        import yaml
+
+        args = ["mount", str(tmp_path / "mnt"), "acct", "bucket", "--no-supervise"]
+        assert invoke(runner, [*args, *env_sas]).exit_code == 0
+        fresh = sas_for(14400)
+        monkeypatch.setenv("NEW_SAS", fresh)
+        result = invoke(runner, [*args, "--sas-env", "NEW_SAS"])
+        assert result.exit_code == 0, result.output
+        mount = blobmount.load_mount("mnt")
+        assert mount.sas_spec == "NEW_SAS"
+        assert (
+            yaml.safe_load(mount.config_path().read_text())["azstorage"]["sas"] == fresh
+        )
+        assert len(fake_blobfuse.calls_for("mount")) == 1
+
+    def test_inline_url_token_can_be_replaced(
+        self, tmp_path, state_dir, fake_blobfuse, runner
+    ):
+        import yaml
+
+        target = str(tmp_path / "mnt")
+        base = "https://acct.blob.core.windows.net/bucket"
+        for token in (sas_for(7200), sas_for(14400)):
+            result = invoke(
+                runner, ["mount", target, f"{base}?{token}", "--no-supervise"]
+            )
+            assert result.exit_code == 0, result.output
+            assert "SECRET123" not in result.output
+        mount = blobmount.load_mount("mnt")
+        assert mount.auth == "inline"
+        assert (
+            yaml.safe_load(mount.config_path().read_text())["azstorage"]["sas"] == token
+        )
+        assert len(fake_blobfuse.calls_for("mount")) == 1
+        assert stat.S_IMODE(blobmount._def_path("mnt").stat().st_mode) == 0o600
+        status = invoke(runner, ["status", "mnt"])
+        assert "SECRET123" not in status.output
+
+    def test_failed_new_mount_does_not_allocate_another_id(
+        self, tmp_path, state_dir, fake_blobfuse, runner, env_sas
+    ):
+        args = [
+            "mount",
+            str(tmp_path / "mnt"),
+            "acct",
+            "bucket",
+            "--no-supervise",
+            *env_sas,
+        ]
+        fake_blobfuse.program(
+            mount=[{"exit": 1, "stderr": "mount failed"}, {"exit": 0}]
+        )
+        first = invoke(runner, args)
+        assert first.exit_code != 0
+        assert blobmount.list_mounts() == []
+        second = invoke(runner, args)
+        assert second.exit_code == 0, second.output
+        assert [m.id for m in blobmount.list_mounts()] == ["mnt"]
+
+    def test_existing_name_cannot_be_assigned_to_another_directory(
+        self, tmp_path, state_dir, fake_blobfuse, runner, env_sas
+    ):
+        args = ["acct", "bucket", "--no-supervise", *env_sas, "--name", "data"]
+        assert invoke(runner, ["mount", str(tmp_path / "mnt"), *args]).exit_code == 0
+        result = invoke(runner, ["mount", str(tmp_path / "other"), *args, "--force"])
+        assert result.exit_code != 0
+        assert "already used by another directory" in result.output
+        assert len(fake_blobfuse.calls_for("mount")) == 1
+
+    def test_force_replaces_container_without_reusing_its_cache(
+        self, tmp_path, state_dir, fake_blobfuse, runner, env_sas
+    ):
+        args = ["mount", str(tmp_path / "mnt"), "acct"]
+        tail = ["--no-supervise", *env_sas]
+        assert invoke(runner, [*args, "bucket", *tail]).exit_code == 0
+        old_cache = blobmount.load_mount("mnt").cache_path()
+        rejected = invoke(runner, [*args, "other", *tail])
+        assert rejected.exit_code != 0 and "Use --force" in rejected.output
+        result = invoke(runner, [*args, "other", *tail, "--force"])
+        assert result.exit_code == 0, result.output
+        mount = blobmount.load_mount("mnt")
+        assert mount.container == "other" and mount.cache_path() != old_cache
+        assert (old_cache / "cached-file").exists()
+        assert [m.id for m in blobmount.list_mounts()] == ["mnt"]
+
+    def test_force_reuses_nonempty_custom_cache(
+        self, tmp_path, state_dir, fake_blobfuse, runner, env_sas
+    ):
+        cache = tmp_path / "custom-cache"
+        cache.mkdir()
+        pending = cache / "pending-write"
+        pending.write_text("do not delete")
+        args = [
+            "mount",
+            str(tmp_path / "mnt"),
+            "acct",
+            "bucket",
+            "--no-supervise",
+            "--cache-dir",
+            str(cache),
+            "--force",
+            *env_sas,
+        ]
+        for _ in range(2):
+            result = invoke(runner, args)
+            assert result.exit_code == 0, result.output
+            assert pending.read_text() == "do not delete"
+        assert len(fake_blobfuse.calls_for("mount")) == 2
+        assert [m.id for m in blobmount.list_mounts()] == ["mnt"]
 
     def test_conflicting_sas_flags(self, tmp_path, state_dir, fake_blobfuse, runner):
         result = invoke(
@@ -1338,6 +1747,48 @@ class TestLiveSupervisor:
         finally:
             blobmount.stop_supervisor("live")
         wait_until(lambda: not blobmount.pid_alive(pid), timeout=15)
+
+    def test_repeated_mount_updates_source_then_force_remounts(
+        self, tmp_path, state_dir, fake_blobfuse, runner
+    ):
+        import yaml
+
+        old_file = tmp_path / "old.sas"
+        old_file.write_text(sas_for(7200))
+        new_file = tmp_path / "new.sas"
+        fresh = sas_for(14400)
+        new_file.write_text(fresh)
+        args = ["mount", str(tmp_path / "mnt"), "acct", "bucket"]
+        try:
+            first = invoke(runner, [*args, "--sas-file", str(old_file)])
+            assert first.exit_code == 0, first.output
+            assert wait_until(lambda: blobmount.supervisor_running("mnt"))
+            first_pid = blobmount.load_state("mnt").supervisor_pid
+
+            second = invoke(runner, [*args, "--sas-file", str(new_file)])
+            assert second.exit_code == 0, second.output
+            assert wait_until(lambda: blobmount.supervisor_running("mnt"))
+            second_pid = blobmount.load_state("mnt").supervisor_pid
+            assert second_pid != first_pid
+            assert not blobmount.pid_alive(first_pid)
+            mount = blobmount.load_mount("mnt")
+            assert mount.sas_spec == str(new_file)
+            assert (
+                yaml.safe_load(mount.config_path().read_text())["azstorage"]["sas"]
+                == fresh
+            )
+            assert len(fake_blobfuse.calls_for("mount")) == 1
+            assert fake_blobfuse.calls_for("unmount") == []
+
+            forced = invoke(runner, [*args, "--force"])
+            assert forced.exit_code == 0, forced.output
+            assert wait_until(lambda: blobmount.supervisor_running("mnt"))
+            assert not blobmount.pid_alive(second_pid)
+            assert len(fake_blobfuse.calls_for("mount")) == 2
+            assert len(fake_blobfuse.calls_for("unmount")) == 1
+            assert [m.id for m in blobmount.list_mounts()] == ["mnt"]
+        finally:
+            blobmount.stop_supervisor("mnt")
 
 
 # --- Install path ----------------------------------------------------------
@@ -1888,6 +2339,116 @@ class TestCliErrorPaths:
         result = invoke(runner, args + ["--force"])
         assert result.exit_code == 0, result.output
         assert fake_blobfuse.calls_for("unmount"), "force should remount"
+        assert len(fake_blobfuse.calls_for("mount")) == 2
+        assert [m.id for m in blobmount.list_mounts()] == ["mnt"]
+        cache = blobmount.load_mount("mnt").cache_path()
+        assert (cache / "cached-file").read_text() == "retained cache data"
+
+    def test_force_stops_the_old_supervisor_and_remounts_before_restart(
+        self, tmp_path, state_dir, fake_blobfuse, runner, env_sas, monkeypatch
+    ):
+        args = ["mount", str(tmp_path / "mnt"), "acct", "bucket", *env_sas]
+        assert invoke(runner, [*args, "--no-supervise"]).exit_code == 0
+        blobmount.save_state(
+            "mnt",
+            MountState(state="mounted", supervisor_pid=123, refreshes=5, remounts=3),
+        )
+        running = [True]
+        events = []
+        monkeypatch.setattr(blobmount, "supervisor_running", lambda _ident: running[0])
+
+        def stop(ident):
+            assert blobmount.load_state(ident).supervisor_pid == 123
+            events.append("stop")
+            running[0] = False
+            state = blobmount.load_state(ident)
+            state.supervisor_pid = None
+            blobmount.save_state(ident, state)
+            return True
+
+        def start(mount):
+            assert not running[0]
+            assert len(fake_blobfuse.calls_for("mount")) == 2
+            assert mount.id == "mnt"
+            events.append("start")
+
+        monkeypatch.setattr(blobmount, "stop_supervisor", stop)
+        monkeypatch.setattr(blobmount, "_start", start)
+        result = invoke(runner, [*args, "--force"])
+        assert result.exit_code == 0, result.output
+        assert events == ["stop", "start"]
+        assert [m.id for m in blobmount.list_mounts()] == ["mnt"]
+        state = blobmount.load_state("mnt")
+        assert state.refreshes == 6 and state.remounts == 4
+
+    def test_failed_supervisor_stop_leaves_state_and_mount_unchanged(
+        self, tmp_path, state_dir, fake_blobfuse, runner, env_sas, monkeypatch
+    ):
+        args = [
+            "mount",
+            str(tmp_path / "mnt"),
+            "acct",
+            "bucket",
+            "--no-supervise",
+            *env_sas,
+        ]
+        assert invoke(runner, args).exit_code == 0
+        original = MountState(state="mounted", supervisor_pid=123, refreshes=5)
+        blobmount.save_state("mnt", original)
+        monkeypatch.setattr(blobmount, "supervisor_running", lambda _ident: True)
+        monkeypatch.setattr(blobmount, "stop_supervisor", lambda _ident: False)
+        result = invoke(runner, [*args, "--force"])
+        assert result.exit_code != 0
+        assert "could not stop supervisor" in result.output
+        assert blobmount.load_state("mnt") == original
+        assert fake_blobfuse.calls_for("unmount") == []
+        assert len(fake_blobfuse.calls_for("mount")) == 1
+
+    def test_existing_duplicate_records_are_retired(
+        self, tmp_path, state_dir, fake_blobfuse, runner, env_sas
+    ):
+        target = tmp_path / "mnt"
+        args = ["mount", str(target), "acct", "bucket", "--no-supervise", *env_sas]
+        assert invoke(runner, args).exit_code == 0
+        duplicate = make_mount(
+            tmp_path, id="mnt-2", mount_dir=target, auth="env", sas_spec="BM_SAS"
+        )
+        blobmount.save_mount(duplicate)
+        blobmount.save_state("mnt-2", MountState())
+        result = invoke(runner, [*args, "--force"])
+        assert result.exit_code == 0, result.output
+        assert [m.id for m in blobmount.list_mounts()] == ["mnt"]
+        assert not blobmount._state_path("mnt-2").exists()
+
+    def test_legacy_cache_is_preserved_when_config_is_migrated(
+        self, tmp_path, state_dir, fake_blobfuse, runner, env_sas
+    ):
+        mount = make_mount(tmp_path, id="mnt", auth="env", sas_spec="BM_SAS")
+        blobmount.atomic_write(
+            blobmount._def_path("mnt"), json.dumps(blobmount.asdict(mount))
+        )
+        legacy_cache = blobmount.CACHE_ROOT / "acct-bucket"
+        legacy_cache.mkdir()
+        pending = legacy_cache / "pending-write"
+        pending.write_text("keep legacy data")
+        fake_blobfuse.set_mounted(True)
+        result = invoke(
+            runner,
+            [
+                "mount",
+                mount.mount_dir,
+                "acct",
+                "bucket",
+                "--no-supervise",
+                *env_sas,
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        updated = blobmount.load_mount("mnt")
+        assert updated.cache_path() == legacy_cache
+        assert updated.config_path().name == "mnt.yaml"
+        assert fake_blobfuse.calls_for("unmount")
+        assert pending.read_text() == "keep legacy data"
 
     def test_check_all_mounts(self, tmp_path, state_dir, fake_blobfuse, runner):
         self._define(tmp_path, id="a")

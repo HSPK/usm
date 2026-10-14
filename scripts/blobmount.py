@@ -92,10 +92,10 @@ CONFIG_ROOT = Path(
 SERVICE = ServiceManager("usm-blobmount-", "com.github.hspk.usm.blobmount.")
 SUPERVISE_ENV = "USM_BLOBMOUNT_SUPERVISE_ID"
 
-# blobfuse2 reads the SAS once, at mount. Rotation therefore means "rewrite
-# the config and remount", so the token is renewed well ahead of expiry.
+# blobfuse2 watches its config and reloads SAS credentials without unmounting.
 DEFAULT_REFRESH_INTERVAL = 6 * 3600.0
 DEFAULT_PROBE_INTERVAL = 60.0
+PROBE_TIMEOUT = 10.0
 MOUNT_TIMEOUT = 120.0
 UNMOUNT_TIMEOUT = 60.0
 STARTUP_GRACE_SECS = 2.0
@@ -283,12 +283,12 @@ class Mount:
         return f"https://{self.account}.blob.core.windows.net/"
 
     def config_path(self) -> Path:
-        return CONFIG_ROOT / f"{self.account}-{self.container}.yaml"
+        return CONFIG_ROOT / f"{self.id}.yaml"
 
     def cache_path(self) -> Path:
         if self.cache_dir:
             return Path(self.cache_dir)
-        return CACHE_ROOT / f"{self.account}-{self.container}"
+        return CACHE_ROOT / f"{self.id}-{self.account}-{self.container}"
 
     def route(self) -> str:
         return f"{self.url()} → {self.mount_dir}"
@@ -298,7 +298,7 @@ class Mount:
 class MountState:
     """Supervisor-owned runtime. Never written by the CLI."""
 
-    state: str = "stopped"  # stopped|mounted|remounting|failed
+    state: str = "stopped"  # stopped|starting|mounted|refreshing|failed
     supervisor_pid: int | None = None
     mounted_at: float | None = None
     blobfuse_pid: int | None = None
@@ -340,12 +340,19 @@ def lock_path(ident: str) -> Path:
 
 
 def _from_dict(cls, raw: dict):
+    if cls is Mount and "version" not in raw and not raw.get("cache_dir"):
+        legacy = CACHE_ROOT / f"{raw.get('account')}-{raw.get('container')}"
+        raw = {**raw, "cache_dir": str(legacy)}
     known = {f.name for f in fields(cls)}
     return cls(**{k: v for k, v in raw.items() if k in known})
 
 
 def save_mount(mount: Mount) -> None:
-    atomic_write(_def_path(mount.id), json.dumps(asdict(mount), indent=2))
+    atomic_write(
+        _def_path(mount.id),
+        json.dumps({**asdict(mount), "version": 2}, indent=2),
+        mode=0o600,
+    )
 
 
 def load_mount(ident: str) -> Mount:
@@ -401,7 +408,7 @@ def make_mount_id(mount_dir: Path, container: str, custom: str | None = None) ->
         return slugify(custom) or "mount"
     base = slugify(mount_dir.name) or slugify(container) or "mount"
     STATE_DIR.mkdir(parents=True, exist_ok=True)
-    used = {p.stem for p in STATE_DIR.glob("*.json")}
+    used = {m.id for m in list_mounts()}
     if base not in used:
         return base
     for i in range(2, 1000):
@@ -467,6 +474,8 @@ def render_config(mount: Mount, sas: str | None) -> str:
     file_cache: dict = {
         "path": str(mount.cache_path()),
         "timeout-sec": mount.file_cache_timeout,
+        "allow-non-empty-temp": True,
+        "cleanup-on-start": False,
     }
     if mount.cache_size_mb:
         file_cache["max-size-mb"] = mount.cache_size_mb
@@ -505,7 +514,7 @@ def is_mountpoint(path: Path) -> bool:
         return True
 
 
-def probe_mount(mount: Mount, *, timeout: float = 10.0) -> tuple[str, str]:
+def probe_mount(mount: Mount, *, timeout: float = PROBE_TIMEOUT) -> tuple[str, str]:
     """Classify the mountpoint's health as ``(state, detail)``.
 
     Distinguishes "not mounted" from "mounted but broken", which is what an
@@ -575,11 +584,54 @@ def build_mount_argv(mount: Mount, binary: str, config: Path) -> list[str]:
     return argv
 
 
+def canonical_path(path: str | Path) -> Path:
+    return Path(path).expanduser().resolve()
+
+
+def check_cache(mount: Mount) -> None:
+    cache = canonical_path(mount.cache_path())
+    target = canonical_path(mount.mount_dir)
+    if (
+        cache == cache.parent
+        or cache.is_relative_to(target)
+        or target.is_relative_to(cache)
+        or cache in {canonical_path(Path.home()), canonical_path(Path.cwd())}
+        or canonical_path(STATE_DIR).is_relative_to(cache)
+        or canonical_path(CONFIG_ROOT).is_relative_to(cache)
+    ):
+        raise BlobmountError(
+            f"cache {cache} must be separate from mountpoint {target}. "
+            "Choose another directory with --cache-dir."
+        )
+    for other in list_mounts():
+        if other.id == mount.id or canonical_path(other.mount_dir) == target:
+            continue
+        other_cache = canonical_path(other.cache_path())
+        if not (cache.is_relative_to(other_cache) or other_cache.is_relative_to(cache)):
+            continue
+        if cache != other_cache:
+            raise BlobmountError(
+                f"cache {cache} overlaps the cache of {other.id!r} ({other_cache}). "
+                "Choose a separate --cache-dir."
+            )
+        if (other.account, other.container) != (mount.account, mount.container):
+            raise BlobmountError(
+                f"cache {cache} belongs to {other.id!r} ({other.account}/{other.container}). "
+                "Choose a separate --cache-dir; existing files have not been removed."
+            )
+        if is_mountpoint(Path(other.mount_dir)) or supervisor_running(other.id):
+            raise BlobmountError(
+                f"cache {cache} is in use by {other.id!r} at {other.mount_dir}. "
+                "Unmount it first or choose a separate --cache-dir."
+            )
+
+
 def do_mount(
     mount: Mount, sas: str | None, *, binary: str | None = None
 ) -> tuple[Path, str]:
     """Write the config and mount. Returns ``(config_path, stdout+stderr)``."""
     binary = binary or ensure_blobfuse2()
+    check_cache(mount)
     parent = Path(mount.mount_dir).parent
     if not os.access(parent, os.W_OK):
         raise BlobmountError(f"{parent} is not writable; cannot create the mountpoint.")
@@ -588,15 +640,36 @@ def do_mount(
     config = write_config(mount, sas)
 
     env = os.environ.copy()
+    if sas:
+        # The config, not an inherited token, must remain the reload source.
+        env.pop("AZURE_STORAGE_SAS_TOKEN", None)
     if mount.auth == "fic":
         env["AZCOPY_AUTO_LOGIN_TYPE"] = "WORKLOAD"
     else:
         env.setdefault("AZCOPY_AUTO_LOGIN_TYPE", "AZCLI")
-    proc = run(build_mount_argv(mount, binary, config), env=env, timeout=MOUNT_TIMEOUT)
+    try:
+        proc = run(
+            build_mount_argv(mount, binary, config), env=env, timeout=MOUNT_TIMEOUT
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise BlobmountError(
+            f"{mount.id}: mounting {mount.mount_dir} timed out after {MOUNT_TIMEOUT:g}s. "
+            f"Cache: {mount.cache_path()}. Check `usm blobmount logs {mount.id}`."
+        ) from exc
     output = ((proc.stdout or "") + (proc.stderr or "")).strip()
     if proc.returncode != 0:
+        detail = redact(output) or str(proc.returncode)
+        if (
+            "directory not empty" in output.lower()
+            or "directory is not empty" in output.lower()
+        ):
+            detail += (
+                "\nThe cache was not deleted. Stop any mount using this cache, "
+                "or choose a new empty directory with --cache-dir."
+            )
         raise BlobmountError(
-            f"blobfuse2 mount failed: {redact(output) or proc.returncode}"
+            f"{mount.id}: blobfuse2 mount failed at {mount.mount_dir}.\n"
+            f"Cache: {mount.cache_path()}\n{detail}"
         )
     return config, redact(output)
 
@@ -625,13 +698,7 @@ def do_unmount(mount: Mount, *, binary: str | None = None, lazy: bool = False) -
 
 
 class MountSupervisor:
-    """Re-mint the SAS and remount before the credential lapses.
-
-    blobfuse2 cannot be told about a new SAS in place, so a refresh is
-    unmount + rewrite config + mount. That is disruptive, hence it only
-    happens when the token is actually close to expiry (or the probe says
-    the mount has already gone bad).
-    """
+    """Reload credentials in place; remount only for repair or config changes."""
 
     def __init__(
         self,
@@ -646,7 +713,7 @@ class MountSupervisor:
         self.sas = sas if sas is not None else mount_sas_manager(mount)
         self.binary = binary
         self.clock = clock
-        self.state = MountState()
+        self.state = load_state(mount.id)
         self._log = log or self._default_log
         self._stop = threading.Event()
         # Set by both stop and refresh so a sleeping loop reacts at once
@@ -681,6 +748,8 @@ class MountSupervisor:
         """Should the mount be re-established right now, and why."""
         if self._forced:
             return True, "manual"
+        if self.state.state == "failed":
+            return True, "retry failed refresh"
         if self.state.health in (STALE, DENIED, UNMOUNTED, MISSING):
             return True, f"unhealthy ({self.state.health})"
         if not self.sas.enabled:
@@ -688,10 +757,13 @@ class MountSupervisor:
         token = self.sas.current()
         if token is None:
             return True, "no cached SAS"
+        if (
+            self.state.last_refresh_at is not None
+            and now >= self.state.last_refresh_at + self.mount.refresh_interval
+        ):
+            return True, "refresh interval"
         remaining = token.remaining(now)
-        if remaining is None:
-            return False, ""
-        if remaining <= self.mount.sas_min_remaining:
+        if remaining is not None and remaining <= self.mount.sas_min_remaining:
             return True, f"SAS expires in {human_duration(remaining)}"
         return False, ""
 
@@ -702,59 +774,88 @@ class MountSupervisor:
             token = self.sas.current()
             if token is not None and token.expires_at is not None:
                 deadlines.append(token.expires_at - self.mount.sas_min_remaining)
-        deadlines.append(now + self.mount.refresh_interval)
+            deadlines.append(
+                (self.state.last_refresh_at or now) + self.mount.refresh_interval
+            )
         return max(now + 1.0, min(deadlines))
 
     # -- actions -----------------------------------------------------------
 
-    def check_health(self) -> str:
-        health, detail = probe_mount(self.mount)
+    def check_health(self, *, timeout: float = PROBE_TIMEOUT) -> str:
+        health, detail = probe_mount(self.mount, timeout=timeout)
         self.state.health = health
         self.state.health_detail = detail
         self.state.checked_at = self.clock()
         return health
 
-    def remount(self, reason: str) -> bool:
-        """Unmount (if needed), mint a fresh SAS, mount again."""
+    def refresh(self, reason: str, *, remount: bool = False) -> bool:
+        """Fetch a fresh credential, then reload or safely re-establish the mount."""
         mount = self.mount
         now = self.clock()
-        self.state.state = "remounting"
+        health = self.check_health()
+        self.state.state = "refreshing"
         self._persist()
-        self.log(f"remount ({reason})")
+        self.log(f"refresh ({reason})")
         try:
+            check_cache(mount)
             token = self.sas.ensure(
                 now, need=self.sas.needed_lifetime(mount.refresh_interval), force=True
             )
-        except SasError as exc:
-            self.state.failures += 1
-            self.state.last_error = str(exc)
-            self.state.state = "failed"
-            self.log(f"SAS refresh failed: {exc}")
-            self._persist()
-            return False
+            remount = remount or health in (STALE, UNMOUNTED, MISSING)
+            if not remount:
+                try:
+                    previous = yaml.safe_load(mount.config_path().read_text())
+                except FileNotFoundError:
+                    previous = None
+                desired = yaml.safe_load(render_config(mount, token.token or None))
+                if isinstance(previous, dict) and isinstance(
+                    previous.get("azstorage"), dict
+                ):
+                    previous["azstorage"].pop("sas", None)
+                desired["azstorage"].pop("sas", None)
+                remount = previous != desired
 
-        if is_mountpoint(Path(mount.mount_dir)):
-            if not do_unmount(mount, binary=self.binary, lazy=True):
-                self.log("warning: unmount reported failure; mounting anyway")
-        try:
-            do_mount(mount, token.token or None, binary=self.binary)
-        except BlobmountError as exc:
+            if remount:
+                if is_mountpoint(Path(mount.mount_dir)) and not do_unmount(
+                    mount, binary=self.binary, lazy=health == STALE
+                ):
+                    raise BlobmountError(
+                        f"could not unmount {mount.mount_dir}; something is using it. "
+                        "Close open files and retry. The existing mount and cache "
+                        "have been left in place."
+                    )
+                do_mount(mount, token.token or None, binary=self.binary)
+                self.state.mounted_at = now
+                self.state.remounts += 1
+            else:
+                write_config(mount, token.token or None)
+            deadline = time.monotonic() + PROBE_TIMEOUT
+            while (
+                self.check_health(timeout=max(0.1, deadline - time.monotonic())) != OK
+            ):
+                if time.monotonic() >= deadline:
+                    action = "remounted" if remount else "config updated"
+                    raise BlobmountError(
+                        f"{mount.id}: {action}, but {mount.mount_dir} "
+                        f"is still {self.state.health}: {self.state.health_detail}. "
+                        "Check credentials and open files; retry mount with --force."
+                    )
+                time.sleep(0.1)
+        except (SasError, BlobmountError, OSError, yaml.YAMLError) as exc:
             self.state.failures += 1
-            self.state.last_error = str(exc)
+            self.state.last_error = redact(str(exc))
             self.state.state = "failed"
-            self.log(str(exc))
+            self.log(self.state.last_error)
             self._persist()
             return False
 
         self.state.state = "mounted"
-        self.state.mounted_at = now
-        self.state.remounts += 1
         self.state.refreshes += 1
         self.state.last_refresh_at = now
         self.state.last_error = None
-        self.check_health()
         self._forced = False
-        self.log(f"mounted {mount.mount_dir} (health: {self.state.health})")
+        action = "remounted" if remount else "credential config refreshed"
+        self.log(f"{action} {mount.mount_dir} (health: {self.state.health})")
         self._persist()
         return True
 
@@ -765,7 +866,7 @@ class MountSupervisor:
         needed, reason = self.needs_refresh(now)
         self.state.next_refresh_at = self.next_deadline(now)
         if needed:
-            self.remount(reason)
+            self.refresh(reason)
             return reason
         if self.state.state != "mounted" and self.state.health == OK:
             self.state.state = "mounted"
@@ -774,13 +875,14 @@ class MountSupervisor:
 
     def run(self) -> int:
         mount = self.mount
+        recover = self.state.state == "failed"
         self.state.supervisor_pid = os.getpid()
         self.state.state = "starting"
         self._persist()
         self.log(f"supervising {mount.route()} [auth={mount.auth}]")
 
-        if self.check_health() != OK:
-            if not self.remount("initial mount"):
+        if self.check_health() != OK or recover:
+            if not self.refresh("initial mount"):
                 self.log("initial mount failed")
                 self.state.state = "failed"
                 self.state.supervisor_pid = None
@@ -788,7 +890,8 @@ class MountSupervisor:
                 return 1
         else:
             self.state.state = "mounted"
-            self.state.mounted_at = self.clock()
+            self.state.mounted_at = self.state.mounted_at or self.clock()
+            self.state.last_refresh_at = self.state.last_refresh_at or self.clock()
             self._persist()
 
         try:
@@ -965,7 +1068,7 @@ def _auth_options(fn):
                 type=float,
                 default=DEFAULT_SAS_MIN_REMAINING,
                 show_default=True,
-                help="Remount to rotate the SAS below this many seconds left.",
+                help="Refresh the SAS below this many seconds left.",
             ),
             click.option(
                 "--refresh-interval",
@@ -1006,10 +1109,15 @@ def _auth_options(fn):
 
 
 def _mount_from_options(
-    mount_dir: Path, account: str, container: str, opts: dict
+    mount_dir: Path,
+    account: str,
+    container: str,
+    opts: dict,
+    existing: Mount | None = None,
 ) -> Mount:
     auth = opts.get("auth")
     provided = [
+        ("inline", opts.get("sas_inline")),
         ("env", opts.get("sas_env")),
         ("file", opts.get("sas_file")),
         ("exec", opts.get("sas_command")),
@@ -1018,7 +1126,10 @@ def _mount_from_options(
     given = [(kind, value) for kind, value in provided if value]
     if len(given) > 1:
         raise BlobmountError(
-            "pick one SAS source: " + ", ".join(AUTH_SPEC_FLAG[k] for k, _ in given)
+            "pick one SAS source: "
+            + ", ".join(
+                AUTH_SPEC_FLAG.get(k, "SAS in the container URL") for k, _ in given
+            )
         )
     spec = None
     if given:
@@ -1028,12 +1139,15 @@ def _mount_from_options(
                 f"--auth {auth} conflicts with the --sas-* flag you passed."
             )
         auth = inferred
+    elif existing is not None and auth in (None, existing.auth):
+        auth = auth or existing.auth
+        spec = existing.sas_spec
     if auth is None:
         auth = "az"
     if auth in AUTH_SPEC_FLAG and not spec:
         raise BlobmountError(f"--auth {auth} needs {AUTH_SPEC_FLAG[auth]}.")
 
-    return Mount(
+    mount = Mount(
         id="",
         mount_dir=str(mount_dir),
         account=account,
@@ -1051,6 +1165,21 @@ def _mount_from_options(
         allow_other=not opts["no_allow_other"],
         log_level=opts["log_level"],
     )
+    if existing is not None:
+        ctx = click.get_current_context()
+        for name, value in asdict(existing).items():
+            if name in {"id", "mount_dir", "account", "container", "auth", "sas_spec"}:
+                continue
+            option = {"allow_other": "no_allow_other", "sas_headers": "sas_header"}.get(
+                name, name
+            )
+            if (
+                option not in opts
+                or ctx.get_parameter_source(option)
+                == click.core.ParameterSource.DEFAULT
+            ):
+                setattr(mount, name, value)
+    return mount
 
 
 def parse_target(account: str | None, container: str | None) -> tuple[str, str]:
@@ -1094,45 +1223,112 @@ def cli() -> None:
 @click.option("--force", is_flag=True, help="Remount even if already mounted.")
 @_auth_options
 def cmd_mount(mount_dir, account, container, no_supervise, force, **opts):
+    if container is None and is_https_blob(account) and split_sas(account)[1]:
+        opts["sas_inline"] = account
     account, container = parse_target(account, container)
-    target = Path(mount_dir).expanduser()
-    mount = _mount_from_options(target, account, container, opts)
-    mount.id = make_mount_id(target, container, opts.get("name"))
-
-    existing = next((m for m in list_mounts() if m.mount_dir == str(target)), None)
-    if existing is not None and not force:
+    target = canonical_path(mount_dir)
+    registry = FileLock(STATE_DIR / ".mount.lock")
+    if not registry.acquire():
         raise BlobmountError(
-            f"{target} is already managed as {existing.id!r}. "
-            f"Use `usm blobmount refresh {existing.id}` or pass --force."
+            "another mount operation is in progress; retry when it finishes."
         )
     try:
-        mount_provider(mount)
-    except SasError as exc:
-        raise BlobmountError(str(exc)) from exc
-
-    if is_mountpoint(target) and not force:
-        raise BlobmountError(
-            f"{target} is already a mountpoint. Unmount it first or pass --force."
+        mounts = list_mounts()
+        matches = [m for m in mounts if canonical_path(m.mount_dir) == target]
+        existing = min(matches, key=lambda m: (len(m.id), m.id)) if matches else None
+        if (
+            existing is not None
+            and any((m.account, m.container) != (account, container) for m in matches)
+            and not force
+        ):
+            raise BlobmountError(
+                f"{target} is already managed as {existing.id!r} "
+                f"({existing.account}/{existing.container}). "
+                "Use --force to replace the mounted container."
+            )
+        if existing is None and is_mountpoint(target) and not force:
+            raise BlobmountError(
+                f"{target} is already a mountpoint. Unmount it first or pass --force."
+            )
+        same_source = existing is not None and (
+            existing.account,
+            existing.container,
+        ) == (account, container)
+        mount = _mount_from_options(
+            target, account, container, opts, existing if same_source else None
         )
-    save_mount(mount)
-    save_state(mount.id, MountState())
-
-    if no_supervise:
-        manager = mount_sas_manager(mount)
+        mount.id = (
+            existing.id
+            if existing
+            else make_mount_id(target, container, opts.get("name"))
+        )
+        if (
+            opts.get("name")
+            and make_mount_id(target, container, opts["name"]) != mount.id
+        ):
+            raise BlobmountError(
+                f"{target} is already managed as {mount.id!r}; keep its existing --name."
+            )
+        if any(
+            m.id == mount.id and canonical_path(m.mount_dir) != target for m in mounts
+        ):
+            raise BlobmountError(
+                f"mount name {mount.id!r} is already used by another directory."
+            )
+        if mount.cache_dir:
+            mount.cache_dir = str(canonical_path(mount.cache_dir))
+        if (
+            existing is not None
+            and not same_source
+            and canonical_path(mount.cache_path())
+            == canonical_path(existing.cache_path())
+        ):
+            raise BlobmountError(
+                f"cache {mount.cache_path()} belongs to {existing.account}/{existing.container}. "
+                "Choose a new --cache-dir for the replacement container."
+            )
         try:
-            token = manager.ensure(time.time(), need=mount.refresh_interval)
+            mount_provider(mount)
         except SasError as exc:
             raise BlobmountError(str(exc)) from exc
-        if is_mountpoint(target):
-            do_unmount(mount, lazy=True)
-        do_mount(mount, token.token or None)
-        console.print(f"[green]✓[/green] {mount.id}: mounted {mount.route()}")
-        console.print(
-            "[dim]No supervisor: the SAS will not be refreshed. Run "
-            f"`usm blobmount start {mount.id}` to keep it fresh.[/dim]"
+        check_cache(mount)
+        for old in matches:
+            if supervisor_running(old.id) and not stop_supervisor(old.id):
+                raise BlobmountError(
+                    f"could not stop supervisor {old.id!r}; the mount was not changed."
+                )
+        _refresh(mount, remount=force)
+        save_mount(mount)
+        for old in matches:
+            if old.id != mount.id:
+                if SERVICE.enabled_kind(old.id):
+                    SERVICE.disable(old.id)
+                delete_mount(old.id)
+        if no_supervise:
+            console.print(f"[green]✓[/green] {mount.id}: mounted {mount.route()}")
+            if mount.auth not in {"aad", "fic"}:
+                console.print(
+                    "[dim]No supervisor: the SAS will not be refreshed. Run "
+                    f"`usm blobmount start {mount.id}` to keep it fresh.[/dim]"
+                )
+        else:
+            _start(mount)
+    finally:
+        registry.release()
+
+
+def _refresh(mount: Mount, *, remount: bool = False) -> None:
+    lock = FileLock(lock_path(mount.id))
+    if not lock.acquire():
+        raise BlobmountError(f"{mount.id} is busy (another operation holds the lock).")
+    try:
+        supervisor = MountSupervisor(
+            mount, log=lambda message: console.print(f"[dim]{redact(message)}[/dim]")
         )
-        return
-    _start(mount)
+        if not supervisor.refresh("manual", remount=remount):
+            raise BlobmountError(supervisor.state.last_error or "refresh failed")
+    finally:
+        lock.release()
 
 
 def _start(mount: Mount) -> None:
@@ -1270,7 +1466,7 @@ def cmd_status(ident):
         (
             "credential",
             mount.auth
-            + (f" ({mount.sas_spec})" if mount.sas_spec else "")
+            + (f" ({redact(mount.sas_spec)})" if mount.sas_spec else "")
             + (
                 f" · expires in {_sas_label(mount)}"
                 if mount.auth not in {"aad", "fic"}
@@ -1322,7 +1518,7 @@ def cmd_check(ident):
         raise SystemExit(1)
 
 
-@cli.command("refresh", short_help="Re-mint the SAS and remount now.")
+@cli.command("refresh", short_help="Refresh the SAS; repair the mount if needed.")
 @click.argument("ident")
 def cmd_refresh(ident):
     mount = _require(ident)
@@ -1331,20 +1527,8 @@ def cmd_refresh(ident):
             console.print(f"[green]✓[/green] Asked {ident} to refresh now.")
             return
         console.print(f"[yellow]![/yellow] {ident} did not acknowledge; doing it here.")
-    lock = FileLock(lock_path(ident))
-    if not lock.acquire():
-        raise BlobmountError(f"{ident} is busy (another operation holds the lock).")
-    try:
-        supervisor = MountSupervisor(
-            mount, log=lambda m: console.print(f"[dim]{m}[/dim]")
-        )
-        if not supervisor.remount("manual"):
-            raise BlobmountError(
-                redact(supervisor.state.last_error or "remount failed")
-            )
-    finally:
-        lock.release()
-    console.print(f"[green]✓[/green] {ident}: remounted with a fresh SAS.")
+    _refresh(mount)
+    console.print(f"[green]✓[/green] {ident}: refreshed with a fresh SAS.")
 
 
 @cli.command("umount", short_help="Unmount and stop supervising.")

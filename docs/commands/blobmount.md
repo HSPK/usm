@@ -15,13 +15,13 @@ usm blobmount status data
 The previous shell version minted a 6-day SAS at mount time and stopped
 there. When the token expired the mount stayed *up* — `mountpoint` was still
 happy — but every read started failing, which looks like data loss until you
-find the FUSE log. blobfuse2 reads its credential once, at mount, and has no
-way to be handed a new one.
+find the FUSE log. blobfuse2 watches its configuration file and can reload a
+new SAS without unmounting.
 
 So `blobmount` now runs a small supervisor per mount. It watches two things:
 
 - **the SAS clock** — below `--sas-min-remaining` (default 30 min) it mints a
-  fresh token, rewrites the config and remounts, well before anything breaks;
+  fresh token and rewrites the config in place, well before anything breaks;
 - **the mount itself** — a cheap `listdir` every `--probe-interval`
   (default 60s) distinguishes *healthy* from *mounted but broken*, and
   repairs the latter.
@@ -92,7 +92,7 @@ usm blobmount mount <dir> https://acct.blob.core.windows.net/bucket
 usm blobmount ls [--all]        # --all also lists unmanaged blobfuse2 mounts
 usm blobmount status <id>       # detail: health, SAS clock, refresh counters
 usm blobmount check [<id>]      # probe; non-zero exit when unhealthy
-usm blobmount refresh <id>      # rotate the SAS and remount now
+usm blobmount refresh <id>      # refresh the SAS; repair the mount if needed
 usm blobmount config <id>       # show the rendered config (redacted)
 usm blobmount logs <id> [-f]
 usm blobmount start|stop <id>   # the supervisor, not the mount
@@ -105,6 +105,29 @@ usm blobmount rm <id> [--keep-mounted]
 useful in a container where something else owns the lifecycle. You get a
 reminder that a SAS will then never be refreshed. FIC and AAD credentials
 self-refresh and do not need SAS rotation.
+
+### Repeating a mount and using `--force`
+
+Repeating `mount` for the same directory and container reuses its original
+ID and refreshes its credential. Paths are normalized, so relative paths
+and symlink aliases do not create additional definitions. Options you omit
+retain their previous values; explicitly supplied options replace them.
+A SAS in the container URL is used as inline authentication.
+
+`--force` always unmounts and mounts again under the same ID, even when the
+mount is healthy. It also permits replacing the container at that mountpoint.
+The old supervisor is stopped before the operation, and at most one supervisor
+is restarted afterward. A failed unmount aborts rather than stacking mounts;
+close open files or explicitly use `umount --lazy` before retrying.
+
+Each mount has its own config and default cache. Existing cache files are
+allowed and are not deleted on startup, including during automatic recovery.
+Legacy per-container caches are retained when upgrading; the first refresh
+remounts with the new per-mount config. A cache belonging to another container
+or used by another active mount is rejected with a path-specific error.
+Use a separate `--cache-dir` instead of clearing potentially unuploaded files.
+Old duplicate definitions for the same mountpoint are retired after a successful
+mount, keeping the original unsuffixed ID when present.
 
 ### FIC / Azure Workload Identity
 
@@ -182,7 +205,8 @@ into the command hash, so cached installs update atomically.
 | `--refresh-interval` | `21600` | Upper bound between refreshes. |
 | `--probe-interval` | `60` | How often to verify the mount reads. |
 | `--read-only` | off | Mount the container read-only. |
-| `--cache-dir` / `--cache-size-mb` | per-container | `file_cache` location and cap. |
+| `--cache-dir` / `--cache-size-mb` | per-mount | `file_cache` location and cap. |
+| `--force` | off | Remount under the existing ID; never delete the cache on startup. |
 | `--no-allow-other` | off | Skip `--allow-other` and the `/etc/fuse.conf` edit. |
 | `--no-supervise` | off | Mount once; do not keep the SAS fresh. |
 
@@ -209,7 +233,7 @@ and [`scripts/usm_fic.py`](https://github.com/HSPK/usm/blob/main/scripts/usm_fic
 
 Test suite at
 [`tests/test_blobmount.py`](https://github.com/HSPK/usm/blob/main/tests/test_blobmount.py)
-(191 tests, 97% line coverage) and
+and
 [`tests/test_usm_azure.py`](https://github.com/HSPK/usm/blob/main/tests/test_usm_azure.py)
 (148 tests, 100% coverage of the shared layer). blobfuse2 is replaced by a
 scripted fake, so mounting, health probing, credential rotation, the live
