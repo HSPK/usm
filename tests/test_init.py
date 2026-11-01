@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+import shutil
 import textwrap
 
 import pytest
@@ -159,6 +161,108 @@ class TestSteps:
 
         item = init.Item(name="x", commands={"linux": "boom"})
         result = init.CommandStep(item).execute(_context(init.Linux(), Failing()))
+        assert result is init.StepResult.FAILED
+
+
+class TestNodeBootstrap:
+    @pytest.mark.parametrize(
+        "groups,fnm_present",
+        [
+            (["lang", "ai-tools"], False),
+            (["ai-tools"], False),
+            (["ai-tools"], True),
+        ],
+    )
+    def test_installs_node_and_ai_tools_in_same_run(
+        self, tmp_path, monkeypatch, groups, fnm_present
+    ):
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        fnm_dir = tmp_path / "data with spaces" / "fnm"
+        node_dir = tmp_path / "node22" / "bin"
+        log = tmp_path / "commands"
+        scripts = {
+            "uv": "exit 0",
+            "sudo": 'printf "%s\\n" "$*" >> "$BOOTSTRAP_LOG"',
+            "curl": textwrap.dedent(
+                """\
+                cat <<'INSTALL'
+                mkdir -p "$FNM_DIR"
+                cp "$FNM_SOURCE" "$FNM_DIR/fnm"
+                printf 'fnm-installed\\n' >> "$BOOTSTRAP_LOG"
+                INSTALL
+                """
+            ),
+            "fnm-source": textwrap.dedent(
+                """\
+                case "$1" in
+                  install)
+                    test "$2" = 22 || exit 1
+                    mkdir -p "$NODE_BIN"
+                    cp "$NPM_SOURCE" "$NODE_BIN/npm"
+                    printf 'node22\\n' >> "$BOOTSTRAP_LOG"
+                    ;;
+                  exec)
+                    test "$2" = --using && test "$3" = 22 || exit 1
+                    PATH="$NODE_BIN:$PATH"
+                    export PATH
+                    shift 3
+                    "$@"
+                    ;;
+                  *) exit 1 ;;
+                esac
+                """
+            ),
+            "npm-source": 'printf "%s\\n" "$*" >> "$BOOTSTRAP_LOG"',
+        }
+        for name, body in scripts.items():
+            script = bin_dir / name
+            script.write_text("#!/bin/sh\n" + body, encoding="utf-8")
+            script.chmod(0o755)
+        monkeypatch.setenv("PATH", str(bin_dir) + os.pathsep + os.defpath)
+        monkeypatch.setenv("FNM_DIR", str(fnm_dir))
+        monkeypatch.setenv("FNM_SOURCE", str(bin_dir / "fnm-source"))
+        monkeypatch.setenv("NPM_SOURCE", str(bin_dir / "npm-source"))
+        monkeypatch.setenv("NODE_BIN", str(node_dir))
+        monkeypatch.setenv("BOOTSTRAP_LOG", str(log))
+        monkeypatch.setattr(init, "_EXTRA_BIN_PATHS", (fnm_dir,))
+        if fnm_present:
+            fnm_dir.mkdir(parents=True)
+            shutil.copy(bin_dir / "fnm-source", fnm_dir / "fnm")
+
+        cfg = init.ConfigRepository().load(use_user_config=False)
+        ctx = _context(init.Linux(), init.RealExecutor(), tmp_home=tmp_path)
+        init.Engine(cfg, init.StepFactory(), ctx).run(groups, interactive=False)
+
+        expected = (
+            []
+            if fnm_present
+            else [
+                "apt-get update",
+                "apt-get install -y unzip",
+                "fnm-installed",
+            ]
+        )
+        assert log.read_text().splitlines() == [
+            *expected,
+            "node22",
+            "install -g @github/copilot",
+            "install -g @anthropic-ai/claude-code",
+        ]
+
+    def test_fnm_download_failure_is_reported(self, tmp_path, monkeypatch):
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        for name, body in {"sudo": "exit 0", "curl": "exit 1"}.items():
+            script = bin_dir / name
+            script.write_text("#!/bin/sh\n" + body, encoding="utf-8")
+            script.chmod(0o755)
+        monkeypatch.setenv("PATH", str(bin_dir) + os.pathsep + os.defpath)
+        monkeypatch.setattr(init, "_EXTRA_BIN_PATHS", ())
+        cfg = init.ConfigRepository().load(use_user_config=False)
+        result = init.CommandStep(cfg.items["fnm"]).execute(
+            _context(init.Linux(), init.RealExecutor(), tmp_home=tmp_path)
+        )
         assert result is init.StepResult.FAILED
 
 

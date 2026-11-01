@@ -21,13 +21,18 @@ By default (no flags) it installs everything in `default_groups` non-interactive
 
 | Group | Tools |
 | --- | --- |
-| `lang` | `uv`, `fnm` |
+| `lang` | `uv`, `fnm`, Node.js 22 (including npm, via `fnm install 22`) |
 | `cli` | `gh`, `ripgrep`, `fd`, `bat`, `eza`, `fzf`, `zoxide`, `starship`, `btop` |
 | `editor` | `neovim` + `~/.config/nvim/init.vim` |
 | `profile` | shell alias block (delegates to [`inject-alias`](inject-alias.md)) |
 | `uv-tools` | `azure-cli`, `nvitop`, `amlt` (via `uv tool install`) |
 | `ai-tools` | `copilot-cli` (`@github/copilot`), `claude-code` (`@anthropic-ai/claude-code`), via `npm install -g` |
 | `tmux` | `tmux` + Tmux Plugin Manager + managed `~/.tmux.conf` block (POSIX only; skipped on Windows) |
+
+On Linux, installing fnm first installs `unzip` through apt. The `ai-tools`
+group also includes fnm and Node.js 22, so it can be run on its own. npm
+installs run through `fnm exec --using 22`, without changing an existing
+default Node.js version.
 
 `linux-extras` (build deps, Tailscale, `dua-cli`) is **Linux-only** and **not**
 in the defaults — run it explicitly with `usm init linux-extras`.
@@ -111,9 +116,11 @@ usm init                       # now runs your version
   processes get `~/.local/bin`, `~/.cargo/bin`, and Homebrew bins prepended —
   but on Windows a freshly `winget`-installed tool may not be visible until a
   new shell.
-- `ai-tools` (`copilot-cli`, `claude-code`) need `npm` on `PATH`; install
-  Node.js yourself first (not managed by this script).
-- Re-running is safe: installed tools are skipped, and the alias and
+- Fresh fnm installations are added to child processes' `PATH`, so Node.js
+  and npm-based AI tools can be installed in the same run without restarting
+  the shell.
+- Re-running is safe: installed tools are skipped, Node.js 22 is ensured
+  through fnm, and the alias and
   `~/.tmux.conf` blocks are managed in place.
 
 ## Source

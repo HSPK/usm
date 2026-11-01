@@ -45,6 +45,12 @@ _EXTRA_BIN_PATHS = (
     Path.home() / ".local" / "bin",
     Path.home() / ".cargo" / "bin",
     Path.home() / ".fnm",
+    Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local" / "share") / "fnm",
+    Path.home() / "Library" / "Application Support" / "fnm",
+    Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local")
+    / "Microsoft"
+    / "WinGet"
+    / "Links",
     Path("/opt/homebrew/bin"),
     Path("/usr/local/bin"),
 )
@@ -58,7 +64,7 @@ default_groups: [lang, cli, editor, profile, uv-tools, ai-tools, tmux]
 groups:
   lang:
     description: Language and version managers
-    items: [uv, fnm]
+    items: [uv, fnm, node22]
   cli:
     description: Modern command-line tools
     items: [gh, ripgrep, fd, bat, eza, fzf, zoxide, starship, btop]
@@ -73,7 +79,7 @@ groups:
     items: [azure-cli, nvitop, amlt]
   ai-tools:
     description: AI coding assistants (npm-based)
-    items: [copilot-cli, claude-code]
+    items: [fnm, node22, copilot-cli, claude-code]
   tmux:
     description: tmux and its plugin manager
     platforms: [linux, macos]
@@ -92,8 +98,13 @@ items:
   fnm:
     check: fnm
     macos: brew install fnm
-    linux: curl -fsSL https://fnm.vercel.app/install | bash
+    linux: |
+      set -o pipefail
+      sudo apt-get update && sudo apt-get install -y unzip &&
+      curl -fsSL https://fnm.vercel.app/install | bash
     windows: winget install -e --id Schniz.fnm
+  node22:
+    all: fnm install 22
   gh:
     check: gh
     macos: brew install gh
@@ -164,15 +175,15 @@ items:
     all: uv tool install --upgrade amlt --index-url https://msrpypi.azurewebsites.net/stable/leloojoo
   copilot-cli:
     check: copilot
-    all: npm install -g @github/copilot
+    all: fnm exec --using 22 npm install -g @github/copilot
   claude-code:
     check: claude
-    all: npm install -g @anthropic-ai/claude-code
+    all: fnm exec --using 22 npm install -g @anthropic-ai/claude-code
   build-deps:
     platforms: [linux]
     linux: |
       sudo apt-get update
-      sudo apt-get install -y build-essential zlib1g-dev libffi-dev libssl-dev libbz2-dev libreadline-dev libsqlite3-dev liblzma-dev libncurses-dev tk-dev python3-dev ffmpeg cmake autossh
+      sudo apt-get install -y build-essential zlib1g-dev libffi-dev libssl-dev libbz2-dev libreadline-dev libsqlite3-dev liblzma-dev libncurses-dev tk-dev python3-dev ffmpeg cmake autossh unzip
   tailscale:
     check: tailscale
     platforms: [linux]
@@ -252,7 +263,7 @@ def _child_env() -> dict[str, str]:
 
 class RealExecutor(Executor):
     def which(self, name: str) -> bool:
-        return shutil.which(name) is not None
+        return shutil.which(name, path=_child_env().get("PATH")) is not None
 
     def run(self, argv: Sequence[str], *, command: str) -> int:
         click.echo(f"  $ {command}")
@@ -261,7 +272,7 @@ class RealExecutor(Executor):
 
 class DryRunExecutor(Executor):
     def which(self, name: str) -> bool:
-        return shutil.which(name) is not None
+        return shutil.which(name, path=_child_env().get("PATH")) is not None
 
     def run(self, argv: Sequence[str], *, command: str) -> int:
         click.echo(f"  [dry-run] {command}")
