@@ -22,11 +22,11 @@ By default (no flags) it installs everything in `default_groups` non-interactive
 | Group | Tools |
 | --- | --- |
 | `lang` | `uv`, `fnm`, Node.js 22 (including npm, via `fnm install 22`) |
-| `cli` | `gh`, `ripgrep`, `fd`, `bat`, `eza`, `fzf`, `zoxide`, `starship`, `btop` |
+| `cli` | `gh`, `ripgrep`, `fd`, `bat`, `eza`, `fzf`, `zoxide`, `starship`, `btop`; Linux also installs Homebrew and `k9s` |
 | `editor` | `neovim` + `~/.config/nvim/init.vim` |
-| `profile` | shell alias block (delegates to [`inject-alias`](inject-alias.md)) |
+| `profile` | shell alias block, including `h` for `herdr` (delegates to [`inject-alias`](inject-alias.md)) |
 | `uv-tools` | `azure-cli`, `nvitop`, `amlt` (via `uv tool install`) |
-| `ai-tools` | `copilot-cli` (`@github/copilot`), `claude-code` (`@anthropic-ai/claude-code`), via `npm install -g` |
+| `ai-tools` | `copilot-cli` (`@github/copilot`), `claude-code` (`@anthropic-ai/claude-code`) via npm, and Herdr TUI |
 | `tmux` | `tmux` + Tmux Plugin Manager + managed `~/.tmux.conf` block (POSIX only; skipped on Windows) |
 
 On Linux, installing fnm first installs `unzip` through apt. The `ai-tools`
@@ -34,14 +34,33 @@ group also includes fnm and Node.js 22, so it can be run on its own. npm
 installs run through `fnm exec --using 22`, without changing an existing
 default Node.js version.
 
+Herdr uses Homebrew on macOS and its official installer on Linux and Windows.
+It is skipped when `herdr` is already on `PATH`. To install the AI tools and
+refresh the aliases without running every default group:
+
+```bash
+usm init ai-tools profile
+```
+
+Reload the shell profile as prompted to activate `h="herdr"` (a `Set-Alias`
+entry on PowerShell).
+
+On Linux, `cli` installs Homebrew's build dependencies with apt, runs the
+official Homebrew installer non-interactively, then runs
+`brew install derailed/k9s/k9s`.
+Existing `brew` and `k9s` commands are skipped. The new Homebrew bin directory
+is available to later install steps immediately; `profile` also initializes
+Linuxbrew for future Bash/Zsh sessions. Run `usm init cli profile` to apply
+just these groups.
+
 `linux-extras` (build deps, Tailscale, `dua-cli`) is **Linux-only** and **not**
 in the defaults — run it explicitly with `usm init linux-extras`.
 
 ## Per-platform install
 
 Each tool maps to one command per OS, run directly (no package-manager
-abstraction). macOS uses Homebrew, Linux uses apt + official installers,
-Windows uses winget.
+abstraction). macOS uses Homebrew, Linux uses apt + Homebrew + official installers,
+Windows uses winget and official installers.
 
 ```yaml
 items:

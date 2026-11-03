@@ -34,6 +34,7 @@ alias ca="conda activate"
 alias azl="az login"
 alias gu="nvidia-smi"
 alias v="nvim"
+alias h="herdr"
 gmp () {
     git add .
     git commit -m "$1"
@@ -41,6 +42,11 @@ gmp () {
 }
 export PATH="$HOME/.local/bin:$PATH"
 export PATH="$HOME/.cargo/bin:$PATH"
+if [ -x /home/linuxbrew/.linuxbrew/bin/brew ]; then
+    eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"
+elif [ -x "$HOME/.linuxbrew/bin/brew" ]; then
+    eval "$("$HOME/.linuxbrew/bin/brew" shellenv)"
+fi
 export AZCOPY_AUTO_LOGIN_TYPE=AZCLI
 eval "$(starship init __SHELL__)"
 """
@@ -66,6 +72,7 @@ function ca { conda activate @args }
 function azl { az login @args }
 function gu { nvidia-smi @args }
 function v { nvim @args }
+Set-Alias -Name h -Value herdr
 function gmp {
     param(
         [Parameter(Mandatory = $true, Position = 0)]

@@ -12,11 +12,12 @@ usm inject-alias [--shell bash|zsh|powershell] [--file PATH]
 
 A curated set of one-letter aliases the author uses everywhere — `ll`,
 `gs`/`ga`/`gm`/`gb`/`gp` for git, `tn`/`ta`/`tm` for tmux, `..`/`...`,
-`ca` for `conda activate`, etc. See
+`ca` for `conda activate`, `h` for `herdr` (Herdr TUI), etc. See
 [`scripts/inject_alias.py`](https://github.com/HSPK/usm/blob/main/scripts/inject_alias.py)
 for the exact list — the alias body is part of the script source.
 
-Plus a few PATH exports (`~/.local/bin`, `~/.cargo/bin`),
+Plus a few PATH exports (`~/.local/bin`, `~/.cargo/bin`), Linuxbrew shell
+initialization when installed at `/home/linuxbrew/.linuxbrew` or `~/.linuxbrew`,
 `AZCOPY_AUTO_LOGIN_TYPE=AZCLI`, and the shell-init hook for `starship`
 (`eval "$(starship init bash|zsh)"`, or `Invoke-Expression (&starship init
 powershell)` on PowerShell) so the prompt is active as soon as the block is

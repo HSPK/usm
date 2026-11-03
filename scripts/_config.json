@@ -192,8 +192,8 @@
         "click>=8.2.1",
         "pyyaml>=6.0.3"
       ],
-      "version": "1.0.4",
-      "hash": "sha256:1c080e0055178d7c0c4403f0c3f14962b63cdca8d60420206183bf05a48f34ee",
+      "version": "1.0.5",
+      "hash": "sha256:361b0b2d50949f734710bb3c6f71aefbb2cc820177c586a1ae3579586c7a7ca8",
       "modules": [
         "usm_blocks.py"
       ]
@@ -204,8 +204,8 @@
       "requirements": [
         "click>=8.2.1"
       ],
-      "version": "1.0.3",
-      "hash": "sha256:6efeb9a37cfd3d07b5f35a19e3fa56290e9634b397d7c8f47ed86dee61b2349f",
+      "version": "1.0.4",
+      "hash": "sha256:2f66204eff2318877ac9359009426c8e09b9a52dcae146025cf33d277c2400c9",
       "modules": [
         "usm_blocks.py"
       ]

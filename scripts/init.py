@@ -51,6 +51,8 @@ _EXTRA_BIN_PATHS = (
     / "Microsoft"
     / "WinGet"
     / "Links",
+    Path("/home/linuxbrew/.linuxbrew/bin"),
+    Path.home() / ".linuxbrew" / "bin",
     Path("/opt/homebrew/bin"),
     Path("/usr/local/bin"),
 )
@@ -67,7 +69,7 @@ groups:
     items: [uv, fnm, node22]
   cli:
     description: Modern command-line tools
-    items: [gh, ripgrep, fd, bat, eza, fzf, zoxide, starship, btop]
+    items: [gh, ripgrep, fd, bat, eza, fzf, zoxide, starship, btop, homebrew, k9s]
   editor:
     description: Neovim and its config
     items: [neovim, nvim-config]
@@ -78,8 +80,8 @@ groups:
     description: uv-managed Python CLI tools
     items: [azure-cli, nvitop, amlt]
   ai-tools:
-    description: AI coding assistants (npm-based)
-    items: [fnm, node22, copilot-cli, claude-code]
+    description: AI coding assistants and Herdr TUI
+    items: [fnm, node22, copilot-cli, claude-code, herdr]
   tmux:
     description: tmux and its plugin manager
     platforms: [linux, macos]
@@ -105,6 +107,18 @@ items:
     windows: winget install -e --id Schniz.fnm
   node22:
     all: fnm install 22
+  homebrew:
+    check: brew
+    platforms: [linux]
+    linux: |
+      set -o pipefail
+      sudo apt-get update &&
+      sudo apt-get install -y build-essential procps curl file git &&
+      curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh | NONINTERACTIVE=1 bash
+  k9s:
+    check: k9s
+    platforms: [linux]
+    linux: brew install derailed/k9s/k9s
   gh:
     check: gh
     macos: brew install gh
@@ -179,6 +193,15 @@ items:
   claude-code:
     check: claude
     all: fnm exec --using 22 npm install -g @anthropic-ai/claude-code
+  herdr:
+    check: herdr
+    macos: brew install herdr
+    linux: |
+      set -o pipefail
+      curl -fsSL https://herdr.dev/install.sh | sh
+    windows: |
+      $ErrorActionPreference = 'Stop'
+      Invoke-RestMethod -Uri https://herdr.dev/install.ps1 | Invoke-Expression
   build-deps:
     platforms: [linux]
     linux: |

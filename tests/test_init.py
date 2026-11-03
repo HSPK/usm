@@ -183,6 +183,7 @@ class TestNodeBootstrap:
         log = tmp_path / "commands"
         scripts = {
             "uv": "exit 0",
+            "herdr": "exit 0",
             "sudo": 'printf "%s\\n" "$*" >> "$BOOTSTRAP_LOG"',
             "curl": textwrap.dedent(
                 """\
@@ -264,6 +265,170 @@ class TestNodeBootstrap:
             _context(init.Linux(), init.RealExecutor(), tmp_home=tmp_path)
         )
         assert result is init.StepResult.FAILED
+
+
+class TestHerdrBootstrap:
+    @pytest.mark.parametrize(
+        "platform,installer",
+        [
+            (init.Linux(), "https://herdr.dev/install.sh"),
+            (init.MacOS(), "brew install herdr"),
+            (init.Windows(), "https://herdr.dev/install.ps1"),
+        ],
+    )
+    def test_default_plan_installs_herdr_and_skips_existing(self, platform, installer):
+        cfg = init.ConfigRepository().load(use_user_config=False)
+        planner = init.Planner(cfg)
+        items = planner.items_for(planner.resolve_groups(None), platform.key)
+        item = next(item for item in items if item.name == "herdr")
+        executor = RecordingExecutor()
+        step = init.StepFactory().create(item)
+        ctx = _context(platform, executor)
+        assert step.execute(ctx) is init.StepResult.OK
+        assert len(executor.commands) == 1
+        assert installer in executor.commands[0]
+
+        executor.installed.add("herdr")
+        assert step.execute(ctx) is init.StepResult.SKIPPED
+        assert len(executor.commands) == 1
+
+    @pytest.mark.parametrize("download_ok", [True, False])
+    def test_linux_installer_download_and_failure(
+        self, tmp_path, monkeypatch, download_ok
+    ):
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        curl = bin_dir / "curl"
+        installer = textwrap.dedent(
+            """\
+            cat <<'INSTALL'
+            mkdir -p "$HOME/.local/bin"
+            printf '#!/bin/sh\\nexit 0\\n' > "$HOME/.local/bin/herdr"
+            chmod +x "$HOME/.local/bin/herdr"
+            INSTALL
+            """
+        )
+        curl.write_text("#!/bin/sh\n" + (installer if download_ok else "exit 22\n"))
+        curl.chmod(0o755)
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("PATH", str(bin_dir) + os.pathsep + os.defpath)
+        local_bin = tmp_path / ".local" / "bin"
+        monkeypatch.setattr(init, "_EXTRA_BIN_PATHS", (local_bin,))
+        cfg = init.ConfigRepository().load(use_user_config=False)
+        step = init.CommandStep(cfg.items["herdr"])
+        ctx = _context(init.Linux(), init.RealExecutor(), tmp_home=tmp_path)
+
+        result = step.execute(ctx)
+
+        if download_ok:
+            assert result is init.StepResult.OK
+            assert (local_bin / "herdr").is_file()
+            assert step.execute(ctx) is init.StepResult.SKIPPED
+        else:
+            assert result is init.StepResult.FAILED
+            assert not (local_bin / "herdr").exists()
+
+
+class TestHomebrewBootstrap:
+    @pytest.mark.parametrize("brew_present", [False, True])
+    def test_installs_brew_then_k9s_without_restarting_shell(
+        self, tmp_path, monkeypatch, brew_present
+    ):
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        brew_bin = tmp_path / "brew with spaces" / "bin"
+        log = tmp_path / "commands"
+        scripts = {
+            "sudo": 'printf "%s\\n" "$*" >> "$BOOTSTRAP_LOG"',
+            "curl": textwrap.dedent(
+                """\
+                cat <<'INSTALL'
+                test "$NONINTERACTIVE" = 1 || exit 1
+                mkdir -p "$BREW_BIN"
+                cp "$BREW_SOURCE" "$BREW_BIN/brew"
+                printf 'brew-installed\\n' >> "$BOOTSTRAP_LOG"
+                INSTALL
+                """
+            ),
+            "brew-source": textwrap.dedent(
+                """\
+                test "$*" = "install derailed/k9s/k9s" || exit 1
+                printf 'brew %s\\n' "$*" >> "$BOOTSTRAP_LOG"
+                cp "$K9S_SOURCE" "$BREW_BIN/k9s"
+                """
+            ),
+            "k9s-source": "exit 0",
+        }
+        for name, body in scripts.items():
+            path = bin_dir / name
+            path.write_text("#!/bin/sh\n" + body)
+            path.chmod(0o755)
+        monkeypatch.setenv("PATH", str(bin_dir) + os.pathsep + os.defpath)
+        monkeypatch.setenv("BREW_BIN", str(brew_bin))
+        monkeypatch.setenv("BREW_SOURCE", str(bin_dir / "brew-source"))
+        monkeypatch.setenv("K9S_SOURCE", str(bin_dir / "k9s-source"))
+        monkeypatch.setenv("BOOTSTRAP_LOG", str(log))
+        monkeypatch.setattr(init, "_EXTRA_BIN_PATHS", (brew_bin,))
+        if brew_present:
+            brew_bin.mkdir(parents=True)
+            shutil.copy(bin_dir / "brew-source", brew_bin / "brew")
+
+        cfg = init.ConfigRepository().load(use_user_config=False)
+        planner = init.Planner(cfg)
+        groups = planner.resolve_groups(["cli"])
+        items = [
+            item
+            for item in planner.items_for(groups, "linux")
+            if item.name in {"homebrew", "k9s"}
+        ]
+        assert [item.name for item in items] == ["homebrew", "k9s"]
+        ctx = _context(init.Linux(), init.RealExecutor(), tmp_home=tmp_path)
+        for item in items:
+            assert init.CommandStep(item).execute(ctx) in {
+                init.StepResult.OK,
+                init.StepResult.SKIPPED,
+            }
+        expected = (
+            []
+            if brew_present
+            else [
+                "apt-get update",
+                "apt-get install -y build-essential procps curl file git",
+                "brew-installed",
+            ]
+        )
+        assert log.read_text().splitlines() == [
+            *expected,
+            "brew install derailed/k9s/k9s",
+        ]
+        for item in items:
+            assert init.CommandStep(item).execute(ctx) is init.StepResult.SKIPPED
+        assert log.read_text().splitlines() == [
+            *expected,
+            "brew install derailed/k9s/k9s",
+        ]
+
+    def test_download_failure_is_reported(self, tmp_path, monkeypatch):
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        for name, body in {"sudo": "exit 0", "curl": "exit 22"}.items():
+            script = bin_dir / name
+            script.write_text("#!/bin/sh\n" + body)
+            script.chmod(0o755)
+        monkeypatch.setenv("PATH", str(bin_dir) + os.pathsep + os.defpath)
+        monkeypatch.setattr(init, "_EXTRA_BIN_PATHS", ())
+        cfg = init.ConfigRepository().load(use_user_config=False)
+        result = init.CommandStep(cfg.items["homebrew"]).execute(
+            _context(init.Linux(), init.RealExecutor(), tmp_home=tmp_path)
+        )
+        assert result is init.StepResult.FAILED
+
+    @pytest.mark.parametrize("platform", ["macos", "windows"])
+    def test_linux_additions_do_not_change_other_platform_plans(self, platform):
+        cfg = init.ConfigRepository().load(use_user_config=False)
+        planner = init.Planner(cfg)
+        items = planner.items_for(planner.resolve_groups(["cli"]), platform)
+        assert not {"homebrew", "k9s"} & {item.name for item in items}
 
 
 class TestActions:

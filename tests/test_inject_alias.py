@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import os
 import stat
+import subprocess
 
 import pytest
 from click.testing import CliRunner
@@ -65,6 +66,35 @@ class TestRendering:
 
     def test_bash_and_zsh_blocks_differ(self):
         assert render_alias_block("bash") != render_alias_block("zsh")
+
+    @pytest.mark.parametrize("prefix", ["system", "home"])
+    def test_linuxbrew_shellenv_makes_installed_tools_available(self, tmp_path, prefix):
+        home = tmp_path / "home with spaces"
+        system_brew = tmp_path / "linuxbrew"
+        brew_bin = (system_brew if prefix == "system" else home / ".linuxbrew") / "bin"
+        brew_bin.mkdir(parents=True)
+        brew = brew_bin / "brew"
+        brew.write_text(
+            "#!/bin/sh\n"
+            'test "$1" = shellenv || exit 1\n'
+            """printf 'export PATH="%s:%s"\\n' "${0%/*}" "$PATH"\n"""
+        )
+        brew.chmod(0o755)
+        k9s = brew_bin / "k9s"
+        k9s.write_text("#!/bin/sh\nprintf 'k9s-ready\\n'\n")
+        k9s.chmod(0o755)
+        body = render_alias_body("bash").replace(
+            "/home/linuxbrew/.linuxbrew", str(system_brew)
+        )
+        result = subprocess.run(
+            ["bash", "--noprofile", "--norc"],
+            input="starship() { :; }\n" + body + "\nk9s\n",
+            env={**os.environ, "HOME": str(home), "PATH": os.defpath},
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        assert result.stdout == "k9s-ready\n"
 
 
 # -- choosing the file -----------------------------------------------------
@@ -210,6 +240,28 @@ class TestUpserting:
 
 
 class TestCommandLine:
+    @pytest.mark.parametrize(
+        "shell,alias",
+        [
+            ("bash", 'alias h="herdr"'),
+            ("zsh", 'alias h="herdr"'),
+            ("powershell", "Set-Alias -Name h -Value herdr"),
+        ],
+    )
+    def test_refresh_adds_herdr_alias_to_existing_profile(
+        self, tmp_path, runner, shell, alias
+    ):
+        rc = tmp_path / "profile"
+        rc.write_text(f"# user config\n{BEGIN_MARKER}\n# old aliases\n{END_MARKER}\n")
+        args = ["--shell", shell, "--file", str(rc)]
+        result = runner.invoke(inject_alias.cli, args)
+        assert result.exit_code == 0
+        updated = rc.read_text()
+        assert updated.startswith("# user config\n")
+        assert alias in updated
+        assert runner.invoke(inject_alias.cli, args).exit_code == 0
+        assert rc.read_text() == updated
+
     def test_writes_to_the_shell_rc(self, home, runner):
         result = runner.invoke(inject_alias.cli, ["--shell", "bash"])
         assert result.exit_code == 0
