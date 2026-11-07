@@ -81,6 +81,7 @@ usm <command> --help     # help for one command
 | [`serve`](https://hspk.github.io/usm/commands/serve/) | Full file server via miniserve (uploads, range, zip, auth) |
 | [`rsync`](https://hspk.github.io/usm/commands/rsync/) | rsync with sensible defaults + auto-excludes |
 | [`cp`](https://hspk.github.io/usm/commands/cp/) | Copy across local and blobfuse paths, delegating to azcopy |
+| [`rm`](https://hspk.github.io/usm/commands/rm/) | Delete Azure Blob files/directories after confirmation |
 | [`azsync`](https://hspk.github.io/usm/commands/azsync/) | Watch a directory and keep it mirrored to Azure Blob |
 | [`blobmount`](https://hspk.github.io/usm/commands/blobmount/) | Mount blob containers, keeping the SAS fresh |
 | [`dl`](https://hspk.github.io/usm/commands/dl/) | Resumable, checksum-verified downloads with mirrors |

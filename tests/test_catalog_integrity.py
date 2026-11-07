@@ -24,7 +24,8 @@ SCRIPTS = ROOT / "scripts"
 CONFIG = json.loads((SCRIPTS / "_config.json").read_text())["scripts"]
 
 #: Modules that live beside a script rather than coming from PyPI.
-SHARED_MODULES = {p.stem for p in SCRIPTS.glob("usm_*.py")}
+LOCAL_MODULES = {p.stem for p in SCRIPTS.glob("*.py")}
+SHARED_MODULES = {name for name in LOCAL_MODULES if name.startswith("usm_")}
 
 PY_ENTRIES = sorted(
     name for name, entry in CONFIG.items() if entry["path"].endswith(".py")
@@ -79,7 +80,7 @@ def shared_closure(name: str) -> set[str]:
         if current in seen:
             continue
         seen.add(current)
-        for imported in imported_names(current) & SHARED_MODULES:
+        for imported in imported_names(current) & LOCAL_MODULES:
             if imported not in needed:
                 needed.add(imported)
                 pending.append(SCRIPTS / f"{imported}.py")

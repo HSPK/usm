@@ -278,6 +278,20 @@
       "version": "1.0.2",
       "hash": "sha256:3fa11d7c087fe3568084b148c89a335f52d8fbd1eedb269919f62c531e45144d"
     },
+    "rm": {
+      "description": "Delete Azure Blob files/directories with confirmation.",
+      "path": "rm.py",
+      "modules": [
+        "cp.py"
+      ],
+      "requirements": [
+        "click>=8.2.1",
+        "psutil>=7.1.3",
+        "pyyaml>=6.0.3"
+      ],
+      "version": "1.0.0",
+      "hash": "sha256:306d392c0712d1b62dd7d5506b29a753300590689243aa1ec884a3cc78241b02"
+    },
     "rsync": {
       "description": "rsync wrapper with sensible defaults + auto-excludes.",
       "path": "rsync.py",

@@ -32,6 +32,7 @@ Every subcommand of `usm` falls into one of two buckets:
 | `init` | [Machine bootstrap](init.md) |
 | `blobmount` | [Mount Azure blob, refreshing the SAS](blobmount.md) |
 | `cp` | [Copy with Azure support](cp.md) |
+| `rm` | [Delete Azure Blob with confirmation](rm.md) |
 | `azsync` | [Watch and sync to Azure Blob](azsync.md) |
 | `cu122` | [CUDA 12.2 install](cu122.md) |
 | `inject-alias` | [Shell alias injection](inject-alias.md) |
