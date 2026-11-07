@@ -38,6 +38,23 @@ def _display_url(url: str) -> str:
     return urllib.parse.urlsplit(url)._replace(query="", fragment="").geturl()
 
 
+def _authorize_url(url: str, *, use_az: bool) -> str:
+    if not use_az and not cp._has_sas(url):
+        account, container = cp._parse_blob_url(url)
+        sas = cp.generate_sas_token(account, container)
+        parsed = urllib.parse.urlsplit(url)
+        query = parsed.query + "&" + sas if parsed.query else sas
+        return parsed._replace(query=query).geturl()
+    return url
+
+
+def _azcopy_env(*, use_az: bool) -> dict[str, str]:
+    env = os.environ.copy()
+    if use_az:
+        env["AZCOPY_AUTO_LOGIN_TYPE"] = "AZCLI"
+    return env
+
+
 @click.command(context_settings={"help_option_names": ["-h", "--help"]})
 @click.argument("targets", nargs=-1, required=True, metavar="TARGET...")
 @click.option(
@@ -74,17 +91,9 @@ def remove(targets: tuple[str, ...], use_az: bool, dry_run: bool) -> None:
 
     click.confirm("Delete these targets?", default=False, abort=True)
 
-    env = os.environ.copy()
-    if use_az:
-        env["AZCOPY_AUTO_LOGIN_TYPE"] = "AZCLI"
+    env = _azcopy_env(use_az=use_az)
     try:
-        authorized_urls = []
-        for url in urls:
-            if not use_az and not cp._has_sas(url):
-                account, container = cp._parse_blob_url(url)
-                sas = cp.generate_sas_token(account, container)
-                url += ("&" if urllib.parse.urlsplit(url).query else "?") + sas
-            authorized_urls.append(url)
+        authorized_urls = [_authorize_url(url, use_az=use_az) for url in urls]
         azcopy = cp.ensure_azcopy()
         for url in authorized_urls:
             result = subprocess.run([azcopy, "remove", url, "--recursive"], env=env)

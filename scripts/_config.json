@@ -210,6 +210,21 @@
         "usm_blocks.py"
       ]
     },
+    "mv": {
+      "description": "Move Azure Blob files/directories by verified copy and delete.",
+      "path": "mv.py",
+      "modules": [
+        "cp.py",
+        "rm.py"
+      ],
+      "requirements": [
+        "click>=8.2.1",
+        "psutil>=7.1.3",
+        "pyyaml>=6.0.3"
+      ],
+      "version": "1.0.0",
+      "hash": "sha256:2fca08e80d04f171fa54ecde411dda7230ff82f932e088aff19e476c2bfb4d85"
+    },
     "net": {
       "description": "Inspect, diagnose, and monitor host networking.",
       "path": "net.py",
@@ -289,8 +304,8 @@
         "psutil>=7.1.3",
         "pyyaml>=6.0.3"
       ],
-      "version": "1.0.0",
-      "hash": "sha256:306d392c0712d1b62dd7d5506b29a753300590689243aa1ec884a3cc78241b02"
+      "version": "1.0.1",
+      "hash": "sha256:a3355f3977afbff7fc4f2c59155837ddc8210a6dbc66d27d13a2b8d31658d078"
     },
     "rsync": {
       "description": "rsync wrapper with sensible defaults + auto-excludes.",
