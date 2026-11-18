@@ -38,6 +38,7 @@ from typing import Iterable
 
 from usmo.ui import short_blob_target
 
+from usm_blobfuse import blobfuse_mounts
 from usm_daemon import (
     DEFAULT_EXCLUDES,
     LAUNCHD_USER_DIR,
@@ -175,58 +176,6 @@ def join_sas(url: str, sas: str | None) -> str:
 
 def container_url(account: str, container: str) -> str:
     return f"https://{account}.blob.core.windows.net/{container}"
-
-
-def blobfuse_mounts() -> dict:
-    """Discover live blobfuse2 mounts by reading each process's config file.
-
-    Returns ``{mount_dir: {url, account_name, container_name, config_file,
-    pid}}``. Used by ``usm cp``/``azsync`` to translate a local path back to
-    its blob URL, and by ``usm blobmount ls`` to show what is mounted.
-    """
-    try:
-        import psutil
-        import yaml
-    except ImportError:
-        return {}
-
-    mounts: dict = {}
-    for proc in psutil.process_iter(["cmdline", "pid"]):
-        try:
-            cmdline = proc.info["cmdline"]
-        except (psutil.NoSuchProcess, psutil.AccessDenied):
-            continue
-        if not cmdline or "blobfuse2" not in cmdline[0] or len(cmdline) < 3:
-            continue
-        if cmdline[1] != "mount":
-            continue
-        mount_dir = cmdline[2]
-        config_file = None
-        for i, token in enumerate(cmdline):
-            if token in ("--config-file", "-c") and i + 1 < len(cmdline):
-                config_file = cmdline[i + 1]
-            elif token.startswith("--config-file="):
-                config_file = token.split("=", 1)[1]
-        if not config_file:
-            continue
-        try:
-            with open(config_file) as fh:
-                config = yaml.safe_load(fh) or {}
-        except (OSError, yaml.YAMLError):
-            continue
-        storage = (config.get("azstorage") or {}) if isinstance(config, dict) else {}
-        account = storage.get("account-name")
-        container = storage.get("container")
-        if not account or not container:
-            continue
-        mounts[mount_dir] = {
-            "url": container_url(account, container) + "/",
-            "account_name": account,
-            "container_name": container,
-            "config_file": config_file,
-            "pid": proc.info.get("pid"),
-        }
-    return mounts
 
 
 def resolve_blob_path(value: str, mounts: dict | None = None) -> str | None:

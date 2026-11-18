@@ -216,10 +216,18 @@ class TestBlobfuseMounts:
             def __init__(self, info):
                 self.info = info
 
+            def environ(self):
+                if self.info.get("env_denied"):
+                    raise PermissionError("access denied")
+                return self.info.get("env", {})
+
+            def cwd(self):
+                return self.info["cwd"]
+
         fake = types.SimpleNamespace(
             process_iter=lambda _attrs: [Proc(p) for p in procs],
-            NoSuchProcess=Exception,
-            AccessDenied=Exception,
+            NoSuchProcess=ProcessLookupError,
+            AccessDenied=PermissionError,
         )
         import sys
 
@@ -267,6 +275,126 @@ class TestBlobfuseMounts:
             ],
         )
         assert "/mnt/x" in usm_azure.blobfuse_mounts()
+
+    @pytest.mark.parametrize(
+        "flags,env,container",
+        [
+            (["--container-name=bucket"], {}, "bucket"),
+            (["--container-name", "bucket"], {}, "bucket"),
+            ([], {"AZURE_STORAGE_ACCOUNT_CONTAINER": "bucket"}, "bucket"),
+            (
+                ["--container-name=bucket"],
+                {"AZURE_STORAGE_ACCOUNT_CONTAINER": "other"},
+                "bucket",
+            ),
+        ],
+    )
+    def test_environment_mounts_work_across_commands(
+        self, tmp_path, monkeypatch, flags, env, container
+    ):
+        import cp
+        import mv
+        import rm
+        from click.testing import CliRunner
+
+        mount = str(tmp_path / "fast_hangxing")
+        self._fake_psutil(
+            monkeypatch,
+            [
+                {
+                    "cmdline": ["blobfuse2", "mount", mount, *flags],
+                    "pid": 42,
+                    "env": {
+                        "AZURE_STORAGE_ACCOUNT": "acct",
+                        "AZURE_STORAGE_SAS_TOKEN": "sig=NOT_FOR_OUTPUT",
+                        **env,
+                    },
+                }
+            ],
+        )
+        url = f"https://acct.blob.core.windows.net/{container}/"
+        mounts = usm_azure.blobfuse_mounts()
+        assert mounts[mount]["url"] == url
+        assert cp.check_blobfuse2_mountpoints() == mounts
+        assert "NOT_FOR_OUTPUT" not in repr(mounts)
+        assert resolve_blob_path(mount + "/a b", mounts) == url + "a%20b"
+        runner = CliRunner()
+        for command, args in [
+            (cp.copy, ["--use-az", mount + "/a b", str(tmp_path / "out")]),
+            (rm.remove, [mount + "/a b"]),
+            (mv.move, [mount + "/a b", mount + "/destination"]),
+        ]:
+            result = runner.invoke(command, ["--dry-run", *args])
+            assert result.exit_code == 0, result.output
+            assert url + "a%20b" in result.output
+            assert "NOT_FOR_OUTPUT" not in result.output
+
+    def test_environment_overrides_config_and_preserves_endpoint(
+        self, tmp_path, monkeypatch
+    ):
+        config = tmp_path / "c.yaml"
+        config.write_text(
+            "azstorage:\n  account-name: old\n  container: old\n"
+            "  endpoint: https://old.blob.core.windows.net\n"
+        )
+        self._fake_psutil(
+            monkeypatch,
+            [
+                {
+                    "cmdline": ["blobfuse2", "mount", "/mnt/x", "-c", str(config)],
+                    "pid": 1,
+                    "env": {
+                        "AZURE_STORAGE_ACCOUNT": "acct",
+                        "AZURE_STORAGE_ACCOUNT_CONTAINER": "bucket",
+                        "AZURE_STORAGE_BLOB_ENDPOINT": "https://acct.blob.core.chinacloudapi.cn/?sig=PRIVATE",
+                    },
+                }
+            ],
+        )
+        mounts = usm_azure.blobfuse_mounts()
+        assert mounts["/mnt/x"]["url"] == (
+            "https://acct.blob.core.chinacloudapi.cn/bucket/"
+        )
+        assert "PRIVATE" not in repr(mounts)
+
+    def test_relative_config_and_unreadable_environment(self, tmp_path, monkeypatch):
+        config = tmp_path / "c.yaml"
+        config.write_text("azstorage:\n  account-name: acct\n  container: bucket\n")
+        self._fake_psutil(
+            monkeypatch,
+            [
+                {
+                    "cmdline": ["blobfuse2", "mount", "/mnt/x", "-c", "c.yaml"],
+                    "pid": 1,
+                    "cwd": str(tmp_path),
+                    "env_denied": True,
+                }
+            ],
+        )
+        assert usm_azure.blobfuse_mounts()["/mnt/x"]["url"] == (
+            "https://acct.blob.core.windows.net/bucket/"
+        )
+
+    def test_unreadable_environment_does_not_hide_other_mounts(self, monkeypatch):
+        self._fake_psutil(
+            monkeypatch,
+            [
+                {
+                    "cmdline": ["blobfuse2", "mount", "/mnt/denied"],
+                    "pid": 1,
+                    "env_denied": True,
+                },
+                {
+                    "cmdline": ["blobfuse2", "mount", "/mnt/visible"],
+                    "pid": 2,
+                    "env": {
+                        "AZURE_STORAGE_ACCOUNT": "acct",
+                        "AZURE_STORAGE_ACCOUNT_CONTAINER": "bucket",
+                    },
+                },
+            ],
+        )
+        assert set(usm_azure.blobfuse_mounts()) == {"/mnt/visible"}
 
     def test_ignores_non_mount_and_non_blobfuse_processes(self, monkeypatch):
         self._fake_psutil(
@@ -786,6 +914,9 @@ class TestErrorPaths:
                 "cmdline": ["blobfuse2", "mount", "/mnt/x", "-c", str(bad)],
                 "pid": 1,
             }
+
+            def environ(self):
+                return {}
 
         fake = types.SimpleNamespace(
             process_iter=lambda _a: [Proc()],

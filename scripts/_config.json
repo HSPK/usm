@@ -5,6 +5,7 @@
       "path": "azsync.py",
       "modules": [
         "usm_azure.py",
+        "usm_blobfuse.py",
         "usm_checkpoint.py",
         "usm_cli.py",
         "usm_daemon.py",
@@ -19,8 +20,8 @@
         "usmo>=0.12.0",
         "watchdog>=4.0.0"
       ],
-      "version": "1.0.13",
-      "hash": "sha256:bf95be879a5076ce201caaf1b53291bd82588b3234764f82f6cb616318509282"
+      "version": "1.0.14",
+      "hash": "sha256:c4be549b51e8411de21c3b206895425fec8b37906732d754ec9614e065d99d1d"
     },
     "bench": {
       "description": "Benchmark CPU / memory / disk / network / GPU.",
@@ -40,6 +41,7 @@
         "usm_cli.py",
         "usm_daemon.py",
         "usm_azure.py",
+        "usm_blobfuse.py",
         "usm_fic.py"
       ],
       "requirements": [
@@ -49,8 +51,8 @@
         "rich>=13.0",
         "usmo>=0.12.0"
       ],
-      "version": "1.1.4",
-      "hash": "sha256:7fb0275585dba477fb30b430c8c1502989bf72da93f1b9d2c4b8184c3bb5f95a"
+      "version": "1.1.5",
+      "hash": "sha256:9c7e0c4712bd0491457d0b068022a3a44be65aa6ba39bcbe469c40404a2a9f82"
     },
     "check_py": {
       "description": "Show active Python/pip versions.",
@@ -96,13 +98,16 @@
     "cp": {
       "description": "Copy files, with Azure blob support.",
       "path": "cp.py",
+      "modules": [
+        "usm_blobfuse.py"
+      ],
       "requirements": [
         "click>=8.2.1",
         "psutil>=7.1.3",
         "pyyaml>=6.0.3"
       ],
-      "version": "1.0.3",
-      "hash": "sha256:54411f466a7b9486b0aad2ec2263b681b45f583bd288e767eed9d09d49f7421a"
+      "version": "1.0.4",
+      "hash": "sha256:a674a84882ae352565316daa938df0a9564d1c31503bcba3cb87edae792e7366"
     },
     "cu122": {
       "description": "Install NVIDIA driver + CUDA 12.2.",
@@ -215,15 +220,16 @@
       "path": "mv.py",
       "modules": [
         "cp.py",
-        "rm.py"
+        "rm.py",
+        "usm_blobfuse.py"
       ],
       "requirements": [
         "click>=8.2.1",
         "psutil>=7.1.3",
         "pyyaml>=6.0.3"
       ],
-      "version": "1.0.0",
-      "hash": "sha256:2fca08e80d04f171fa54ecde411dda7230ff82f932e088aff19e476c2bfb4d85"
+      "version": "1.0.1",
+      "hash": "sha256:aac2855d153c90425af855cf044d143489b15bb1f7b033ed606f3727b4aa14af"
     },
     "net": {
       "description": "Inspect, diagnose, and monitor host networking.",
@@ -297,15 +303,16 @@
       "description": "Delete Azure Blob files/directories with confirmation.",
       "path": "rm.py",
       "modules": [
-        "cp.py"
+        "cp.py",
+        "usm_blobfuse.py"
       ],
       "requirements": [
         "click>=8.2.1",
         "psutil>=7.1.3",
         "pyyaml>=6.0.3"
       ],
-      "version": "1.0.1",
-      "hash": "sha256:a3355f3977afbff7fc4f2c59155837ddc8210a6dbc66d27d13a2b8d31658d078"
+      "version": "1.0.2",
+      "hash": "sha256:25afe8996366539b4d4c5020f1d5ac6de66ea3ad9a5f995eac4aeb74a0788c22"
     },
     "rsync": {
       "description": "rsync wrapper with sensible defaults + auto-excludes.",

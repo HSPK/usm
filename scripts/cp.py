@@ -13,7 +13,8 @@ import zipfile
 from pathlib import Path
 
 import click
-import yaml
+
+from usm_blobfuse import blobfuse_mounts
 
 USM_CACHE_DIR = Path.home() / ".cache" / "usm"
 LOCAL_BIN_DIR = USM_CACHE_DIR / "bin"
@@ -159,61 +160,8 @@ def _parse_blob_url(url: str) -> tuple[str, str]:
     return account, container
 
 
-def _config_file_from_cmdline(cmdline: list[str]) -> str | None:
-    """Pick the blobfuse2 --config-file value out of a cmdline, in either form."""
-    it = iter(enumerate(cmdline))
-    for i, tok in it:
-        if tok == "--config-file" and i + 1 < len(cmdline):
-            return cmdline[i + 1]
-        if tok.startswith("--config-file="):
-            return tok.split("=", 1)[1]
-        if tok in ("-c",) and i + 1 < len(cmdline):
-            return cmdline[i + 1]
-    return None
-
-
-def _mount_dir_from_cmdline(cmdline: list[str]) -> str | None:
-    """blobfuse2 `mount <DIR> [opts]` — DIR is the first positional after the subcommand."""
-    if len(cmdline) < 3:
-        return None
-    if cmdline[1] != "mount":
-        return None
-    return cmdline[2]
-
-
 def check_blobfuse2_mountpoints():
-    import psutil
-
-    mountpoints = {}
-    for proc in psutil.process_iter(["cmdline"]):
-        try:
-            cmdline = proc.info["cmdline"]
-        except (psutil.NoSuchProcess, psutil.AccessDenied):
-            continue
-        if not cmdline or "blobfuse2" not in cmdline[0]:
-            continue
-        try:
-            mount_dir = _mount_dir_from_cmdline(cmdline)
-            config_file = _config_file_from_cmdline(cmdline)
-            if not mount_dir or not config_file:
-                continue
-            with open(config_file) as f:
-                config = yaml.safe_load(f) or {}
-            azstorage = (
-                (config.get("azstorage") or {}) if isinstance(config, dict) else {}
-            )
-            account_name = azstorage.get("account-name")
-            container_name = azstorage.get("container")
-            if not account_name or not container_name:
-                continue
-            mountpoints[mount_dir] = {
-                "url": f"https://{account_name}.blob.core.windows.net/{container_name}/",
-                "account_name": account_name,
-                "container_name": container_name,
-            }
-        except (OSError, yaml.YAMLError, KeyError, IndexError):
-            continue
-    return mountpoints
+    return blobfuse_mounts()
 
 
 def generate_sas_token(account_name, container_name, expiry_days: int = 7):
